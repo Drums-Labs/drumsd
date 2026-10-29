@@ -530,8 +530,10 @@ impl Manager {
             }
             Err(f) => {
                 let outcome = if f.class == FailureClass::GateFailed {
-                    let g = f.gates.first_failure().map(|g| g.gate.as_str()).unwrap_or("?");
-                    Outcome::GateFailed { gate: g.into(), detail: f.error.chars().take(300).collect() }
+                    let ff = f.gates.first_failure();
+                    let g = ff.map(|g| g.gate.as_str()).unwrap_or("?");
+                    let detail = ff.map(|g| g.detail.to_string()).unwrap_or_else(|| f.error.clone());
+                    Outcome::GateFailed { gate: g.into(), detail: detail.chars().take(300).collect() }
                 } else {
                     Outcome::Failed { error: f.error.chars().take(300).collect() }
                 };
