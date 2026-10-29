@@ -64,6 +64,16 @@ pub struct Config {
     /// Warm spare upper/work dirs (false = copy upper.snap on the critical path, for A/B measurement).
     #[serde(default = "yes")]
     pub warm_upper: bool,
+    /// Two leaf cgroups per slot: a reset kills the old tree without waiting and restores into the other leaf.
+    #[serde(default = "yes")]
+    pub async_kill: bool,
+    /// Labelled variant: `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore.
+    #[serde(default)]
+    pub netns_fast: bool,
+    /// Labelled variant: lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the
+    /// pre-resume action, before any restored task runs. The cgroup gate proves the limits afterwards.
+    #[serde(default)]
+    pub restore_cpu_boost: bool,
 }
 
 fn yes() -> bool {

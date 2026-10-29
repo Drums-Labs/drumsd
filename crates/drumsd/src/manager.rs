@@ -53,6 +53,9 @@ pub struct SlotRecord {
     pub init_pid: Option<i32>,
     pub init_start_ticks: Option<String>,
     pub restore_generation: u64,
+    /// Leaf cgroup (1 or 2) that holds the running tree; 0 = the slot cgroup itself.
+    #[serde(default)]
+    pub leaf: u8,
     pub mode: String,
     pub port: u16,
     pub extra_ports: Vec<(u16, u16)>,
@@ -122,6 +125,8 @@ struct RestoreFailure {
 }
 
 struct RestoreOk {
+    leaf: u8,
+    old_cg: Option<PathBuf>,
     pid: i32,
     start_ticks: String,
     gates: GateReport,
@@ -351,6 +356,7 @@ impl Manager {
             init_pid: None,
             init_start_ticks: None,
             restore_generation: 0,
+            leaf: 0,
             mode: "template".into(),
             port: self.cfg.port_base + num as u16,
             extra_ports: self.cfg.extra_ports.iter().map(|(b, g)| (b + num as u16, *g)).collect(),
@@ -508,6 +514,7 @@ impl Manager {
                     r.state = SlotState::finish(op, &Outcome::Ok);
                     r.episode += 1;
                     r.init_pid = Some(ok.pid);
+                    r.leaf = ok.leaf;
                     r.init_start_ticks = Some(ok.start_ticks.clone());
                     r.gates = ok.gates.clone();
                     r.validity = validity;
@@ -518,7 +525,7 @@ impl Manager {
                     r.mode = if private { "private".into() } else { "template".into() };
                 });
                 self.metrics.inc("drumsd_ops_total", &[("op", op.as_str()), ("outcome", "ok")], 1.0);
-                self.spawn_after_ready(slot.clone(), r.episode, ok.hook_dir, ok.ready_at);
+                self.spawn_after_ready(slot.clone(), r.episode, ok.hook_dir, ok.ready_at, ok.old_cg);
                 r
             }
             Err(f) => {
@@ -566,17 +573,29 @@ impl Manager {
         let c = self.ckpt(&ckpt_id).map_err(|e| fail(FailureClass::Infra, e.message, &gates, &t))?;
         let sp = slotfs::paths(&self.cfg.state_dir, num);
         let marker = slotfs::marker_for(&self.cfg.state_dir, num);
-        let cg = cgroup::slot_cg(&marker);
-        let cg_rel = format!("/{}", cg.strip_prefix(cgroup::CG_ROOT).unwrap().display());
+        let slot_cg = cgroup::slot_cg(&marker);
         let t_all = Instant::now();
+        let cur_leaf = slot.view.read().unwrap().leaf;
 
-        // 1. stop forwarding and kill the old tree (cgroup.kill, wait for populated 0)
+        // 1. stop forwarding and kill the old tree. async_kill: SIGKILL the old leaf (cgroup.kill) and restore into
+        //    the other leaf at once; the old one drains in the background. Otherwise wait for populated 0.
         for tg in &slot.targets {
             tg.clear();
         }
         let ts = Instant::now();
-        cgroup::ensure_slot_cg(&marker, &self.limits).map_err(|e| fail(FailureClass::Infra, format!("slot cgroup: {e}"), &gates, &t))?;
-        cgroup::kill_and_wait(&cg, Duration::from_secs(20)).map_err(|e| fail(FailureClass::Infra, e.to_string(), &gates, &t))?;
+        let (cg, new_leaf, old_cg) = if self.cfg.async_kill {
+            let (_, l1, l2) = cgroup::ensure_slot_leaves(&marker, &self.limits).map_err(|e| fail(FailureClass::Infra, format!("slot cgroups: {e}"), &gates, &t))?;
+            let (old, new, nl) = if cur_leaf == 1 { (l1, l2, 2u8) } else { (l2, l1, 1u8) };
+            cgroup::kill_nowait(&old).map_err(|e| fail(FailureClass::Infra, e.to_string(), &gates, &t))?;
+            let w = cgroup::wait_empty(&new, Duration::from_secs(20)).map_err(|e| fail(FailureClass::Infra, e.to_string(), &gates, &t))?;
+            t.insert("wait_target_leaf".into(), round3(w));
+            (new, nl, Some(old))
+        } else {
+            cgroup::ensure_slot_cg(&marker, &self.limits).map_err(|e| fail(FailureClass::Infra, format!("slot cgroup: {e}"), &gates, &t))?;
+            cgroup::kill_and_wait(&slot_cg, Duration::from_secs(20)).map_err(|e| fail(FailureClass::Infra, e.to_string(), &gates, &t))?;
+            (slot_cg.clone(), 0u8, None)
+        };
+        let cg_rel = format!("/{}", cg.strip_prefix(cgroup::CG_ROOT).unwrap().display());
         t.insert("kill".into(), round3(ts.elapsed().as_secs_f64()));
 
         // 2. fresh upper/work (warm spare when ready)
@@ -593,6 +612,16 @@ impl Manager {
         let hook_dir = sp.dir.join(format!("lock-hook-{gen}"));
         let _ = std::fs::remove_dir_all(&hook_dir);
         let hook = hook::write_script(&hook_dir, &self.exe).map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
+        if self.cfg.netns_fast {
+            std::fs::write(hook_dir.join("netns-lo-up"), b"").map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
+        }
+        if self.cfg.restore_cpu_boost {
+            let rec = json!({"paths": [cg, slot_cg], "cpu_max": self.limits.cpu_max});
+            std::fs::write(hook_dir.join("cpu-restore.json"), serde_json::to_vec(&rec).unwrap()).map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
+            for d in [&slot_cg, &cg] {
+                cgroup::set_cpu_max(d, "max 100000").map_err(|e| fail(FailureClass::Infra, format!("boost: {e}"), &gates, &t))?;
+            }
+        }
         let pidfile = sp.dir.join("restored.pid");
         let _ = std::fs::remove_file(&pidfile);
         let stamp = (drumsd_linux::now_epoch() * 1000.0) as u64;
@@ -619,18 +648,40 @@ impl Manager {
             socket,
             criu_bin: self.cfg.criu.clone(),
             out: sp.dir.join(format!("restore-drumsd-{gen}-{stamp}.out")),
+            empty_net: self.cfg.netns_fast,
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
 
         // 4. CRIU restore (template server fork, or private)
         let ts = Instant::now();
+        let spawn_epoch = drumsd_linux::now_epoch();
         let run = restore::run(&self.exe, &spec, Duration::from_secs(300)).map_err(|e| fail(FailureClass::Infra, format!("restore client: {e}"), &gates, &t))?;
         t.insert("restore".into(), round3(ts.elapsed().as_secs_f64()));
-        let log_text = String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()).into_owned();
+        // client stamps (relative to the spawn): start, mounted, sent, result
+        for l in run.out_tail.lines() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() == 3 && f[0] == "drumsd-client" {
+                if let Ok(e) = f[2].parse::<f64>() {
+                    t.insert(format!("client_{}", f[1]), round3(e - spawn_epoch));
+                }
+            }
+        }
+        let log_text = match String::from_utf8(std::fs::read(&log).unwrap_or_default()) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        };
         if let Some(cc) = restore::criu_clock(&log_text) {
             t.insert("criu_clock".into(), cc);
         }
         let pid = std::fs::read_to_string(&pidfile).ok().and_then(|s| s.trim().parse::<i32>().ok());
+        if self.cfg.restore_cpu_boost {
+            t.insert("boost_restored_by_hook".into(), if hook_dir.join("cpu-restore.done").exists() { 1.0 } else { 0.0 });
+            for d in [&cg, &slot_cg] {
+                if cgroup::read_limits(d).map(|l| l.cpu_max != self.limits.cpu_max).unwrap_or(true) {
+                    let _ = cgroup::set_cpu_max(d, &self.limits.cpu_max);
+                }
+            }
+        }
         if !run.ok || pid.is_none() {
             let tail = restore::log_tail(&log, 3000);
             let error = format!("criu restore failed (exit {:?}): {} | log: {}", run.exit, run.out_tail.trim(), tail.lines().rev().take(6).collect::<Vec<_>>().join(" / "));
@@ -649,7 +700,7 @@ impl Manager {
         let (la, lp, ident, cgg, mnt, netg) = std::thread::scope(|s| {
             let l = s.spawn(|| checks::lock_gates(&sp.dir, &sp.images, &hook_dir, &log_text));
             let i = s.spawn(|| checks::init_identity(pid, &argv_marker, &cg_rel));
-            let g = s.spawn(|| checks::cgroup_gate(pid, &cg, &self.limits));
+            let g = s.spawn(|| checks::cgroup_gate(pid, &cg, &slot_cg, &self.limits));
             let m = s.spawn(|| checks::mount_gate(pid, &sp.dir));
             let n = s.spawn(|| checks::netns_gate(pid, &sp.dir));
             let (la, lp) = l.join().unwrap();
@@ -751,11 +802,11 @@ impl Manager {
                    "last_restore": {"by": "drumsd", "log": log.file_name().map(|x| x.to_string_lossy().to_string()), "epoch": drumsd_linux::now_epoch()}}),
         );
         t.insert("sync_total".into(), round3(t_all.elapsed().as_secs_f64()));
-        Ok(RestoreOk { pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm })
+        Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm })
     }
 
     /// After a restore: the alive gate at ready + alive_after_s, the next warm spare, trash removal.
-    fn spawn_after_ready(self: &Arc<Self>, slot: Arc<Slot>, episode: u64, hook_dir: PathBuf, ready_at: Instant) {
+    fn spawn_after_ready(self: &Arc<Self>, slot: Arc<Slot>, episode: u64, hook_dir: PathBuf, ready_at: Instant, old_cg: Option<PathBuf>) {
         let me = self.clone();
         let warm = self.cfg.warm_upper;
         tokio::spawn(async move {
@@ -763,6 +814,10 @@ impl Manager {
             let sp = slotfs::paths(&me.cfg.state_dir, slot.view.read().unwrap().num);
             let sp2 = sp.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                // the killed leaf drains while the new episode runs, so the next reset finds it empty
+                if let Some(old) = old_cg {
+                    let _ = cgroup::wait_empty(&old, Duration::from_secs(30));
+                }
                 let _ = slotfs::empty_trash(&sp2);
                 if warm {
                     let _ = slotfs::prepare_spare(&sp2);
@@ -950,11 +1005,11 @@ impl Manager {
         let st = slot.view.read().unwrap().state.begin(Op::Release).map_err(|e| ApiError::new(409, e.to_string()))?;
         // a released slot never keeps the tree that was quarantined
         let num = slot.view.read().unwrap().num;
-        let cg = cgroup::slot_cg(&slotfs::marker_for(&self.cfg.state_dir, num));
+        let marker = slotfs::marker_for(&self.cfg.state_dir, num);
         for tg in &slot.targets {
             tg.clear();
         }
-        tokio::task::spawn_blocking(move || cgroup::kill_and_wait(&cg, Duration::from_secs(20))).await.map_err(e500)?.map_err(e500)?;
+        tokio::task::spawn_blocking(move || kill_slot(&marker)).await.map_err(e500)?.map_err(e500)?;
         Ok(self.put_slot(&slot, |r| {
             r.state = st;
             r.init_pid = None;
@@ -977,9 +1032,11 @@ impl Manager {
         let me = self.clone();
         let res = tokio::task::spawn_blocking(move || {
             let marker = slotfs::marker_for(&me.cfg.state_dir, num);
-            let cg = cgroup::slot_cg(&marker);
-            cgroup::kill_and_wait(&cg, Duration::from_secs(20))?;
-            let _ = std::fs::remove_dir(&cg);
+            kill_slot(&marker)?;
+            for l in [1, 2] {
+                let _ = std::fs::remove_dir(cgroup::slot_leaf(&marker, l));
+            }
+            let _ = std::fs::remove_dir(cgroup::slot_cg(&marker));
             let sp = slotfs::paths(&me.cfg.state_dir, num);
             for d in ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root"] {
                 let p = sp.dir.join(d);
@@ -1039,14 +1096,13 @@ impl Manager {
             let num = rec.num;
             let alive = rec.init_pid.map(|p| {
                 procfs::start_ticks(p) == rec.init_start_ticks
-                    && procfs::cgroup_path(p).map(|c| c.ends_with(&format!("drumsbench-{}-pool.scope", slotfs::marker_for(&self.cfg.state_dir, num)))).unwrap_or(false)
+                    && procfs::cgroup_path(p).map(|c| c.contains(&format!("/drumsbench-{}-pool.scope", slotfs::marker_for(&self.cfg.state_dir, num)))).unwrap_or(false)
             });
             let alive = alive.unwrap_or(false);
             let mut rec2 = rec.clone();
             let action;
             if rec.state.is_transient() {
-                let cg = cgroup::slot_cg(&slotfs::marker_for(&self.cfg.state_dir, num));
-                let _ = cgroup::kill_and_wait(&cg, Duration::from_secs(20));
+                let _ = kill_slot(&slotfs::marker_for(&self.cfg.state_dir, num));
                 rec2.state = if matches!(rec.state, SlotState::Capturing) {
                     SlotState::Quarantined { reason: "daemon restarted during capture".into() }
                 } else {
@@ -1085,6 +1141,14 @@ impl Manager {
         self.refresh_slot_gauges();
         Ok(json!(report))
     }
+}
+
+/// Kill every process of a slot: both leaves and the slot cgroup itself.
+pub fn kill_slot(marker: &str) -> std::io::Result<()> {
+    for l in [1, 2] {
+        cgroup::kill_and_wait(&cgroup::slot_leaf(marker, l), Duration::from_secs(20))?;
+    }
+    cgroup::kill_and_wait(&cgroup::slot_cg(marker), Duration::from_secs(20)).map(|_| ())
 }
 
 pub fn status_str(s: &GateStatus) -> &'static str {
