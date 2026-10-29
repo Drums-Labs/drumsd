@@ -20,6 +20,12 @@ pub fn template_cg() -> PathBuf {
 pub fn slot_cg(marker: &str) -> PathBuf {
     pool().join(format!("drumsbench-{marker}-pool.scope"))
 }
+/// The two reusable leaves of a slot cgroup. A reset kills the tree in one leaf and restores into the other at
+/// once; the killed leaf drains in the background and is reused at the reset after. The names match the Python
+/// runtime's scope pattern (`drumsbench-<marker>-r<N>.scope`), so its tools still recognise the tree.
+pub fn slot_leaf(marker: &str, leaf: u8) -> PathBuf {
+    slot_cg(marker).join(format!("drumsbench-{marker}-r{leaf}.scope"))
+}
 
 fn read(p: &Path) -> io::Result<String> {
     Ok(fs::read_to_string(p)?.trim().to_string())
@@ -74,21 +80,75 @@ pub fn read_limits(d: &Path) -> io::Result<Limits> {
     Ok(Limits { cpu_max: read(&d.join("cpu.max"))?, memory_max: read(&d.join("memory.max"))?, swap_max: read(&d.join("memory.swap.max"))? })
 }
 
+fn set_limits(d: &Path, want: &Limits) -> io::Result<()> {
+    write(&d.join("cpu.max"), &want.cpu_max)?;
+    write(&d.join("memory.max"), &want.memory_max)?;
+    write(&d.join("memory.swap.max"), &want.swap_max)?;
+    write(&d.join("pids.max"), "8192")
+}
+
 /// Create the slot cgroup once with the limits; on reuse, prove the limits are unchanged.
 pub fn ensure_slot_cg(marker: &str, want: &Limits) -> io::Result<PathBuf> {
     let d = slot_cg(marker);
     if !d.is_dir() {
         fs::create_dir(&d)?;
-        write(&d.join("cpu.max"), &want.cpu_max)?;
-        write(&d.join("memory.max"), &want.memory_max)?;
-        write(&d.join("memory.swap.max"), &want.swap_max)?;
-        write(&d.join("pids.max"), "8192")?;
+        set_limits(&d, want)?;
     }
-    let got = read_limits(&d)?;
-    if &got != want {
-        return Err(io::Error::other(format!("slot cgroup {} limits {:?} differ from the configured {:?}", d.display(), got, want)));
+    if read_limits(&d)? != *want {
+        set_limits(&d, want)?;
     }
     Ok(d)
+}
+
+/// The slot cgroup (limits for the whole slot, both leaves together) with its two leaves (the same limits again, so
+/// the restored tree's own cgroup reads back the configured values). Created once; a slot cgroup that still holds
+/// processes directly (the single-cgroup layout) is emptied first.
+pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, PathBuf, PathBuf)> {
+    let d = ensure_slot_cg(marker, want)?;
+    let (a, b) = (slot_leaf(marker, 1), slot_leaf(marker, 2));
+    if !(a.is_dir() && b.is_dir()) {
+        if !procs(&d)?.is_empty() {
+            kill_and_wait(&d, Duration::from_secs(20))?;
+        }
+        let sc = read(&d.join("cgroup.subtree_control"))?;
+        if !(sc.contains("cpu") && sc.contains("memory") && sc.contains("pids")) {
+            write(&d.join("cgroup.subtree_control"), "+cpu +memory +pids")?;
+        }
+        for l in [&a, &b] {
+            if !l.is_dir() {
+                fs::create_dir(l)?;
+            }
+            set_limits(l, want)?;
+        }
+    }
+    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back
+    for l in [&d, &a, &b] {
+        if read_limits(l)? != *want {
+            set_limits(l, want)?;
+        }
+    }
+    Ok((d, a, b))
+}
+
+/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting.
+pub fn kill_nowait(d: &Path) -> io::Result<bool> {
+    if d.is_dir() && populated(d)? {
+        write(&d.join("cgroup.kill"), "1")?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Wait until the cgroup is empty (it was killed earlier); kill again if something is still there at the end.
+pub fn wait_empty(d: &Path, timeout: Duration) -> io::Result<f64> {
+    let t0 = Instant::now();
+    while d.is_dir() && populated(d)? {
+        if t0.elapsed() > timeout {
+            return kill_and_wait(d, Duration::from_secs(5)).map(|r| r.seconds + t0.elapsed().as_secs_f64());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    Ok(t0.elapsed().as_secs_f64())
 }
 
 pub fn procs(d: &Path) -> io::Result<Vec<i32>> {
@@ -126,6 +186,10 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
         std::thread::sleep(Duration::from_millis(2));
     }
     Ok(KillReport { had_procs: had, killed, seconds: t0.elapsed().as_secs_f64() })
+}
+
+pub fn set_cpu_max(d: &Path, v: &str) -> io::Result<()> {
+    write(&d.join("cpu.max"), v)
 }
 
 pub fn join(d: &Path, pid: i32) -> io::Result<()> {

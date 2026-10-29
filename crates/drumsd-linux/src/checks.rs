@@ -82,10 +82,13 @@ pub fn init_identity(pid: i32, argv_marker: &str, slot_cg_rel: &str) -> GateResu
 
 /// `launch.verify_cgroup`: the tree's cgroup is the slot's, the limits are the configured ones, every process of the
 /// pid namespace is in it.
-pub fn cgroup_gate(pid: i32, slot_cg: &Path, want: &cgroup::Limits) -> GateResult {
+pub fn cgroup_gate(pid: i32, tree_cg: &Path, limits_cg: &Path, want: &cgroup::Limits) -> GateResult {
     let t0 = Instant::now();
-    let rel = slot_cg.strip_prefix(cgroup::CG_ROOT).map(|p| format!("/{}", p.display())).unwrap_or_default();
-    let got = cgroup::read_limits(slot_cg);
+    let rel = tree_cg.strip_prefix(cgroup::CG_ROOT).map(|p| format!("/{}", p.display())).unwrap_or_default();
+    let got = cgroup::read_limits(tree_cg).and_then(|leaf| if limits_cg == tree_cg { Ok(leaf) } else {
+        let slot = cgroup::read_limits(limits_cg)?;
+        if slot == leaf { Ok(leaf) } else { Err(std::io::Error::other(format!("slot cgroup limits {slot:?} != tree cgroup limits {leaf:?}"))) }
+    });
     let members = procfs::ns_procs(pid);
     let ns = procfs::ns_inode(pid, "pid");
     let mut stray = vec![];
@@ -96,7 +99,7 @@ pub fn cgroup_gate(pid: i32, slot_cg: &Path, want: &cgroup::Limits) -> GateResul
     }
     let init_cg = procfs::cgroup_path(pid);
     let ok = got.as_ref().map(|g| g == want).unwrap_or(false) && init_cg.as_deref() == Some(rel.as_str()) && stray.is_empty();
-    let d = json!({"cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().ok(), "want": want, "members": members.len(), "outside_cgroup": stray});
+    let d = json!({"cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().map_err(|e| e.to_string()), "want": want, "members": members.len(), "outside_cgroup": stray});
     if ok {
         GateResult::pass(Gate::Cgroup, secs(t0), d)
     } else {
