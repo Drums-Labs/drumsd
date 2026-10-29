@@ -30,22 +30,98 @@ pub fn write_script(dir: &Path, exe: &Path) -> io::Result<PathBuf> {
     Ok(p)
 }
 
+/// One line per invocation in `<dir>/hook-times.jsonl`: action, start and end (epoch seconds), so the restore
+/// log's gaps can be split into hook time and CRIU's own time.
+fn note(dir: &str, action: &str, start: f64) {
+    use std::io::Write;
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(Path::new(dir).join("hook-times.jsonl")) {
+        let _ = writeln!(f, "{}", json!({"action": action, "start": start, "end": crate::now_epoch(), "pid": std::process::id()}));
+    }
+}
+
 pub fn hook_main(dir: &str) -> i32 {
+    let start = crate::now_epoch();
     let action = std::env::var("CRTOOLS_SCRIPT_ACTION").unwrap_or_default();
+    if action == "setup-namespaces" && Path::new(dir).join("netns-lo-up").exists() {
+        let rc = match lo_up(&std::env::var("CRTOOLS_INIT_PID").unwrap_or_default()) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("drumsd hook: lo up: {e}");
+                let _ = fs::write(Path::new(dir).join("netns-lo-up.error"), e.to_string());
+                1
+            }
+        };
+        note(dir, &action, start);
+        return rc;
+    }
     if action != "pre-resume" {
+        note(dir, &action, start);
         return 0;
     }
+    // restore boost: put the slot's CPU limit back before any restored task runs (all are still stopped here)
+    let boost = Path::new(dir).join("cpu-restore.json");
+    if let Ok(b) = fs::read(&boost) {
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap_or_default();
+        let want = v["cpu_max"].as_str().unwrap_or("");
+        let mut errs = vec![];
+        for p in v["paths"].as_array().cloned().unwrap_or_default() {
+            if let Some(p) = p.as_str() {
+                if let Err(e) = fs::write(Path::new(p).join("cpu.max"), want) {
+                    errs.push(format!("{p}: {e}"));
+                }
+            }
+        }
+        let _ = fs::write(Path::new(dir).join("cpu-restore.done"), serde_json::to_vec(&json!({"at": crate::now_epoch(), "errors": errs})).unwrap_or_default());
+    }
+    let rc = pre_resume(dir);
+    note(dir, &action, start);
+    rc
+}
+
+/// Bring `lo` up inside the restored init's (empty) network namespace: the kernel then adds 127.0.0.1/8 and ::1
+/// itself. Used only with `--empty-ns net`; the netns gate still compares links, addresses and routes to the dump.
+fn lo_up(init: &str) -> Result<(), String> {
+    let pid: i32 = init.parse().map_err(|e| format!("CRTOOLS_INIT_PID {init:?}: {e}"))?;
+    let ns = fs::File::open(format!("/proc/{pid}/ns/net")).map_err(|e| e.to_string())?;
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+        return Err(format!("setns: {}", io::Error::last_os_error()));
+    }
+    let sk = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if sk < 0 {
+        return Err(format!("socket: {}", io::Error::last_os_error()));
+    }
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (i, b) in b"lo".iter().enumerate() {
+        ifr.ifr_name[i] = *b as libc::c_char;
+    }
+    let r = unsafe { libc::ioctl(sk, libc::SIOCGIFFLAGS, &mut ifr) };
+    if r < 0 {
+        return Err(format!("SIOCGIFFLAGS: {}", io::Error::last_os_error()));
+    }
+    unsafe { ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short };
+    let r = unsafe { libc::ioctl(sk, libc::SIOCSIFFLAGS, &ifr) };
+    unsafe { libc::close(sk) };
+    if r < 0 {
+        return Err(format!("SIOCSIFFLAGS: {}", io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn pre_resume(dir: &str) -> i32 {
+    let action = "pre-resume";
     let root = std::env::var("CRTOOLS_INIT_PID").unwrap_or_default();
-    let mut rec = json!({"action": action, "epoch": crate::now_epoch(), "init_pid": root, "writer": "drumsd"});
+    let mut rec = json!({"action": action, "census_start": crate::now_epoch(), "epoch": crate::now_epoch(), "init_pid": root, "writer": "drumsd"});
     let res: Result<(), String> = (|| {
         let pid: i64 = root.parse().map_err(|e| format!("CRTOOLS_INIT_PID {root:?}: {e}"))?;
         let p = RealProc;
-        let by_ns = locks::pid_ns_members(&p, pid);
+        // one pass over /proc gives both the pid-namespace members and the alive gate's reference set
+        let (by_ns, procs) = procfs::ns_members_and_procs(pid as i32);
         let by_children = locks::children_walk(&p, pid);
         let mut tree: Vec<i64> = by_ns.iter().chain(by_children.iter()).copied().chain(std::iter::once(pid)).collect();
         tree.sort();
         tree.dedup();
-        let census = locks::census(&p, &tree)?;
+        let census = locks::census_parallel(&p, &tree, 4)?;
         let shape: Vec<_> = locks::shape_of_census(&census).into_iter().map(|(a, b, c, d)| json!([a, b, c, d])).collect();
         rec["tree_pids"] = json!(tree);
         rec["by_pid_ns"] = json!(by_ns);
@@ -53,7 +129,6 @@ pub fn hook_main(dir: &str) -> i32 {
         rec["locks"] = json!(census);
         rec["tuples"] = json!(locks::census_tuples(&census));
         rec["shape"] = json!(shape);
-        let procs = procfs::ns_procs(pid as i32);
         fs::write(Path::new(dir).join("procs-pre-resume.json"), serde_json::to_vec(&json!({"init_pid": pid, "procs": procs})).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         Ok(())
