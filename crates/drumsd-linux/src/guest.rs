@@ -61,8 +61,9 @@ impl Guest {
             req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", payload.len()));
         }
         req.push_str("\r\n");
-        s.write_all(req.as_bytes())?;
-        s.write_all(&payload)?;
+        let mut buf = req.into_bytes();
+        buf.extend_from_slice(&payload);
+        s.write_all(&buf)?;
         let mut raw = vec![];
         s.read_to_end(&mut raw)?;
         parse_response(&raw)
@@ -110,8 +111,23 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut c, _) = l.accept().unwrap();
+            // read the whole request (headers + Content-Length body) so closing never resets the connection
+            let mut got = vec![];
             let mut buf = [0u8; 4096];
-            let _ = c.read(&mut buf);
+            loop {
+                let n = c.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                if let Some(he) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&got[..he]).to_ascii_lowercase();
+                    let cl = head.lines().find_map(|l| l.strip_prefix("content-length:")).map(|v| v.trim().parse::<usize>().unwrap()).unwrap_or(0);
+                    if got.len() >= he + 4 + cl {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
             c.write_all(reply).unwrap();
         });
         port
