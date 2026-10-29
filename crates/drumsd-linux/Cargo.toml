@@ -1,7 +1,20 @@
 [package]
 name = "drumsd-linux"
+description = "Linux mechanics of drumsd: procfs, cgroups, overlay scaffolding, CRIU restore client and hook, gates, netns forwarder, template servers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+drumsd-core = { path = "../drumsd-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
