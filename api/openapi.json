@@ -1,0 +1,1332 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "drumsd",
+  "version": "0.1.0",
+  "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`."
+ },
+ "paths": {
+  "/healthz": {
+   "get": {
+    "summary": "Liveness",
+    "description": "Daemon up; counts.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/metrics": {
+   "get": {
+    "summary": "Prometheus metrics",
+    "description": "text/plain; version=0.0.4",
+    "responses": {
+     "200": {
+      "description": "metrics",
+      "content": {
+       "text/plain": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/openapi.json": {
+   "get": {
+    "summary": "This document",
+    "responses": {
+     "200": {
+      "description": "spec"
+     }
+    }
+   }
+  },
+  "/v1/checkpoints": {
+   "get": {
+    "summary": "List checkpoints",
+    "description": "Every adopted or captured checkpoint with its template server.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "$ref": "#/components/schemas/Checkpoint"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "Adopt a checkpoint",
+    "description": "Adopt a checkpoint slot directory made by the existing desktop setup (`candidate snapshot` or `capture`) and start (or adopt) its template server. Without `expected_state_hash` the origin slot's running desktop is hashed, else the first child defines it (recorded in `hash_reference`).",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Checkpoint"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/AdoptRequest"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/checkpoints/{id}": {
+   "get": {
+    "summary": "Get a checkpoint",
+    "description": "",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Checkpoint"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/v1/slots": {
+   "get": {
+    "summary": "List slots",
+    "description": "",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "$ref": "#/components/schemas/Slot"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "Create a slot",
+    "description": "Branch a new slot from a checkpoint (hard-linked images, template-server restore) and run every synchronous gate. The alive gate resolves `alive_after_s` after the slot answered.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CreateRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created (check `state` and `validity`: a failed restore returns a slot in `down` or `quarantined`)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Slot"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/slots/{id}": {
+   "get": {
+    "summary": "Get a slot",
+    "description": "",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Slot"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   },
+   "delete": {
+    "summary": "Destroy a slot",
+    "description": "Kill its tree, remove its bulky state, keep its records and logs (moved to state/forgotten/).",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Slot"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/reset": {
+   "post": {
+    "summary": "Reset",
+    "description": "Start a new episode: kill the tree (cgroup.kill), swap in a fresh upper layer (warm spare), restore from the slot's checkpoint, run every gate. Allowed from `ready` and `down`. A failure before any task ran is retried per the recovery policy; every attempt and its cost is in `cost.attempts`.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Slot"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/step": {
+   "post": {
+    "summary": "Step",
+    "description": "Run one action in the slot's desktop through its guest server. Returns the action result, optionally a screenshot, and the current episode's validity.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/StepResult"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "502": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/StepRequest"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/screenshot": {
+   "get": {
+    "summary": "Screenshot",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "PNG",
+      "content": {
+       "image/png": {}
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "502": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/slots/{id}/gates": {
+   "get": {
+    "summary": "Gates of the current episode",
+    "description": "",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/GateView"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/capture": {
+   "post": {
+    "summary": "Capture (save)",
+    "description": "Checkpoint the running slot (`capture --leave-running`: the tree is frozen for the dump, the upper layer is copied at CRIU's post-dump action, the tree continues) and adopt it as a new checkpoint with its own template server.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Checkpoint"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/branch": {
+   "post": {
+    "summary": "Branch",
+    "description": "Capture the slot's current state, then create `n` children from it concurrently. The parent keeps running its episode.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BranchResult"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/BranchRequest"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/quarantine": {
+   "post": {
+    "summary": "Quarantine",
+    "description": "Stop using the slot until it is released or destroyed.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Slot"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "reason": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/release": {
+   "post": {
+    "summary": "Release from quarantine",
+    "description": "Kills the quarantined tree; the slot goes to `down` and the next reset restores it.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Slot"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "error"
+    ]
+   },
+   "AdoptRequest": {
+    "type": "object",
+    "required": [
+     "id",
+     "slot"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "slot": {
+      "type": "integer",
+      "description": "slot number whose directory holds images + upper.snap + records"
+     },
+     "expected_state_hash": {
+      "type": "string"
+     }
+    }
+   },
+   "CreateRequest": {
+    "type": "object",
+    "required": [
+     "checkpoint"
+    ],
+    "properties": {
+     "checkpoint": {
+      "type": "string"
+     },
+     "task": {
+      "$ref": "#/components/schemas/Task"
+     }
+    }
+   },
+   "Task": {
+    "type": "object",
+    "description": "Optional task: setup actions run after every restore, after the state-hash gate.",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "setup": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Action"
+      }
+     }
+    }
+   },
+   "Action": {
+    "type": "object",
+    "description": "One desktop action.",
+    "oneOf": [
+     {
+      "type": "object",
+      "required": [
+       "type",
+       "command"
+      ],
+      "properties": {
+       "type": {
+        "const": "execute"
+       },
+       "command": {
+        "description": "argv list or shell string"
+       },
+       "shell": {
+        "type": "boolean"
+       }
+      }
+     },
+     {
+      "type": "object",
+      "required": [
+       "type",
+       "code"
+      ],
+      "properties": {
+       "type": {
+        "const": "pyautogui"
+       },
+       "code": {
+        "type": "string",
+        "description": "python statements; `pyautogui` is imported"
+       }
+      }
+     },
+     {
+      "type": "object",
+      "required": [
+       "type",
+       "seconds"
+      ],
+      "properties": {
+       "type": {
+        "const": "sleep"
+       },
+       "seconds": {
+        "type": "number",
+        "maximum": 60
+       }
+      }
+     }
+    ]
+   },
+   "StepRequest": {
+    "type": "object",
+    "required": [
+     "action"
+    ],
+    "properties": {
+     "action": {
+      "$ref": "#/components/schemas/Action"
+     },
+     "screenshot": {
+      "type": "boolean",
+      "default": false
+     }
+    }
+   },
+   "StepResult": {
+    "type": "object",
+    "properties": {
+     "result": {
+      "type": "object",
+      "description": "guest server /execute reply"
+     },
+     "screenshot_png_b64": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "episode": {
+      "type": "integer"
+     },
+     "validity": {
+      "$ref": "#/components/schemas/Validity"
+     },
+     "seconds": {
+      "type": "number"
+     }
+    }
+   },
+   "BranchRequest": {
+    "type": "object",
+    "required": [
+     "n"
+    ],
+    "properties": {
+     "n": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+     }
+    }
+   },
+   "BranchResult": {
+    "type": "object",
+    "properties": {
+     "checkpoint": {
+      "$ref": "#/components/schemas/Checkpoint"
+     },
+     "children": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Slot"
+      }
+     },
+     "capture_s": {
+      "type": "number"
+     },
+     "children_ready_s": {
+      "type": "number"
+     }
+    }
+   },
+   "Gate": {
+    "type": "string",
+    "enum": [
+     "lock_applied",
+     "lock_pre_resume",
+     "cgroup",
+     "init_identity",
+     "mount_table",
+     "netns",
+     "guest_ready",
+     "state_hash",
+     "isolation",
+     "alive_after_resume"
+    ]
+   },
+   "GateResult": {
+    "type": "object",
+    "required": [
+     "gate",
+     "status",
+     "seconds",
+     "detail"
+    ],
+    "properties": {
+     "gate": {
+      "$ref": "#/components/schemas/Gate"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "pass",
+       "fail",
+       "pending"
+      ]
+     },
+     "seconds": {
+      "type": "number"
+     },
+     "detail": {}
+    }
+   },
+   "Validity": {
+    "type": "object",
+    "required": [
+     "verdict"
+    ],
+    "properties": {
+     "verdict": {
+      "type": "string",
+      "enum": [
+       "valid",
+       "pending",
+       "invalid"
+      ]
+     },
+     "gates": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Gate"
+      }
+     }
+    }
+   },
+   "GateView": {
+    "type": "object",
+    "properties": {
+     "slot": {
+      "type": "string"
+     },
+     "episode": {
+      "type": "integer"
+     },
+     "validity": {
+      "$ref": "#/components/schemas/Validity"
+     },
+     "gates": {
+      "type": "object",
+      "properties": {
+       "gates": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/GateResult"
+        }
+       }
+      }
+     },
+     "cost": {
+      "$ref": "#/components/schemas/Cost"
+     }
+    }
+   },
+   "Attempt": {
+    "type": "object",
+    "properties": {
+     "n": {
+      "type": "integer"
+     },
+     "mode": {
+      "type": "string",
+      "enum": [
+       "template",
+       "private"
+      ]
+     },
+     "seconds": {
+      "type": "number"
+     },
+     "ok": {
+      "type": "boolean"
+     },
+     "class": {
+      "type": "string",
+      "enum": [
+       "detach_race",
+       "template_refused",
+       "template_server_down",
+       "restore_failed",
+       "gate_failed",
+       "infra"
+      ]
+     },
+     "error": {
+      "type": "string"
+     },
+     "action": {
+      "type": "string",
+      "enum": [
+       "retry",
+       "retry_private",
+       "restart_server_and_retry",
+       "give_up"
+      ]
+     }
+    }
+   },
+   "Cost": {
+    "type": "object",
+    "properties": {
+     "attempts": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Attempt"
+      }
+     }
+    }
+   },
+   "Slot": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "num": {
+      "type": "integer"
+     },
+     "checkpoint": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "creating",
+       "ready",
+       "resetting",
+       "capturing",
+       "down",
+       "quarantined",
+       "destroying",
+       "destroyed"
+      ]
+     },
+     "reason": {
+      "type": "string",
+      "description": "for down and quarantined"
+     },
+     "episode": {
+      "type": "integer"
+     },
+     "init_pid": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "init_start_ticks": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "restore_generation": {
+      "type": "integer"
+     },
+     "mode": {
+      "type": "string"
+     },
+     "port": {
+      "type": "integer"
+     },
+     "url": {
+      "type": "string"
+     },
+     "extra_ports": {
+      "type": "array",
+      "items": {
+       "type": "array",
+       "items": {
+        "type": "integer"
+       }
+      }
+     },
+     "gates": {
+      "type": "object",
+      "properties": {
+       "gates": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/GateResult"
+        }
+       }
+      }
+     },
+     "validity": {
+      "$ref": "#/components/schemas/Validity"
+     },
+     "cost": {
+      "$ref": "#/components/schemas/Cost"
+     },
+     "timings": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "number"
+      },
+      "description": "seconds per phase: kill, upper, prepare, restore, criu_clock, gates_kernel, guest_ready, ready, hash_isolation, task_setup, sync_total, total"
+     },
+     "last_error": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "task": {},
+     "ready_epoch": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "created_epoch": {
+      "type": "number"
+     },
+     "updated_epoch": {
+      "type": "number"
+     }
+    }
+   },
+   "Checkpoint": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "slot": {
+      "type": "integer"
+     },
+     "socket": {
+      "type": "string"
+     },
+     "server_pid": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "argv_marker": {
+      "type": "string"
+     },
+     "expected_state_hash": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "hash_reference": {
+      "type": "string"
+     },
+     "captured_from": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "created_epoch": {
+      "type": "number"
+     },
+     "server_ready_s": {
+      "type": "number"
+     }
+    }
+   }
+  }
+ }
+}
