@@ -36,6 +36,9 @@ pub struct RestoreSpec {
     pub criu_bin: PathBuf,
     /// stdout/stderr of the restore (CRIU's own messages; the log is `-o`).
     pub out: PathBuf,
+    /// `--empty-ns net`: CRIU leaves the restored network namespace empty and the setup-namespaces action brings
+    /// `lo` up (labelled variant; see hook.rs). Off = CRIU restores the namespace from the images.
+    pub empty_net: bool,
 }
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
@@ -43,6 +46,10 @@ pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
     let mut v: Vec<String> = vec!["criu".into(), "restore".into(), "-D".into(), s.images.display().to_string(), "--root".into(), s.croot.display().to_string(), "--restore-detached".into()];
     if s.file_locks {
         v.push("--file-locks".into());
+    }
+    if s.empty_net {
+        v.push("--empty-ns".into());
+        v.push("net".into());
     }
     if let Some(h) = &s.hook {
         v.push("--action-script".into());
@@ -189,6 +196,7 @@ fn template_request(sock: &Path, argv: &[String]) -> io::Result<i32> {
     }
     let n = unsafe { libc::sendmsg(fd, &mh, 0) };
     check(n as i32, "sendmsg")?;
+    stamp("sent");
     let mut rc = [0u8; 4];
     let got = unsafe { libc::recv(fd, rc.as_mut_ptr() as *mut libc::c_void, 4, 0) };
     unsafe { libc::close(fd) };
@@ -209,7 +217,13 @@ pub fn client_main(args: &[String]) -> i32 {
     }
 }
 
+fn stamp(what: &str) {
+    // one line per step on the client's stderr (the slot's restore-*.out): where the time outside CRIU's clock goes
+    eprintln!("drumsd-client {what} {:.6}", crate::now_epoch());
+}
+
 fn client_inner(args: &[String]) -> io::Result<i32> {
+    stamp("start");
     let opt = |n: &str| args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned();
     let sep = args.iter().position(|a| a == "--").ok_or_else(|| io::Error::other("missing -- before the criu argv"))?;
     let criu: Vec<String> = args[sep + 1..].to_vec();
@@ -235,9 +249,11 @@ fn client_inner(args: &[String]) -> io::Result<i32> {
         unsafe { libc::mount(cstr("overlay").as_ptr(), cstr(&root).as_ptr(), cstr("overlay").as_ptr(), 0, o.as_ptr() as *const libc::c_void) },
         "mount overlay",
     )?;
+    stamp("mounted");
     // 4. restore
     if let Some(sock) = opt("--socket") {
         let rc = template_request(Path::new(&sock), &criu)?;
+        stamp("result");
         return Ok(if rc == 0 { 0 } else { 1 });
     }
     let bin = opt("--criu").ok_or_else(|| io::Error::other("--socket or --criu required"))?;
@@ -274,6 +290,7 @@ mod tests {
             socket: socket.map(PathBuf::from),
             criu_bin: "/opt/drumsd/criu-bin/criu".into(),
             out: "/s/slot5/restore-drumsd-3.out".into(),
+            empty_net: false,
         }
     }
 
@@ -286,6 +303,8 @@ mod tests {
         s.file_locks = false;
         s.hook = None;
         assert!(!criu_argv(&s).contains(&"--file-locks".to_string()));
+        s.empty_net = true;
+        assert!(criu_argv(&s).windows(2).any(|w| w[0] == "--empty-ns" && w[1] == "net"));
     }
 
     #[test]
