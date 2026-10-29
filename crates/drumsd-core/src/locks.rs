@@ -168,6 +168,22 @@ fn census_len(l: &Lock) -> i64 {
 
 pub type Shape = (i64, i64, Option<i64>, Option<i64>);
 
+/// `census` over several threads (the work is per process: /proc/PID/fd and one fdinfo read per fd).
+pub fn census_parallel(p: &(dyn ProcFs + Sync), tree: &[i64], threads: usize) -> Result<Vec<HeldLock>, String> {
+    let threads = threads.max(1).min(tree.len().max(1));
+    let chunk = tree.len().div_ceil(threads).max(1);
+    let parts: Vec<Result<Vec<HeldLock>, String>> = std::thread::scope(|s| {
+        let hs: Vec<_> = tree.chunks(chunk).map(|c| s.spawn(move || census(p, c))).collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("census thread panicked".into()))).collect()
+    });
+    let mut out = vec![];
+    for r in parts {
+        out.extend(r?);
+    }
+    out.sort_by_key(|h| (h.pid, h.fd, h.lock.id));
+    Ok(out)
+}
+
 /// `shape_of_census`: the census as a set of (flag, type, start, len); FLOCK without a range.
 pub fn shape_of_census(locks: &[HeldLock]) -> BTreeSet<Shape> {
     locks

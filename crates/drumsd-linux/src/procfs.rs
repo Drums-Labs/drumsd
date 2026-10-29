@@ -93,6 +93,29 @@ pub fn ns_procs(init: i32) -> BTreeMap<String, String> {
     out
 }
 
+/// One /proc pass: the host pids in `init`'s pid namespace (all states) and {namespace pid: comm} of the live ones.
+pub fn ns_members_and_procs(init: i32) -> (Vec<i64>, BTreeMap<String, String>) {
+    let mut members = vec![];
+    let mut procs = BTreeMap::new();
+    let Some(want) = ns_inode(init, "pid") else { return (members, procs) };
+    for p in pids() {
+        if ns_inode(p, "pid").as_deref() != Some(want.as_str()) {
+            continue;
+        }
+        members.push(p as i64);
+        if matches!(state_char(p), Some('Z') | Some('X') | None) {
+            continue;
+        }
+        if let (Some(ns), Some(c)) = (nspid(p), comm(p)) {
+            if let Some(last) = ns.last() {
+                procs.insert(last.clone(), c);
+            }
+        }
+    }
+    members.sort();
+    (members, procs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
