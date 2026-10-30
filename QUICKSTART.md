@@ -67,3 +67,7 @@ with c.create(image="osworld-ubuntu", task="035f41ba") as env:   # OSWorld task 
   cost from the host price per hour set at install: `--host-usd-per-hour`).
 - Examples: `examples/fork_and_verify.py`, `examples/concurrency.py`. API: `api/openapi.json`.
 - Not supported yet: more than one host, GPUs, tasks that need the internet inside the desktop, other images.
+- Records of destroyed envs: an env that ended valid keeps only a small summary (`<forgotten_dir>/summary/`); failed,
+  quarantined and rejected ones keep the full archive (`<forgotten_dir>/full/`), which is never pruned unless you set
+  `retention.full_max_gib`. Summaries are capped at `retention.summary_max_gib` (default 2), oldest deleted first.
+  `retention.mode: "keep_all"` keeps a full archive for every env. See the README, "Retention of destroyed-env records".
