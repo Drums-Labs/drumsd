@@ -166,6 +166,18 @@
       }
      }
     ]
+   },
+   "delete": {
+    "summary": "Delete a saved state",
+    "description": "Stops its template server and frees its images (records kept). 409 while an env made from it exists, and for installed images.",
+    "responses": {
+     "200": {
+      "description": "deleted"
+     },
+     "409": {
+      "description": "in use or an installed image"
+     }
+    }
    }
   },
   "/v1/slots": {
