@@ -81,6 +81,9 @@ pub struct Verify {
     pub valid: u64,
     pub flagged_invalid: u64,
     pub checker_error: u64,
+    /// verify on a quarantined env: the checker did not run (its state is not trusted), no score.
+    #[serde(default)]
+    pub skipped_quarantined: u64,
     /// Sum of scores of rewards from valid episodes.
     pub valid_score_sum: f64,
 }
@@ -111,6 +114,20 @@ impl Ledger {
             _ => self.episodes.ended_pending += 1,
         }
     }
+    /// An episode counted under `from` turned out to be `to` (a valid episode later quarantined or OOM-killed).
+    pub fn reclassify(&mut self, from: &str, to: &str) {
+        let e = &mut self.episodes;
+        let f = match from {
+            "valid" => &mut e.valid,
+            "invalid" => &mut e.invalid,
+            _ => &mut e.ended_pending,
+        };
+        *f = f.saturating_sub(1);
+        self.episode(to);
+    }
+    pub fn verify_skipped(&mut self) {
+        self.verify.skipped_quarantined += 1;
+    }
     pub fn verified(&mut self, score: Option<f64>, valid: bool) {
         match (score, valid) {
             (None, _) => self.verify.checker_error += 1,
@@ -133,8 +150,41 @@ impl Ledger {
             "failures_by_cause": self.failures,
             "retries_by_cause": self.retries,
             "verify": {"valid": self.verify.valid, "flagged_invalid": self.verify.flagged_invalid, "checker_error": self.verify.checker_error,
+                       "skipped_quarantined": self.verify.skipped_quarantined,
                        "mean_valid_score": if self.verify.valid > 0 { Some(r3(self.verify.valid_score_sum / self.verify.valid as f64)) } else { None }},
         })
+    }
+}
+
+/// How the episode ledgers change when a slot record goes from (episode `ep0`, verdict `v0`) to (`ep1`, `v1`).
+/// Verdicts are "valid", "pending", "invalid". Only a change within one episode counts here: the first time its
+/// verdict resolves it is counted once, and a valid episode that later becomes invalid (quarantined, OOM-killed after
+/// the alive gate passed) is moved from valid to invalid, so `/v1/metrics` agrees with the env's verdict. A new
+/// episode that starts invalid (a failed restore or task setup) is counted where that happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpisodeCount {
+    Count(&'static str),
+    Move { from: &'static str, to: &'static str },
+}
+
+pub fn episode_count_change(ep0: u64, v0: &str, ep1: u64, v1: &str) -> Option<EpisodeCount> {
+    if ep0 != ep1 || ep1 == 0 || v0 == v1 {
+        return None;
+    }
+    match (v0, v1) {
+        ("pending", "valid") => Some(EpisodeCount::Count("valid")),
+        ("pending", "invalid") => Some(EpisodeCount::Count("invalid")),
+        ("valid", "invalid") => Some(EpisodeCount::Move { from: "valid", to: "invalid" }),
+        _ => None,
+    }
+}
+
+impl Ledger {
+    pub fn apply(&mut self, c: EpisodeCount) {
+        match c {
+            EpisodeCount::Count(v) => self.episode(v),
+            EpisodeCount::Move { from, to } => self.reclassify(from, to),
+        }
     }
 }
 
@@ -256,6 +306,33 @@ mod tests {
         assert_eq!(c.mean_concurrent_slots, 0.5);
         assert_eq!(cost(0.75, 10.0, 0.0, &Ledger::default()).usd_per_valid_episode, None);
         assert_eq!(share(1.5, 900.0, 3600.0), 0.375);
+    }
+
+    #[test]
+    fn a_valid_episode_later_quarantined_is_moved_to_invalid_once() {
+        use EpisodeCount::*;
+        let mut l = Ledger::default();
+        // ready: pending -> alive gate passes: valid, counted once
+        let c = episode_count_change(1, "pending", 1, "valid").unwrap();
+        assert_eq!(c, Count("valid"));
+        l.apply(c);
+        assert_eq!(episode_count_change(1, "valid", 1, "valid"), None, "no change, no count");
+        // client quarantines it: moved, not double counted
+        let c = episode_count_change(1, "valid", 1, "invalid").unwrap();
+        assert_eq!(c, Move { from: "valid", to: "invalid" });
+        l.apply(c);
+        assert_eq!((l.episodes.valid, l.episodes.invalid), (0, 1));
+        // a later put of the same invalid episode changes nothing; a quarantine while still pending counts invalid once
+        assert_eq!(episode_count_change(1, "invalid", 1, "invalid"), None);
+        assert_eq!(episode_count_change(2, "pending", 2, "invalid"), Some(Count("invalid")));
+        // a new episode is never counted by this rule (restore paths count their own)
+        assert_eq!(episode_count_change(1, "valid", 2, "pending"), None);
+        assert_eq!(episode_count_change(1, "valid", 2, "invalid"), None);
+        assert_eq!(episode_count_change(0, "pending", 0, "invalid"), None);
+        // reclassify never underflows
+        let mut z = Ledger::default();
+        z.reclassify("valid", "invalid");
+        assert_eq!((z.episodes.valid, z.episodes.invalid), (0, 1));
     }
 
     #[test]

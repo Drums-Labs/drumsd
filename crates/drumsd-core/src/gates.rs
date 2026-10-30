@@ -19,6 +19,7 @@
 //! | `isolation` | pid/mnt/net/ipc/uts namespaces distinct from the host and every other live slot; no foreign process in the cgroup | after ready |
 //! | `alive_after_resume` | every process restored (seen at pre-resume) is still there >= 5 s after the slot answered, natural exits excluded | ready + 5 s |
 //! | `no_oom_kill` | added as **failed** when the OOM killer took a task of the slot during the episode (its cgroup's memory.events oom_kill grew since ready); never added as passed, so it is not in [`Gate::ALL`] | each step and the episode's end |
+//! | `not_quarantined` | added as **failed** when the env was quarantined during the episode (by a client, a failed gate, a failed capture or task setup, or a daemon restart mid-capture); its detail names the reason. Like `no_oom_kill` it is never added as passed and is not in [`Gate::ALL`]. A quarantined env's state is not trusted, so its episode is invalid, and every validity signal (verdict, gates, `valid`, metrics) says so | when the env is quarantined |
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,7 @@ pub enum Gate {
     Isolation,
     AliveAfterResume,
     NoOomKill,
+    NotQuarantined,
 }
 
 impl Gate {
@@ -64,6 +66,7 @@ impl Gate {
             Gate::Isolation => "isolation",
             Gate::AliveAfterResume => "alive_after_resume",
             Gate::NoOomKill => "no_oom_kill",
+            Gate::NotQuarantined => "not_quarantined",
         }
     }
 }
@@ -205,6 +208,24 @@ mod tests {
         r.push(GateResult::fail(Gate::NoOomKill, 0.0, json!({"oom_kills": 1})));
         assert_eq!(r.validity(&Gate::ALL), Validity::Invalid { gates: vec![Gate::NoOomKill] });
         assert_eq!(serde_json::to_value(Gate::NoOomKill).unwrap(), json!("no_oom_kill"));
+    }
+
+    #[test]
+    fn a_quarantine_invalidates_a_fully_passed_report_and_is_named() {
+        let mut r = GateReport::default();
+        for g in Gate::ALL {
+            r.push(GateResult::pass(g, 0.01, json!({})));
+        }
+        r.push(GateResult::fail(Gate::NotQuarantined, 0.0, json!({"reason": "client"})));
+        assert_eq!(r.validity(&Gate::ALL), Validity::Invalid { gates: vec![Gate::NotQuarantined] });
+        assert_eq!(serde_json::to_value(Gate::NotQuarantined).unwrap(), json!("not_quarantined"));
+        assert_eq!(Gate::NotQuarantined.as_str(), "not_quarantined");
+        assert!(!Gate::ALL.contains(&Gate::NotQuarantined), "only ever added as failed");
+        // still pending gates do not hide it: failed wins
+        let mut p = GateReport::default();
+        p.push(GateResult::pending(Gate::AliveAfterResume));
+        p.push(GateResult::fail(Gate::NotQuarantined, 0.0, json!({"reason": "client"})));
+        assert!(matches!(p.validity(&[Gate::AliveAfterResume]), Validity::Invalid { .. }));
     }
 
     #[test]
