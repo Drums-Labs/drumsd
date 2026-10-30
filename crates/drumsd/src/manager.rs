@@ -572,8 +572,39 @@ impl Manager {
         self.restore_episode(&slot, Op::Reset).await
     }
 
+    /// OOM kills of the slot's tasks since its episode became ready (slot cgroup memory.events against the baseline
+    /// recorded at the end of the restore). None when there is no baseline (no episode yet, or an older record).
+    fn episode_oom_kills(&self, num: u32) -> Option<u64> {
+        let sp = slotfs::paths(&self.cfg.state_dir, num);
+        let base = slotfs::read_json(&sp.slot_json).ok()?["oom_kill_baseline"].as_u64()?;
+        let now = cgroup::oom_kills(&cgroup::slot_cg(&slotfs::marker_for(&self.cfg.state_dir, num)))?;
+        Some(now.saturating_sub(base))
+    }
+
+    /// The episode is invalid if the OOM killer took one of its tasks: a failed `no_oom_kill` gate, once per episode.
+    fn check_oom(&self, slot: &Slot) {
+        let (num, episode, has) = {
+            let v = slot.view.read().unwrap();
+            (v.num, v.episode, v.gates.get(Gate::NoOomKill).is_some())
+        };
+        if episode == 0 || has {
+            return;
+        }
+        let Some(n) = self.episode_oom_kills(num).filter(|n| *n > 0) else { return };
+        let r = GateResult::fail(Gate::NoOomKill, 0.0, json!({"oom_kills": n}));
+        self.metrics.inc("drumsd_gate_results_total", &[("gate", "no_oom_kill"), ("status", "fail")], 1.0);
+        self.event(json!({"slot": slot.id, "episode": episode, "oom_kills": n}));
+        self.put_slot(slot, |rec| {
+            if rec.episode == episode {
+                rec.gates.push(r.clone());
+                rec.validity = rec.gates.validity(&required_gates());
+            }
+        });
+    }
+
     /// Count the episode that is ending by its final validity.
     fn finalize_episode(&self, slot: &Slot) {
+        self.check_oom(slot);
         let v = slot.view.read().unwrap();
         if v.episode == 0 {
             return;
@@ -1024,6 +1055,8 @@ impl Manager {
                    "pageshare": {"mode": if private {"pool"} else {"template"}, "socket": c.socket, "criu": if private {Some(self.cfg.criu.clone())} else {None}},
                    "last_restore": {"by": "drumsd", "log": log.file_name().map(|x| x.to_string_lossy().to_string()), "epoch": drumsd_linux::now_epoch()}}),
         );
+        // the episode's OOM baseline: any growth of the slot cgroup's oom_kill counter from here on invalidates it
+        let _ = slotfs::record(&sp, json!({"oom_kill_baseline": cgroup::oom_kills(&slot_cg)}));
         t.insert("sync_total".into(), round3(t_all.elapsed().as_secs_f64()));
         Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm })
     }
@@ -1133,6 +1166,7 @@ impl Manager {
         let secs = t0.elapsed().as_secs_f64();
         self.account(Some(&slot), |l| l.op("step", secs, out.is_ok()));
         let out = out.map_err(|e| ApiError::new(502, e.to_string()))?;
+        self.check_oom(&slot);
         let cur = slot.view.read().unwrap().clone();
         Ok(json!({"result": out.0, "screenshot_png_b64": out.1.map(|p| b64(&p)), "episode": cur.episode, "validity": cur.validity,
                   "seconds": round3(t0.elapsed().as_secs_f64())}))

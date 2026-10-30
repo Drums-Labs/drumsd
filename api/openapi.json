@@ -1333,7 +1333,8 @@
      "guest_ready",
      "state_hash",
      "isolation",
-     "alive_after_resume"
+     "alive_after_resume",
+     "no_oom_kill"
     ]
    },
    "GateResult": {
