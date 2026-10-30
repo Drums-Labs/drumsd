@@ -130,7 +130,16 @@ def one_task(client, task_id, prefix, conts, log):
     obs = env.observe()
     rec["parent_observation"] = {"size": [obs.width, obs.height], "meta": obs.meta}
     t1 = time.monotonic()
-    kids = env.fork(8)
+    try:
+        kids = env.fork(8)
+    except drums.ForkError as fe:            # close what came up and what failed, then report
+        for k in fe.ok:
+            k.close()
+        for f in fe.failed:
+            if getattr(f, "env_id", None):
+                drums.Env(client, {"id": f.env_id}).close()
+        env.close()
+        raise
     rec["fork_s"] = round(time.monotonic() - t1, 3)
     print(f"[{task_id[:8]}] fork(8) in {rec['fork_s']} s: {[k.id for k in kids]}", flush=True)
 
