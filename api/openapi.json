@@ -2,14 +2,14 @@
  "openapi": "3.1.0",
  "info": {
   "title": "drumsd",
-  "version": "0.1.0",
-  "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`."
+  "version": "0.2.0",
+  "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote."
  },
  "paths": {
   "/healthz": {
    "get": {
     "summary": "Liveness",
-    "description": "Daemon up; counts.",
+    "description": "Unauthenticated liveness: {\"ok\": true} only.",
     "responses": {
      "200": {
       "description": "OK",
@@ -21,7 +21,8 @@
        }
       }
      }
-    }
+    },
+    "security": []
    }
   },
   "/metrics": {
@@ -189,7 +190,7 @@
    },
    "post": {
     "summary": "Create a slot",
-    "description": "Branch a new slot from a checkpoint (hard-linked images, template-server restore) and run every synchronous gate. The alive gate resolves `alive_after_s` after the slot answered.",
+    "description": "Branch a new slot from a checkpoint (hard-linked images, template-server restore) and run every synchronous gate. The alive gate resolves `alive_after_s` after the slot answered. Body: {checkpoint (alias image, from_state), task (OSWorld JSON, optional), setup (bool, optional: run the task's setup after every restore; default true for a task given here, false for a task inherited from a captured checkpoint)}.",
     "requestBody": {
      "required": true,
      "content": {
@@ -836,6 +837,182 @@
      }
     ]
    }
+  },
+  "/v1/health": {
+   "get": {
+    "summary": "Health",
+    "description": "Version, CRIU binary sha256, image sha256, checkpoints with template-server liveness, slots by state, free state disk, host price, limits.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/metrics": {
+   "get": {
+    "summary": "Aggregate metrics",
+    "description": "Current window: per-op latency (n, failed, mean/p50/p95, total s) for create/reset/fork/capture/step/verify/task_setup; episodes by verdict (counted once when the verdict resolves; ended_pending if ended before); failures and retries by cause; rewards (valid, flagged_invalid, checker_error); cost = host_usd_per_hour x window wall hours, per valid episode and per verified reward.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/metrics/reset": {
+   "post": {
+    "summary": "New metrics window",
+    "description": "The closed window's ledger is written to the event log.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/tasks": {
+   "get": {
+    "summary": "List OSWorld tasks",
+    "description": "Tasks in the host's pinned OSWorld checkout: id, domain, instruction. Query: domain.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/tasks/{id}": {
+   "get": {
+    "summary": "Get an OSWorld task",
+    "description": "By id or unique prefix (>= 8 chars); adds _domain and _sha256 of the file.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "ambiguous or short id"
+     },
+     "404": {
+      "description": "no such task"
+     }
+    }
+   }
+  },
+  "/v1/slots/{id}/verify": {
+   "post": {
+    "summary": "Verify (reward)",
+    "description": "Waits for the episode's pending gate, runs the task's OSWorld checker (postconfig, getters, metric) and returns {score, valid, validity, gates, checker_error, episode, task_id, seconds}. valid is true only when every gate passed and the slot is ready; a score from any other episode is returned with valid=false.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "no task / not an OSWorld task"
+     },
+     "409": {
+      "description": "nothing running"
+     }
+    }
+   }
+  },
+  "/v1/slots/{id}/task": {
+   "post": {
+    "summary": "Load a task",
+    "description": "Run an OSWorld task's setup in this ready slot now and after every reset. On setup failure the slot is quarantined (422).",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "setup failed"
+     }
+    },
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "task": {
+          "type": "object"
+         }
+        },
+        "required": [
+         "task"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/slots/{id}/metrics": {
+   "get": {
+    "summary": "Slot metrics",
+    "description": "This slot's ledger (as /v1/metrics), lifetime, last op timings and attempts, and its share of the host cost by slot-seconds.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
@@ -1327,6 +1504,17 @@
      }
     }
    }
+  },
+  "securitySchemes": {
+   "bearer": {
+    "type": "http",
+    "scheme": "bearer"
+   }
   }
- }
+ },
+ "security": [
+  {
+   "bearer": []
+  }
+ ]
 }
