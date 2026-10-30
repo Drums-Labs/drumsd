@@ -22,6 +22,8 @@ use std::os::fd::IntoRawFd;
 use std::path::Path;
 
 pub const MOUNTPOINT: &str = "/run/drums/procview";
+/// What the running view serves (written at start): `sysinfo` is "attached" or why not.
+pub const STATUS: &str = "/run/drums/procview.status.json";
 /// CRIU external-mount key of a view file: `drums-pv-<name>`.
 pub fn ext_key(name: &str) -> String {
     format!("drums-pv-{name}")
@@ -93,17 +95,24 @@ pub fn main(args: &[String]) -> i32 {
         Ok(false) => eprintln!("drumsd procview: not run by systemd: the mount will not survive a restart of this process"),
         Err(e) => eprintln!("drumsd procview: FDSTORE: {e}"),
     }
-    let bpf = if args.iter().any(|a| a == "--no-bpf") {
-        None
+    // The sysinfo program needs BTF, fexit (x86_64, CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS) and bpf_probe_write_user,
+    // which kernel lockdown (integrity or confidentiality) forbids. Without it the file views still serve and sysinfo(2)
+    // stays the host's: the status file says so and drumsd's health warns. It never stops the view or an env.
+    let (bpf, sysinfo_state) = if args.iter().any(|a| a == "--no-bpf") {
+        (None, "off (--no-bpf)".to_string())
     } else {
         match sysinfo::attach() {
-            Ok(g) => Some(g),
+            Ok(g) => (Some(g), "attached".to_string()),
             Err(e) => {
-                eprintln!("drumsd procview: sysinfo program: {e}");
-                return 3;
+                eprintln!("drumsd procview: sysinfo program not attached, sysinfo(2) in envs reports the host: {e}");
+                (None, format!("unavailable: {e}"))
             }
         }
     };
+    let status = serde_json::json!({"mount": dir, "fuse": "serving", "sysinfo": sysinfo_state, "pid": std::process::id(),
+                                     "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(),
+                                     "lockdown": std::fs::read_to_string("/sys/kernel/security/lockdown").unwrap_or_default().trim()});
+    let _ = std::fs::write(STATUS, serde_json::to_vec_pretty(&status).unwrap_or_default());
     let _ = fuse::sd_notify("READY=1\nSTATUS=serving", &[]);
     eprintln!("drumsd procview: serving {} ({threads} threads, sysinfo program {})", dir.display(), if bpf.is_some() { "attached" } else { "off" });
     let keep = bpf;

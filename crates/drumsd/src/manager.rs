@@ -2188,8 +2188,12 @@ impl Manager {
         if pv_needed && !pv_live {
             warnings.push(format!("the per-env memory/CPU view at {} is not live (drums-procview.service): restores of checkpoints that bind it fail closed", self.cfg.procview_dir.display()));
         }
+        let pv_status: Value = std::fs::read(drumsd_linux::procview::STATUS).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        if pv_needed && pv_live && pv_status["sysinfo"].as_str() != Some("attached") {
+            warnings.push(format!("the per-env view serves files but not sysinfo(2): {} (sysconf(_SC_PHYS_PAGES) in envs reports the host)", pv_status["sysinfo"]));
+        }
         json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"),
-               "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
+               "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed, "status": pv_status}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
                "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
