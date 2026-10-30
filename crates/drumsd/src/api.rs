@@ -1,6 +1,6 @@
 //! HTTP/JSON API (spec: api/openapi.json, served at GET /openapi.json).
 
-use crate::manager::{view, ApiError, Manager, QuiesceOpts};
+use crate::manager::{ckpt_view, view, ApiError, Manager, QuiesceOpts};
 use drumsd_core::admission::Need;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -148,16 +148,21 @@ async fn openapi() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/json")], OPENAPI)
 }
 async fn list_ckpts(State(m): S) -> Json<Value> {
-    Json(json!(m.ckpts.read().unwrap().values().cloned().collect::<Vec<_>>()))
+    Json(json!(m.ckpts.read().unwrap().values().map(|c| ckpt_view(c, &m.provenance)).collect::<Vec<_>>()))
 }
 async fn adopt(State(m): S, Json(r): Json<AdoptReq>) -> J {
-    Ok(Json(json!(m.adopt_checkpoint(r.id, r.slot, r.expected_state_hash, None).await?)))
+    Ok(Json(ckpt_view(&m.adopt_checkpoint(r.id, r.slot, r.expected_state_hash, None).await?, &m.provenance)))
 }
 async fn get_ckpt(State(m): S, Path(id): Path<String>) -> J {
-    Ok(Json(json!(m.ckpt(&id)?)))
+    Ok(Json(ckpt_view(&m.ckpt(&id)?, &m.provenance)))
 }
-async fn delete_ckpt(State(m): S, Path(id): Path<String>) -> J {
-    Ok(Json(m.delete_checkpoint(&id).await?))
+#[derive(Deserialize, Default)]
+pub struct DeleteCkptQ {
+    /// Also delete an installed image's checkpoint (refused while any env made from it exists).
+    pub installed: Option<bool>,
+}
+async fn delete_ckpt(State(m): S, Path(id): Path<String>, Query(q): Query<DeleteCkptQ>) -> J {
+    Ok(Json(m.delete_checkpoint(&id, q.installed.unwrap_or(false)).await?))
 }
 async fn list_slots(State(m): S) -> Json<Value> {
     let v: Vec<Value> = m.slots.read().unwrap().values().map(|s| view(&s.view.read().unwrap())).collect();

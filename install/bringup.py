@@ -5,7 +5,8 @@
 2. Once the desktop is ready, Nautilus is activated over D-Bus and the slot is checkpointed at once (`candidate snapshot`),
    as the final comparison's ensure_origin does (the Nautilus activation and the dump must be within a second or two).
 3. drumsd is started and adopts slot 0 as the image checkpoint (template server; the reference state hash is taken from
-   the running origin).
+   the running origin). drumsd records the origin's provenance (runtime sources and image inspection digests); on a re-run
+   whose sources or inspection changed (e.g. new login facts) the stale checkpoint is deleted and slot 0 provisioned again.
 4. Smoke test: one slot from the checkpoint must come up with every gate passed (alive gate included), then is closed.
 Every step's seconds go to --record.
 """
@@ -86,10 +87,18 @@ def main():
             break
         time.sleep(0.2)
     if drumsd_up():
-        have = [c["id"] for c in api(url, token, "GET", "/v1/checkpoints")]
-        if a.image_id in have:
+        have = {c["id"]: c for c in api(url, token, "GET", "/v1/checkpoints")}
+        c = have.get(a.image_id)
+        if c is not None and not c.get("stale"):
             print(f"bringup: checkpoint {a.image_id} already adopted", flush=True)
             return 0
+        if c is not None:
+            # made by other runtime sources or another image inspection (an upgrade whose login facts changed): the
+            # origin is provisioned again from the image; refused by drumsd while an env made from it still exists
+            t0 = time.monotonic()
+            print(f"bringup: checkpoint {a.image_id} is stale ({c.get('stale_reason')}): re-provisioning the origin", flush=True)
+            d = api(url, token, "DELETE", f"/v1/checkpoints/{a.image_id}?installed=true")
+            step("delete_stale_origin", t0, reason=c.get("stale_reason"), old_provenance=c.get("provenance"), deleted=d)
     subprocess.run(["systemctl", "stop", "drumsd"], check=False)
 
     port = 25000

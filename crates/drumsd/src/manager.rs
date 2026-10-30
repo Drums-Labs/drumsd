@@ -109,6 +109,47 @@ pub struct CheckpointRecord {
     /// Capture readiness record: the quiescence wait, every dump attempt and why a rejected one was rejected.
     #[serde(default)]
     pub quiescence: Option<Value>,
+    /// What made the origin: the runtime sources' digest and the image inspection's digest at adopt time (see
+    /// `provenance`). An installed image whose provenance is not the running one's is stale (`stale_reason`).
+    #[serde(default)]
+    pub provenance: Option<Value>,
+}
+
+/// Why an installed image's checkpoint does not match this drumsd's runtime (None: it matches, or it is a saved state).
+/// The origin's desktop was started by the runtime sources and the image inspection (its login facts) at provision
+/// time; a checkpoint made by other ones would hand out envs with another session than the pinned runtime makes.
+pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
+    if c.captured_from.is_some() {
+        return None;
+    }
+    match &c.provenance {
+        None => Some("made before provenance was recorded (drumsd < 0.4): re-provision the origin".into()),
+        Some(p) if p != current => {
+            let diff: Vec<&str> = ["source_sha256", "inspection_sha256"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
+            Some(format!("made by other {} than this drumsd runs with: re-provision the origin", diff.join(" and ")))
+        }
+        _ => None,
+    }
+}
+
+/// The provenance of an origin provisioned now: the digest of the runtime sources drumsd restores with and of the
+/// inspection file named by the Python config (`inspection`), whose facts (user, session, login) the origin was made from.
+pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
+    let insp = std::fs::read(py_config).ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("inspection").and_then(|x| x.as_str()).map(PathBuf::from))
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| hex_sha256(&b));
+    json!({"source_sha256": source_sha, "inspection_sha256": insp})
+}
+
+/// What the API returns for a checkpoint: its record plus `stale` (and why).
+pub fn ckpt_view(c: &CheckpointRecord, current: &Value) -> Value {
+    let mut v = serde_json::to_value(c).unwrap();
+    let why = stale_reason(c, current);
+    v["stale"] = json!(why.is_some());
+    v["stale_reason"] = json!(why);
+    v
 }
 
 pub struct Slot {
@@ -134,6 +175,7 @@ pub struct Manager {
     admit_counts: StdMutex<BTreeMap<String, u64>>,
     dirty_slots: StdMutex<BTreeSet<String>>,
     source_sha: String,
+    pub provenance: Value,
     limits: cgroup::Limits,
     natural: BTreeSet<String>,
     policy: Policy,
@@ -222,6 +264,7 @@ impl Manager {
         if u.window_start_epoch == 0.0 {
             u.window_start_epoch = drumsd_linux::now_epoch();
         }
+        let provenance = provenance(&source_sha, &cfg.py_config);
         let criu_sha256 = std::fs::read(&cfg.criu).map(|b| hex_sha256(&b)).unwrap_or_else(|e| format!("unreadable: {e}"));
         let m = Manager {
             usage: StdMutex::new(u),
@@ -242,6 +285,7 @@ impl Manager {
             admit_counts: StdMutex::new(BTreeMap::new()),
             dirty_slots: StdMutex::new(BTreeSet::new()),
             source_sha,
+            provenance,
             limits,
             natural,
             policy,
@@ -460,6 +504,7 @@ impl Manager {
                 server_ready_s: round3(srv.ready_s),
                 task: None,
                 quiescence: None,
+                provenance: Some(me.provenance.clone()),
             };
             // the alive gate's reference set comes from the dump itself (CRIU's log of what it seized)
             if let Err(e) = write_dumped_reference(&sp.dir) {
@@ -476,10 +521,11 @@ impl Manager {
 
     /// Delete a saved state: stop its template server, remove its images (records and logs are kept under
     /// state_dir/forgotten). Refused while any env made from it still exists, and for installed images.
-    pub async fn delete_checkpoint(self: &Arc<Self>, id: &str) -> R<Value> {
+    /// `installed`: also delete an installed image's checkpoint (the installer does this to re-provision a stale origin).
+    pub async fn delete_checkpoint(self: &Arc<Self>, id: &str, installed: bool) -> R<Value> {
         let c = self.ckpt(id)?;
-        if c.captured_from.is_none() {
-            return Err(ApiError::new(409, format!("checkpoint {id} is an installed image, not a saved state")));
+        if c.captured_from.is_none() && !installed {
+            return Err(ApiError::new(409, format!("checkpoint {id} is an installed image, not a saved state (installed=true deletes it; the installer re-provisions it)")));
         }
         let users: Vec<String> = self.slots.read().unwrap().values().filter_map(|s| {
             let v = s.view.read().unwrap();
@@ -586,6 +632,10 @@ impl Manager {
     /// inherited from the checkpoint (it was captured after the setup ran).
     pub async fn create_with(self: &Arc<Self>, checkpoint: String, task: Option<Value>, setup: Option<bool>) -> R<SlotRecord> {
         let c = self.ckpt(&checkpoint)?;
+        if let Some(why) = stale_reason(&c, &self.provenance) {
+            return Err(ApiError::new(409, format!("checkpoint {checkpoint} is stale: {why} (run the installer again)"))
+                .with(json!({"code": "checkpoint_stale", "provenance": c.provenance, "current": self.provenance})));
+        }
         if let Some(t) = &task {
             if (t.get("config").is_some() || t.get("evaluator").is_some()) && osworld_task_id(t).is_none() {
                 return Err(ApiError::new(400, "task: not an OSWorld task (needs an id of [A-Za-z0-9_-], a config list and an evaluator object)"));
@@ -1463,7 +1513,7 @@ impl Manager {
                 self.event(json!({"slot": id, "capture_attempt_rejected": att}));
                 self.account(Some(&slot), |l| l.retry("capture:exited_after_dump"));
                 if c.is_ok() {
-                    let _ = self.delete_checkpoint(&cid).await;
+                    let _ = self.delete_checkpoint(&cid, false).await;
                     att["discarded_to"] = json!("forgotten/ (delete_checkpoint)");
                 } else {
                     let me = self.clone();
@@ -1944,7 +1994,8 @@ impl Manager {
     pub fn health(&self) -> Value {
         let ck: Vec<Value> = self.ckpts.read().unwrap().values().map(|c| {
             let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
-            json!({"id": c.id, "template_server": template::adopt(&c.socket, &sp.images), "task": c.task.as_ref().map(|t| t["id"].clone())})
+            json!({"id": c.id, "template_server": template::adopt(&c.socket, &sp.images), "task": c.task.as_ref().map(|t| t["id"].clone()),
+                   "stale_reason": stale_reason(c, &self.provenance)})
         }).collect();
         let mut states: BTreeMap<&'static str, u64> = BTreeMap::new();
         for s in self.slots.read().unwrap().values() {
@@ -1957,6 +2008,11 @@ impl Manager {
         };
         let ok = ck.iter().all(|c| !c["template_server"].is_null());
         let mut warnings: Vec<String> = vec![];
+        for c in &ck {
+            if let Some(w) = c["stale_reason"].as_str() {
+                warnings.push(format!("checkpoint {} is stale and refuses new envs: {w}", c["id"].as_str().unwrap_or("?")));
+            }
+        }
         let (sf, st) = (forget::free_bytes(&self.cfg.state_dir), forget::total_bytes(&self.cfg.state_dir));
         if let (Some(f), Some(t)) = (sf, st) {
             self.metrics.set("drumsd_state_dir_free_bytes", &[], f as f64);
@@ -1985,7 +2041,7 @@ impl Manager {
         }
         json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"), "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
-               "image_sha256": self.cfg.image_sha256, "checkpoints": ck, "slots_by_state": states,
+               "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
                "state_dir_free_bytes": free(&self.cfg.state_dir), "warnings": warnings,
                "forgotten": {"dir": fd, "bytes": fbytes, "on_state_dir_bytes": left_on_tmpfs, "max_gib": self.cfg.forgotten_max_gib},
@@ -2254,6 +2310,49 @@ pub fn b64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ck(captured_from: Option<&str>, provenance: Option<Value>) -> CheckpointRecord {
+        CheckpointRecord { id: "osworld-ubuntu".into(), slot: 0, socket: "/s".into(), server_pid: None, argv_marker: "m".into(),
+                           expected_state_hash: None, hash_reference: "r".into(), captured_from: captured_from.map(|s| s.into()),
+                           created_epoch: 0.0, server_ready_s: 0.0, task: None, quiescence: None, provenance }
+    }
+
+    #[test]
+    fn an_installed_origin_from_other_sources_or_inspection_is_stale() {
+        let cur = json!({"source_sha256": "a", "inspection_sha256": "i"});
+        assert_eq!(stale_reason(&ck(None, Some(cur.clone())), &cur), None);
+        // v0.3 records have no provenance: the origin was made by the old login (re-provision)
+        assert!(stale_reason(&ck(None, None), &cur).unwrap().contains("before provenance"));
+        let r = stale_reason(&ck(None, Some(json!({"source_sha256": "a", "inspection_sha256": "old"}))), &cur).unwrap();
+        assert!(r.contains("inspection_sha256") && !r.contains("source_sha256"), "{r}");
+        let r = stale_reason(&ck(None, Some(json!({"source_sha256": "b", "inspection_sha256": "old"}))), &cur).unwrap();
+        assert!(r.contains("source_sha256 and inspection_sha256"), "{r}");
+        // a saved state is the user's data: never stale, whatever made it
+        assert_eq!(stale_reason(&ck(Some("s101"), None), &cur), None);
+        let v = ckpt_view(&ck(None, None), &cur);
+        assert_eq!(v["stale"], json!(true));
+        assert!(v["stale_reason"].is_string());
+        // a v0.3 journal record (no provenance field) still loads
+        let mut old = serde_json::to_value(ck(None, None)).unwrap();
+        old.as_object_mut().unwrap().remove("provenance");
+        let back: CheckpointRecord = serde_json::from_value(old).unwrap();
+        assert!(back.provenance.is_none());
+    }
+
+    #[test]
+    fn provenance_hashes_the_inspection_named_by_the_python_config() {
+        let t = tempfile::tempdir().unwrap();
+        let insp = t.path().join("inspection.json");
+        std::fs::write(&insp, b"{\"login\": {}}").unwrap();
+        let cfgp = t.path().join("rootfs-config.json");
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp})).unwrap()).unwrap();
+        let p = provenance("src", &cfgp);
+        assert_eq!(p["source_sha256"], json!("src"));
+        assert_eq!(p["inspection_sha256"], json!(hex_sha256(b"{\"login\": {}}")));
+        std::fs::write(&insp, b"{\"login\": {\"locale\": {}}}").unwrap();
+        assert_ne!(provenance("src", &cfgp), p);
+        assert_eq!(provenance("src", &t.path().join("missing.json"))["inspection_sha256"], Value::Null);
+    }
     #[test]
     fn numbers_of_destroyed_slots_are_reused_and_reservations_end() {
         // the leak this replaces: every number ever handed out stayed reserved, so a long run hit "no free slot
