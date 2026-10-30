@@ -2,7 +2,7 @@
  "openapi": "3.1.0",
  "info": {
   "title": "drumsd",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote."
  },
  "paths": {
@@ -567,7 +567,7 @@
   "/v1/slots/{id}/capture": {
    "post": {
     "summary": "Capture (save)",
-    "description": "Checkpoint the running slot (`capture --leave-running`: the tree is frozen for the dump, the upper layer is copied at CRIU's post-dump action, the tree continues) and adopt it as a new checkpoint with its own template server.",
+    "description": "Checkpoint the running slot (`capture --leave-running`: the tree is frozen for the dump, the upper layer is copied at CRIU's post-dump action, the tree continues) and adopt it as a new checkpoint with its own template server. Capture readiness: the dump happens only after the slot's tree shows no task exiting, no unreaped zombie and no process or thread starting or exiting for the window; a dump whose CRIU-seized tree differs from that sample, or whose processes exit in the source right after, is discarded (records kept under forgotten/) and retried. 409 with `code: not_quiescent` (and `unstable`, `quiescence`) when no good dump is possible in time: nothing is captured and the env stays ready. The checkpoint's `quiescence` field records every attempt.",
     "responses": {
      "200": {
       "description": "OK",
@@ -619,6 +619,14 @@
         "properties": {
          "id": {
           "type": "string"
+         },
+         "quiesce_timeout_s": {
+          "type": "number",
+          "description": "Capture readiness: wait at most this long (s) for a quiescent tree (default from the daemon config, 30)."
+         },
+         "quiesce_window_s": {
+          "type": "number",
+          "description": "Capture readiness: the quiet window (s) (default 1)."
          }
         }
        }
@@ -641,7 +649,7 @@
   "/v1/slots/{id}/branch": {
    "post": {
     "summary": "Branch",
-    "description": "Capture the slot's current state, then create `n` children from it concurrently. The parent keeps running its episode.",
+    "description": "Capture the slot's current state, then create `n` children from it concurrently. The parent keeps running its episode. Capture readiness: the dump happens only after the slot's tree shows no task exiting, no unreaped zombie and no process or thread starting or exiting for the window; a dump whose CRIU-seized tree differs from that sample, or whose processes exit in the source right after, is discarded (records kept under forgotten/) and retried. 409 with `code: not_quiescent` (and `unstable`, `quiescence`) when no good dump is possible in time: nothing is captured and the env stays ready. The checkpoint's `quiescence` field records every attempt.",
     "responses": {
      "200": {
       "description": "OK",
@@ -699,7 +707,94 @@
      "content": {
       "application/json": {
        "schema": {
-        "$ref": "#/components/schemas/BranchRequest"
+        "$ref": "#/components/schemas/BranchRequest",
+        "properties": {
+         "quiesce_timeout_s": {
+          "type": "number",
+          "description": "Capture readiness: wait at most this long (s) for a quiescent tree (default from the daemon config, 30)."
+         },
+         "quiesce_window_s": {
+          "type": "number",
+          "description": "Capture readiness: the quiet window (s) (default 1)."
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Slot id, e.g. s100"
+     }
+    ]
+   }
+  },
+  "/v1/slots/{id}/quiescent": {
+   "post": {
+    "summary": "Wait until quiescent",
+    "description": "Block until the slot's process tree is safe to capture (no task exiting, no unreaped zombie, no process or thread starting or exiting for `window_s`). Holds the slot's operation lock while it waits. capture/branch do this themselves; this route waits without capturing. 409 `not_quiescent` on a timeout.",
+    "responses": {
+     "200": {
+      "description": "The wait record: quiescent, waited_s, samples, window_s, timeout_s, restarts, processes, threads, unstable, seen, sample_ms_mean",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "timeout_s": {
+          "type": "number"
+         },
+         "window_s": {
+          "type": "number"
+         }
+        }
        }
       }
      }
@@ -1034,6 +1129,16 @@
     "properties": {
      "error": {
       "type": "string"
+     },
+     "code": {
+      "type": "string",
+      "description": "Machine-readable error code when present, e.g. not_quiescent"
+     },
+     "unstable": {
+      "type": "array"
+     },
+     "quiescence": {
+      "type": "object"
      }
     },
     "required": [
@@ -1513,6 +1618,13 @@
      },
      "server_ready_s": {
       "type": "number"
+     },
+     "quiescence": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "description": "Capture readiness record: params, every attempt (wait, dump, checks, why a rejected dump was rejected)."
      }
     }
    }
