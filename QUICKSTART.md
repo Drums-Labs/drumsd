@@ -50,6 +50,8 @@ with c.create(image="osworld-ubuntu", task="035f41ba") as env:   # OSWorld task 
 - Failed restores raise `RestoreFailed` (env down) or `GateFailed` (env quarantined), with the gate report in `.record`.
   drumsd retries only failures that happened before any restored process ran; the SDK retries only GETs while drumsd
   is restarting. Nothing else is retried.
+- Before `fork()`/`save()`, let processes your last action ended finish exiting (e.g. sleep 2-3 s after closing a
+  tab). A process that exits after the checkpoint exits in every child, and the alive gate marks those episodes invalid.
 - A killed drumsd is restarted by systemd and reconciles its envs from its journal.
 - Metrics: `c.metrics()` and `env.metrics()` (latency per op, episodes by verdict, failures and retries by cause,
   cost from the host price per hour set at install: `--host-usd-per-hour`).
