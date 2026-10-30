@@ -1524,7 +1524,10 @@ impl Manager {
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
                "image_sha256": self.cfg.image_sha256, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
-               "state_dir_free_bytes": free(&self.cfg.state_dir), "host_usd_per_hour": self.cfg.host_usd_per_hour,
+               "state_dir_free_bytes": free(&self.cfg.state_dir),
+               "host_mem_available_bytes": std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:"))
+                   .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
+               "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
                "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores}})
     }
 
