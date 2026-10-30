@@ -129,6 +129,8 @@ pub struct Manager {
     restore_sem: Arc<Semaphore>,
     alloc: StdMutex<BTreeSet<u32>>,
     alloc_cursor: std::sync::atomic::AtomicU32,
+    usage_dirty: std::sync::atomic::AtomicBool,
+    dirty_slots: StdMutex<BTreeSet<String>>,
     source_sha: String,
     limits: cgroup::Limits,
     natural: BTreeSet<String>,
@@ -233,6 +235,8 @@ impl Manager {
             ckpts: RwLock::new(BTreeMap::new()),
             alloc: StdMutex::new(BTreeSet::new()),
             alloc_cursor: std::sync::atomic::AtomicU32::new(0),
+            usage_dirty: std::sync::atomic::AtomicBool::new(false),
+            dirty_slots: StdMutex::new(BTreeSet::new()),
             source_sha,
             limits,
             natural,
@@ -288,21 +292,59 @@ impl Manager {
     }
 
     /// Apply `f` to the daemon ledger and (if given) the slot's ledger; both are journaled.
+    /// Count an op in the host ledger and the slot's. Only memory is touched here: the ledgers (up to 4096 latency
+    /// samples per op) are written by `flush_ledgers` about once a second. Before, every op (each step) re-wrote and
+    /// fsynced the whole host ledger (~450 KB) and the slot record under one global lock, from async code; at 64
+    /// envs that serialized drumsd (step p50 3 s while the guest answered in 0.1 s). A crash loses at most the last
+    /// second of metrics; slot state transitions are still journaled synchronously by put_slot.
     fn account(&self, slot: Option<&Slot>, f: impl Fn(&mut Ledger)) {
         {
             let mut u = self.usage.lock().unwrap();
             f(&mut u.ledger);
-            if let Err(e) = self.journal.put("meta", "usage", &*u) {
-                tracing::error!("journal put usage: {e}");
-            }
         }
+        self.usage_dirty.store(true, std::sync::atomic::Ordering::Release);
         if let Some(s) = slot {
             let mut v = s.view.write().unwrap();
             f(&mut v.usage);
+            self.dirty_slots.lock().unwrap().insert(v.id.clone());
+        }
+    }
+
+    /// Write the ledgers `account` changed since the last call: the host ledger, then each dirty slot record (under
+    /// its view lock, so a newer record written by put_slot is never overwritten by an older one).
+    pub fn flush_ledgers(&self) -> usize {
+        let mut n = 0;
+        if self.usage_dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            let u = self.usage.lock().unwrap();
+            if let Err(e) = self.journal.put("meta", "usage", &*u) {
+                tracing::error!("journal put usage: {e}");
+            }
+            n += 1;
+        }
+        let ids: Vec<String> = std::mem::take(&mut *self.dirty_slots.lock().unwrap()).into_iter().collect();
+        for id in ids {
+            let Some(s) = self.slots.read().unwrap().get(&id).cloned() else { continue };
+            let v = s.view.read().unwrap();
             if let Err(e) = self.journal.put("slots", &v.id, &*v) {
                 tracing::error!("journal put {}: {e}", v.id);
             }
+            n += 1;
         }
+        n
+    }
+
+    /// Start the ledger flusher (one thread, every second).
+    pub fn start_flusher(self: &Arc<Self>) {
+        let w = Arc::downgrade(self);
+        std::thread::Builder::new().name("ledger-flush".into()).spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            match w.upgrade() {
+                Some(m) => {
+                    m.flush_ledgers();
+                }
+                None => return,
+            }
+        }).expect("ledger flusher thread");
     }
 
     pub fn slot(&self, id: &str) -> R<Arc<Slot>> {

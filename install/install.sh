@@ -207,6 +207,9 @@ cat > "$E/rootfs-config.json" <<EOF
 EOF
 [ -s "$E/token" ] || (umask 077; python3 -c "import secrets; print(secrets.token_urlsafe(32))" > "$E/token")
 chmod 0600 "$E/token"
+# concurrent CRIU restores: 4 on the 16-vCPU host this was tuned on; one per 4 vCPUs on larger hosts (at 64 vCPU
+# and 64 envs, 4 at a time queued fork children and resets for tens of seconds)
+RESTORES=$(( $(nproc) / 4 )); [ "$RESTORES" -ge 4 ] || RESTORES=4
 LISTEN="127.0.0.1:$PORT"; ALLOW=false
 [ "$REMOTE" = 1 ] && { LISTEN="0.0.0.0:$PORT"; ALLOW=true; }
 OSW_UID=$(id -u drums-osw); OSW_GID=$(id -g drums-osw)
@@ -215,7 +218,7 @@ cat > "$E/drumsd.json" <<EOF
  "state_dir": "$D/state", "journal_dir": "$D/journal", "lower": "/mnt/osworld", "image_sha256": "$IMGSHA",
  "py_src": "$LAB", "py_config": "$E/rootfs-config.json", "criu": "$O/criu/bin/criu", "nested_pidns": true,
  "vcpus": $(lk runtime.vcpus), "memory_mib": $(lk runtime.memory_mib), "port_base": 25000, "guest_port": 5000,
- "extra_ports": [[27500, 9222], [30000, 8080]], "slot_range": [100, 2000], "max_concurrent_restores": 4,
+ "extra_ports": [[27500, 9222], [30000, 8080]], "slot_range": [100, 2000], "max_concurrent_restores": $RESTORES,
  "natural_exits": $(lk runtime.natural_exits), "alive_after_s": 5.0, "max_attempts": 3, "warm_upper": true,
  "host_usd_per_hour": $PRICE,
  "osw": {"python": "$O/osw-venv/bin/python", "helper": "$O/osw/drums_osw.py", "osworld_dir": "$O/src/OSWorld",
@@ -231,6 +234,8 @@ Restart=always
 RestartSec=1
 # slots, template servers and restores live in their own cgroups; a restart of drumsd must never kill them
 KillMode=process
+# each env holds listeners, guest connections and pidfds: the default soft limit (1024) ran out at 64 envs
+LimitNOFILE=1048576
 Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
@@ -251,6 +256,7 @@ Environment=HOME=$D/osw-cache PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OSWOR
 ExecStart=$O/osw-venv/bin/python -I $O/osw/drums_osw.py serve --osworld-dir $O/src/OSWorld --sock /run/drums-osw/osw.sock
 Restart=always
 RestartSec=1
+LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
