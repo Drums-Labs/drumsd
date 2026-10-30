@@ -43,6 +43,39 @@ killed and marked `down` (`quarantined` for an interrupted capture), a `ready` s
 recorded process (pid + start time + cgroup) is `down`, a running one is adopted (forwarders re-pointed, pending alive
 gate judged). Template servers are adopted from their pidfiles or restarted.
 
+## Retention of destroyed-env records
+
+A destroyed env, a deleted saved state and a rejected dump leave their records (CRIU restore logs at -v4 are about 20 MB
+per env) in `forgotten_dir` (default: next to `journal_dir`). Each is kept in one of two classes:
+
+- `full`: the complete `<name>.tar.zst`, in `<forgotten_dir>/full/`. For envs that ended failed, invalid, down or
+  quarantined, that had a failed gate, restore or capture at any point, rejected dumps, and anything drumsd cannot
+  classify with certainty. Archives written directly in `<forgotten_dir>` by older versions count as `full`.
+- `summary`: for an env that ended valid (closed from `ready`, valid verdict, never quarantined, no failed gate). One
+  small `<name>.summary.json` in `<forgotten_dir>/summary/` (a few KB): slot.json, the env's journal record (gates,
+  timings, cost), the name, size and sha256 of every file that was dropped, and why it is only a summary. No logs, no images.
+
+`retention` in drumsd.json (all optional):
+
+| field | default | meaning |
+|---|---|---|
+| `retention.mode` | `"failures_full"` | `failures_full`: the classes above. `keep_all`: every env keeps a full archive (the old behaviour). |
+| `retention.summary_max_gib` | `2` | when summaries exceed this, the oldest summaries are deleted first. `null` turns the cap off. |
+| `retention.full_max_gib` | none | when full records exceed this, the oldest full records are deleted first. Unset: failure records are never pruned. |
+| `forgotten_max_gib` | none | the older option: a cap over all records of both classes, oldest first. Setting it is an explicit cap, so it can delete failure records and legacy archives. |
+| `forgotten_warn_gib` | `50` | `/v1/health` warns when full records exceed this. |
+
+The record just written is never deleted by its own call. Every deletion is an event (`forgotten_retention`, with the
+path, class and size of each file) and is counted in `drumsd_forget_pruned_total{class}` and
+`drumsd_forget_pruned_bytes_total{class}`. If a summary cannot be written, the full archive is written instead; if
+packing fails, the directory stays on the state dir as before.
+
+`/v1/health` reports `forgotten.mode`, `forgotten.caps_gib`, `forgotten.full` and `forgotten.summary` (`bytes`, `files`,
+`pruned_files`, `pruned_bytes`; `legacy_files` for older archives) and `forgotten.summaries_pruned`. It warns when full
+records exceed `forgotten_warn_gib` (they are never pruned by default; set `retention.full_max_gib` to cap them) and when the
+filesystem of `forgotten_dir` has less than 10 % free. Metrics: `drumsd_forget_total{class,archived}`,
+`drumsd_forgotten_bytes{class}`, `drumsd_forgotten_files{class}` (and `drumsd_forgotten_bytes{where}`).
+
 ## Compatibility with the Python runtime
 
 A drumsd slot has the same directory layout, ownership marker, `slot.json` fields, cgroup naming
