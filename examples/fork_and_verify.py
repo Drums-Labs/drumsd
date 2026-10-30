@@ -167,6 +167,7 @@ def one_task(client, task_id, prefix, conts, log):
     rec["child_metrics"] = {k.id: k.metrics() for k in kids}
     for k in kids:
         k.close()
+    rec["fork_state_deleted"] = client.delete_state(kids[0].from_state)     # free the fork's checkpoint
     rec["parent_metrics"] = env.metrics()
     env.close()
     rec["total_s"] = round(time.monotonic() - t0, 3)
