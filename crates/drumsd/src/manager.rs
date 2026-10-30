@@ -589,9 +589,12 @@ impl Manager {
         if c.captured_from.is_none() && !installed {
             return Err(ApiError::new(409, format!("checkpoint {id} is an installed image, not a saved state (installed=true deletes it; the installer re-provisions it)")));
         }
+        // a checkpoint whose state is gone (host restart) can be deleted though envs made from it are still on record: the
+        // ones that are down hold nothing of it any more
+        let lost = state_lost(&c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower)).is_some();
         let users: Vec<String> = self.slots.read().unwrap().values().filter_map(|s| {
             let v = s.view.read().unwrap();
-            (v.checkpoint == id && !v.state.is_terminal()).then(|| v.id.clone())
+            (v.checkpoint == id && !v.state.is_terminal() && !(lost && matches!(v.state, SlotState::Down { .. }))).then(|| v.id.clone())
         }).collect();
         if !users.is_empty() {
             return Err(ApiError::new(409, format!("checkpoint {id} is used by envs {users:?}: close them first")));
