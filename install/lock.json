@@ -79,24 +79,45 @@
   },
   "rust_toolchain": "1.96.1",
   "sources": {
-    "drums-criu": {"repo": "sahiljagtap08/drums-criu", "branch": "drums-main", "commit": "ade3f3da89cea8377c5f4d97ae3edce19e382c34",
-                   "tag": "runtime-20261030a", "note": "app-compat 72dd49a5 plus the restore-hang fix (4 commits); builds are not bit-reproducible, so the pin is the source commit",
-                   "reference_binary_sha256": "unknown (not built yet at this pin)"},
-    "drums-lab": {"repo": "sahiljagtap08/drums-lab", "branch": "app-compat", "commit": "0f6b2b608d524d0da43c3c8bca12b84d6580fc2a"},
-    "osworld": {"repo": "https://github.com/xlang-ai/OSWorld.git", "commit": "044bc33901cb893808e3f91ebc9a17ed8e54b44c",
-                "python_lock": "osw-requirements.lock", "extra_index": "https://download.pytorch.org/whl/cpu"}
+    "drums-criu": {
+      "repo": "sahiljagtap08/drums-criu",
+      "branch": "fix/dump-sigchld",
+      "commit": "eaf4989ea7e22b26344e2fc03d98e4ff2cad26d6",
+      "tag": null,
+      "note": "runtime-20261030a (ade3f3da8) plus fault point 10 and the dump fix: SIGCHLD blocked from fork to waitpid of the creds helpers (scale run L32a)",
+      "reference_binary_sha256": "unknown (not built yet at this pin)"
+    },
+    "drums-lab": {
+      "repo": "sahiljagtap08/drums-lab",
+      "branch": "app-compat",
+      "commit": "0f6b2b608d524d0da43c3c8bca12b84d6580fc2a"
+    },
+    "osworld": {
+      "repo": "https://github.com/xlang-ai/OSWorld.git",
+      "commit": "044bc33901cb893808e3f91ebc9a17ed8e54b44c",
+      "python_lock": "osw-requirements.lock",
+      "extra_index": "https://download.pytorch.org/whl/cpu"
+    }
   },
   "runtime": {
     "image_id": "osworld-ubuntu",
     "vcpus": 4,
     "memory_mib": 4096,
     "screen": "1920x1080x24",
-    "natural_exits": ["geoclue", "systemd-hostnam", "systemd-localed", "systemd-timedat", "tracker-extract", "nautilus"],
+    "natural_exits": [
+      "geoclue",
+      "systemd-hostnam",
+      "systemd-localed",
+      "systemd-timedat",
+      "tracker-extract",
+      "nautilus"
+    ],
     "natural_exits_source": "final-comparison natural-exits.json (drums) plus nautilus, as in the drumsd report config (2026-10-29)"
   },
   "prices_usd_per_hour": {
     "c8i.4xlarge": 0.74968,
     "c8i.2xlarge": 0.37484,
-    "source": "AWS Price List API, us-east-1 Linux on-demand, effective 2026-10-01 (as in the app-compat and drumsd reports)"
+    "source": "AWS Price List API, us-east-1 Linux on-demand, effective 2026-10-01 (as in the app-compat and drumsd reports)",
+    "r8i.16xlarge": 4.44544
   }
 }
