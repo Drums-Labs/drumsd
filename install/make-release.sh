@@ -15,7 +15,8 @@ for pair in "$CRIU:$(lk drums-criu)" "$LAB:$(lk drums-lab)"; do
 done
 R="$OUT/drums-release-${C:0:12}"
 rm -rf "$R"; mkdir -p "$R/sources"
-cp -r "$HERE/install" "$R/install"; cp "$HERE/install/install.sh" "$R/install.sh"
+# only the committed files of install/ (an untracked file such as a __pycache__ of a test run must not ship)
+git -C "$HERE" archive --format=tar HEAD install | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
 echo "$C" > "$R/RELEASE_COMMIT"
 bundle() { # bundle REPO NAME COMMIT
   git -C "$1" branch -f "release-$2" "$3" >/dev/null
