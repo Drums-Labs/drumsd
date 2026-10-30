@@ -74,6 +74,7 @@ async fn serve(cfg: config::Config) {
             std::process::exit(2);
         }
     };
+    m.start_flusher();
     if let Err(e) = drumsd_linux::cgroup::pool_init() {
         eprintln!("drumsd: pool cgroup: {e}");
         std::process::exit(2);
