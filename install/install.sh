@@ -151,7 +151,7 @@ t=$(date +%s)
 id drums-osw >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$D/osw-cache" --shell /usr/sbin/nologin drums-osw
 mkdir -p "$D/osw-cache" && chown drums-osw:drums-osw "$D/osw-cache" && chmod 0750 "$D/osw-cache"
 [ -x "$O/osw-venv/bin/python" ] || python3 -m venv "$O/osw-venv"
-"$O/osw-venv/bin/pip" install -q --no-deps --require-hashes --only-binary :all: -r "$O/src/drumsd/install/osw-requirements.lock" \
+"$O/osw-venv/bin/pip" install -q --no-deps --require-hashes -r "$O/src/drumsd/install/osw-requirements.lock" \
   --extra-index-url "$(lk sources.osworld.extra_index)" > "$D/pip.log" 2>&1 || { tail -30 "$D/pip.log"; die "pip install (hashed lock)"; }
 "$O/osw-venv/bin/pip" freeze > "$D/osw-venv-freeze.txt"
 (cd "$O/src/OSWorld" && runuser -u drums-osw -- env HOME="$D/osw-cache" "$O/osw-venv/bin/python" -c "import desktop_env.desktop_env, desktop_env.evaluators.metrics, desktop_env.evaluators.getters; print('osworld import ok')") > "$D/osw-import.log" 2>&1 || { tail -20 "$D/osw-import.log"; die "OSWorld checkers do not import"; }

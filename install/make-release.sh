@@ -26,5 +26,5 @@ bundle "$HERE" drumsd "$C"
 bundle "$CRIU" drums-criu "$(lk drums-criu)"
 bundle "$LAB" drums-lab "$(lk drums-lab)"
 (cd "$R" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
-tar -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
+COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
 sha256sum "$R.tar.gz"
