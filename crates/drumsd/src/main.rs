@@ -86,6 +86,8 @@ async fn serve(cfg: config::Config) {
             std::process::exit(2);
         }
     }
+    // leases: envs and saved states nobody uses are reaped (a crashed trainer cannot hold the host forever)
+    m.start_reaper();
     let l = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     tracing::info!("drumsd listening on {listen}");
     axum::serve(l, api::router(m)).await.unwrap();

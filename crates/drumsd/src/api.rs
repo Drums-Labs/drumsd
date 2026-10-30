@@ -1,6 +1,6 @@
 //! HTTP/JSON API (spec: api/openapi.json, served at GET /openapi.json).
 
-use crate::manager::{view, ApiError, Manager, QuiesceOpts};
+use crate::manager::{view, ApiError, LeaseOpts, Manager, QuiesceOpts};
 use drumsd_core::admission::Need;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -73,6 +73,15 @@ mod tests {
     }
 
     #[test]
+    fn requests_that_name_an_env_are_found() {
+        assert_eq!(super::env_of("/v1/slots/s104/step"), Some("s104"));
+        assert_eq!(super::env_of("/v1/slots/s104"), Some("s104"));
+        assert_eq!(super::env_of("/v1/slots"), None);
+        assert_eq!(super::env_of("/v1/slots/"), None);
+        assert_eq!(super::env_of("/v1/checkpoints/x"), None);
+    }
+
+    #[test]
     fn token_compare() {
         assert!(super::token_eq(b"abc", b"abc"));
         assert!(!super::token_eq(b"abc", b"abd"));
@@ -114,6 +123,11 @@ pub struct CreateReq {
     pub task: Option<Value>,
     /// Run the task's setup after every restore (default: true for a task given here).
     pub setup: Option<bool>,
+    /// Lease: destroy the env after this many seconds with no request naming it (default: the daemon's
+    /// `lease.env_idle_timeout_s`, 1800; 0 = never).
+    pub idle_timeout_s: Option<f64>,
+    /// Lease: destroy the env this many seconds after it was created (default: `lease.env_ttl_s`, none; 0 = never).
+    pub ttl_s: Option<f64>,
 }
 #[derive(Deserialize)]
 pub struct TaskReq {
@@ -135,12 +149,26 @@ pub struct CaptureReq {
     /// Capture readiness overrides (seconds): how long to wait for a quiescent tree, and the quiet window.
     pub quiesce_timeout_s: Option<f64>,
     pub quiesce_window_s: Option<f64>,
+    /// The saved state's lease: deleted after this many seconds with no env made from it (default
+    /// `lease.state_idle_timeout_s`, 1800; 0 = never) ...
+    pub idle_timeout_s: Option<f64>,
+    /// ... or this many seconds after it was made, once no env made from it exists (default none; 0 = never).
+    pub ttl_s: Option<f64>,
 }
 #[derive(Deserialize)]
 pub struct BranchReq {
     pub n: usize,
     pub quiesce_timeout_s: Option<f64>,
     pub quiesce_window_s: Option<f64>,
+    /// The children's lease (as in create).
+    pub idle_timeout_s: Option<f64>,
+    pub ttl_s: Option<f64>,
+    /// The saved state's lease (as in capture).
+    pub state_idle_timeout_s: Option<f64>,
+    pub state_ttl_s: Option<f64>,
+    /// Delete the saved state the fork made as soon as no env made from it exists (all children closed).
+    #[serde(default)]
+    pub delete_state_with_children: bool,
 }
 #[derive(Deserialize, Default)]
 pub struct QuiescentReq {
@@ -197,7 +225,23 @@ async fn auth(State(m): S, req: Request, next: Next) -> Response {
     if !ok {
         return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], Json(json!({"error": "missing or wrong bearer token (Authorization: Bearer <token from the install>)"}))).into_response();
     }
-    next.run(req).await
+    // every request that names an env is a use of it (its lease's idle clock), at the start and at the end
+    let env = env_of(req.uri().path()).map(|s| s.to_string());
+    if let Some(id) = &env {
+        m.touch(id);
+    }
+    let resp = next.run(req).await;
+    if let Some(id) = &env {
+        m.touch(id);
+    }
+    resp
+}
+
+/// The env id a request path names (`/v1/slots/{id}` or `/v1/slots/{id}/...`).
+pub fn env_of(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/slots/")?;
+    let id = rest.split('/').next()?;
+    (!id.is_empty()).then_some(id)
 }
 async fn metrics(State(m): S) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], m.metrics.render())
@@ -273,7 +317,7 @@ async fn list_slots(State(m): S, Query(q): Query<SlotsQ>) -> J {
 }
 async fn create(State(m): S, Json(r): Json<CreateReq>) -> Result<(StatusCode, Json<Value>), ApiError> {
     let _admitted = m.admit("create", Need { envs: 1, captures: 0 })?;
-    let rec = m.create_with(r.checkpoint, r.task, r.setup).await?;
+    let rec = m.create_leased(r.checkpoint, r.task, r.setup, LeaseOpts { idle_timeout_s: r.idle_timeout_s, ttl_s: r.ttl_s }).await?;
     Ok((StatusCode::CREATED, Json(view(&rec))))
 }
 async fn get_slot(State(m): S, Path(id): Path<String>) -> J {
@@ -298,12 +342,14 @@ async fn capture(State(m): S, Path(id): Path<String>, body: Option<Json<CaptureR
     let r = body.map(|b| b.0).unwrap_or_default();
     let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
     let _admitted = m.admit("capture", Need { envs: 0, captures: 1 })?;
-    Ok(Json(json!(m.capture_with(&id, r.id, o).await?)))
+    Ok(Json(json!(m.capture_leased(&id, r.id, o, LeaseOpts { idle_timeout_s: r.idle_timeout_s, ttl_s: r.ttl_s }, false).await?)))
 }
 async fn branch(State(m): S, Path(id): Path<String>, Json(r): Json<BranchReq>) -> J {
     let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
     let _admitted = m.admit("fork", Need { envs: r.n as u64, captures: 1 })?;
-    Ok(Json(m.branch_with(&id, r.n, o).await?))
+    let child = LeaseOpts { idle_timeout_s: r.idle_timeout_s, ttl_s: r.ttl_s };
+    let state = LeaseOpts { idle_timeout_s: r.state_idle_timeout_s, ttl_s: r.state_ttl_s };
+    Ok(Json(m.branch_leased(&id, r.n, o, child, state, r.delete_state_with_children).await?))
 }
 async fn quiescent(State(m): S, Path(id): Path<String>, body: Option<Json<QuiescentReq>>) -> J {
     let r = body.map(|b| b.0).unwrap_or_default();

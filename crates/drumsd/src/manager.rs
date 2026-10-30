@@ -12,6 +12,7 @@ use drumsd_core::alive;
 use drumsd_core::quiesce as q;
 use drumsd_core::gates::{Gate, GateReport, GateResult, GateStatus, Validity};
 use drumsd_core::journal::Journal;
+use drumsd_core::lease::Lease;
 use drumsd_core::metrics::{Registry, LATENCY_BUCKETS};
 use drumsd_core::recovery::{self, Action, Attempt, CostRecord, FailureClass, Policy};
 use drumsd_core::state::{Op, Outcome, SlotState};
@@ -88,6 +89,15 @@ pub struct SlotRecord {
     pub verified: Option<Value>,
     #[serde(default)]
     pub closed_epoch: Option<f64>,
+    /// This env's lease (None on records made before 0.4.2: the daemon's default applies).
+    #[serde(default)]
+    pub lease: Option<Lease>,
+    /// The last API request that named this env (epoch seconds; the lease's idle time counts from it).
+    #[serde(default)]
+    pub last_used_epoch: Option<f64>,
+    /// Why it was destroyed when it was not a client's DELETE (e.g. `lease: idle 1800 s`).
+    #[serde(default)]
+    pub closed_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +123,15 @@ pub struct CheckpointRecord {
     /// `provenance`). An installed image whose provenance is not the running one's is stale (`stale_reason`).
     #[serde(default)]
     pub provenance: Option<Value>,
+    /// A saved state's lease (None: the daemon's default; never applied to installed images).
+    #[serde(default)]
+    pub lease: Option<Lease>,
+    /// Delete this saved state as soon as no env made from it exists (fork with keep_state=false).
+    #[serde(default)]
+    pub delete_with_children: bool,
+    /// When the last env made from it closed (its idle time counts from this or its creation).
+    #[serde(default)]
+    pub last_used_epoch: Option<f64>,
 }
 
 /// Why an installed image's checkpoint does not match this drumsd's runtime (None: it matches, or it is a saved state).
@@ -221,6 +240,17 @@ pub struct Manager {
     pub criu_sha256: String,
     /// Records pruned by retention since start, by class: (files, bytes).
     forget_pruned: StdMutex<BTreeMap<&'static str, (u64, u64)>>,
+    /// Envs and saved states reaped by their lease since start, by "env:idle", "state:children_closed", ...
+    lease_reaped: StdMutex<BTreeMap<String, u64>>,
+    /// Saved states a fork is creating children from: the reaper leaves them alone until the children exist.
+    pinned_states: StdMutex<BTreeSet<String>>,
+}
+
+/// Lease and readiness options for a new env or saved state (from the request; None = the daemon's default).
+#[derive(Clone, Debug, Default)]
+pub struct LeaseOpts {
+    pub idle_timeout_s: Option<f64>,
+    pub ttl_s: Option<f64>,
 }
 
 /// Per-request overrides of the capture-readiness wait (the daemon's `quiesce` config gives the defaults).
@@ -295,6 +325,7 @@ impl Manager {
         metrics.counter("drumsd_forget_pruned_bytes_total", "Bytes of kept records deleted by retention, by class");
         metrics.counter("drumsd_forget_tmpfs_bytes_freed_total", "Bytes of kept records moved off the state dir");
         metrics.gauge("drumsd_template_servers", "Template servers by liveness");
+        metrics.counter("drumsd_lease_reaped_total", "Envs and saved states removed because their lease ran out, by kind and reason");
         metrics.histogram("drumsd_reset_seconds", "Reset latency, kill to all synchronous gates passed", LATENCY_BUCKETS);
         metrics.histogram("drumsd_create_seconds", "Create latency, branch dir to all synchronous gates passed", LATENCY_BUCKETS);
         metrics.histogram("drumsd_phase_seconds", "Restore pipeline phase latency", LATENCY_BUCKETS);
@@ -316,6 +347,8 @@ impl Manager {
             started_epoch: drumsd_linux::now_epoch(),
             criu_sha256,
             forget_pruned: StdMutex::new(BTreeMap::new()),
+            lease_reaped: StdMutex::new(BTreeMap::new()),
+            pinned_states: StdMutex::new(BTreeSet::new()),
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
             exe,
@@ -389,8 +422,21 @@ impl Manager {
     fn put_slot(&self, s: &Slot, f: impl FnOnce(&mut SlotRecord)) -> SlotRecord {
         let mut v = s.view.write().unwrap();
         let from = v.state.name();
+        let (ep0, v0) = (v.episode, verdict_str(&v.validity));
         f(&mut v);
         v.updated_epoch = drumsd_linux::now_epoch();
+        // a quarantined env's episode is invalid, with the reason named (gate not_quarantined): every validity
+        // signal (verdict, gates, verify's valid, the metrics) then agrees
+        if mark_quarantined(&mut v) {
+            self.metrics.inc("drumsd_gate_results_total", &[("gate", "not_quarantined"), ("status", "fail")], 1.0);
+        }
+        // the episode ledgers follow the verdict, under the same lock as the record (counted once; a valid episode
+        // that becomes invalid is moved)
+        if let Some(c) = usage::episode_count_change(ep0, v0, v.episode, verdict_str(&v.validity)) {
+            v.usage.apply(c);
+            self.usage.lock().unwrap().ledger.apply(c);
+            self.usage_dirty.store(true, std::sync::atomic::Ordering::Release);
+        }
         // a failure leaves a sticky mark in slot.json: the env's records are kept in full at the end, even after a
         // later reset succeeded and cleared last_error
         if let Some(why) = failure_seen(&v) {
@@ -488,7 +534,16 @@ impl Manager {
     }
 
     pub fn slot(&self, id: &str) -> R<Arc<Slot>> {
-        self.slots.read().unwrap().get(id).cloned().ok_or_else(|| ApiError::new(404, format!("no slot {id}")))
+        if let Some(s) = self.slots.read().unwrap().get(id).cloned() {
+            return Ok(s);
+        }
+        // destroyed before this daemon started: its record is only in the journal
+        if let Ok(Some(r)) = self.journal.get::<SlotRecord>("slots", id) {
+            if r.state.is_terminal() {
+                return Err(gone_error(&r, "this operation"));
+            }
+        }
+        Err(ApiError::new(404, format!("no env {id} on this drumsd")).with(json!({"code": "not_found", "env": id})))
     }
 
     pub fn ckpt(&self, id: &str) -> R<CheckpointRecord> {
@@ -541,7 +596,9 @@ impl Manager {
                 return Err(ApiError::new(400, format!("slot {slot} has no upper.snap + images")));
             }
             let sock = me.cfg.state_dir.join(format!("ps-{slot}.sock"));
-            let srv = template::start(&me.cfg.criu, &sock, &sp.images, &me.cfg.state_dir).map_err(e500)?;
+            // the server's logs live in the checkpoint's own directory, so deleting the state takes them off the
+            // state tmpfs with its other records (they used to pile up in the state dir: 318 pairs, 91 MB in 7 h)
+            let srv = template::start(&me.cfg.criu, &sock, &sp.images, &sp.dir).map_err(e500)?;
             let (expected, reference) = match expected_hash {
                 Some(h) => (Some(h), "given".to_string()),
                 None => {
@@ -567,6 +624,9 @@ impl Manager {
                 task: None,
                 quiescence: None,
                 provenance: Some(me.provenance.clone()),
+                lease: None,
+                delete_with_children: false,
+                last_used_epoch: None,
             };
             // the alive gate's reference set comes from the dump itself (CRIU's log of what it seized)
             if let Err(e) = write_dumped_reference(&sp.dir) {
@@ -636,7 +696,7 @@ impl Manager {
         if let Some(pid) = template::adopt(&c.socket, &sp.images) {
             return Ok(pid);
         }
-        let srv = template::start(&self.cfg.criu, &c.socket, &sp.images, &self.cfg.state_dir).map_err(|e| e.to_string())?;
+        let srv = template::start(&self.cfg.criu, &c.socket, &sp.images, &sp.dir).map_err(|e| e.to_string())?;
         let mut c2 = c.clone();
         c2.server_pid = Some(srv.pid);
         self.put_ckpt(&c2);
@@ -695,7 +755,14 @@ impl Manager {
 
     /// `setup`: run the task's OSWorld setup after every restore. Default: yes for a task given here, no for a task
     /// inherited from the checkpoint (it was captured after the setup ran).
-    pub async fn create_with(self: &Arc<Self>, checkpoint: String, task: Option<Value>, setup: Option<bool>) -> R<SlotRecord> {
+    /// `lo`: the env's lease (idle timeout, TTL; None = the daemon's default, 0 = none).
+    pub async fn create_leased(self: &Arc<Self>, checkpoint: String, task: Option<Value>, setup: Option<bool>, lo: LeaseOpts) -> R<SlotRecord> {
+        for x in [lo.idle_timeout_s, lo.ttl_s].into_iter().flatten() {
+            if !x.is_finite() || x < 0.0 {
+                return Err(ApiError::new(400, "idle_timeout_s and ttl_s must be >= 0 (0 = no limit)"));
+            }
+        }
+        let lease = Lease::resolve(lo.idle_timeout_s, lo.ttl_s, self.cfg.lease.env());
         let c = self.ckpt(&checkpoint)?;
         if let Some(why) = self.stale(&c) {
             return Err(ApiError::new(409, format!("checkpoint {checkpoint} is stale: {why} (run the installer again)"))
@@ -752,6 +819,9 @@ impl Manager {
             usage: Ledger::default(),
             verified: None,
             closed_epoch: None,
+            lease: Some(lease),
+            last_used_epoch: Some(now),
+            closed_reason: None,
         };
         let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec), targets, proxies: StdMutex::new(handles) });
         self.slots.write().unwrap().insert(id.clone(), slot.clone());
@@ -797,7 +867,7 @@ impl Manager {
     pub async fn reset(self: &Arc<Self>, id: &str) -> R<SlotRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        let st = slot.view.read().unwrap().state.begin(Op::Reset).map_err(|e| ApiError::new(409, e.to_string()))?;
+        let st = begin_op(&slot, Op::Reset)?;
         self.finalize_episode(&slot);
         self.put_slot(&slot, |r| r.state = st);
         self.restore_episode(&slot, Op::Reset).await
@@ -1365,24 +1435,22 @@ impl Manager {
         };
         let failed = result.status == GateStatus::Fail;
         self.metrics.inc("drumsd_gate_results_total", &[("gate", "alive_after_resume"), ("status", status_str(&result.status))], 1.0);
-        let rec = self.put_slot(slot, |r| {
-            if r.episode != episode {
+        let mut applied = false;
+        self.put_slot(slot, |r| {
+            // only while the episode runs: one that a reset or destroy already ended was counted then (ended_pending)
+            if r.episode != episode || !matches!(r.state, SlotState::Ready | SlotState::Capturing | SlotState::Quarantined { .. }) {
                 return;
             }
+            applied = true;
             r.gates.push(result.clone());
             r.validity = r.gates.validity(&required_gates());
             if failed && matches!(r.state, SlotState::Ready) {
                 r.state = SlotState::Quarantined { reason: format!("gate alive_after_resume failed: {}", result.detail["counted"]) };
             }
         });
-        if rec.episode == episode && !matches!(rec.validity, Validity::Pending { .. }) {
-            let v = verdict_str(&rec.validity);
-            self.account(Some(slot), |l| {
-                l.episode(v);
-                if failed {
-                    l.failure("gate:alive_after_resume");
-                }
-            });
+        // the episode itself is counted by put_slot when its verdict resolves
+        if applied && failed {
+            self.account(Some(slot), |l| l.failure("gate:alive_after_resume"));
         }
     }
 
@@ -1390,7 +1458,7 @@ impl Manager {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         let v = slot.view.read().unwrap().clone();
-        v.state.begin(Op::Step).map_err(|e| ApiError::new(409, e.to_string()))?;
+        v.state.begin(Op::Step).map_err(|e| refused(&v, e))?;
         let port = v.port;
         let t0 = Instant::now();
         let out = tokio::task::spawn_blocking(move || {
@@ -1412,8 +1480,18 @@ impl Manager {
 
     pub async fn screenshot(self: &Arc<Self>, id: &str) -> R<Vec<u8>> {
         let slot = self.slot(id)?;
+        self.gone_check(&slot, "screenshot")?;
         let port = slot.view.read().unwrap().port;
         tokio::task::spawn_blocking(move || Guest::new(port, Duration::from_secs(30)).screenshot()).await.map_err(e500)?.map_err(|e| ApiError::new(502, e.to_string()))
+    }
+
+    /// 410 `env_gone` if the env is destroyed or being destroyed.
+    fn gone_check(&self, slot: &Slot, op: &str) -> R<()> {
+        let v = slot.view.read().unwrap();
+        if matches!(v.state, SlotState::Destroyed | SlotState::Destroying) {
+            return Err(gone_error(&v, op));
+        }
+        Ok(())
     }
 
     /// The cgroup that holds the slot's running tree (its current leaf, or the slot cgroup itself).
@@ -1452,7 +1530,7 @@ impl Manager {
     pub async fn wait_quiescent(self: &Arc<Self>, id: &str, o: QuiesceOpts) -> R<Value> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        slot.view.read().unwrap().state.begin(Op::Step).map_err(|e| ApiError::new(409, e.to_string()))?;
+        begin_op(&slot, Op::Step)?;
         let p = self.quiesce_params(&o);
         let cg = self.tree_cg(&slot);
         let (rep, s) = tokio::task::spawn_blocking(move || quiesce::wait(&cg, &p)).await.map_err(e500)?.map_err(e500)?;
@@ -1471,10 +1549,17 @@ impl Manager {
     /// still run in the source right after the dump. A dump that fails either check is discarded (its records kept)
     /// and the capture waits and dumps again; when no good dump is possible in time it fails with `not_quiescent`
     /// and the env stays ready. Nothing is captured silently: every attempt is in the checkpoint's `quiescence`.
-    pub async fn capture_with(self: &Arc<Self>, id: &str, ckpt_id: Option<String>, o: QuiesceOpts) -> R<CheckpointRecord> {
+    /// `lo`: the saved state's lease; `delete_with_children`: delete it when its last env closes.
+    pub async fn capture_leased(self: &Arc<Self>, id: &str, ckpt_id: Option<String>, o: QuiesceOpts, lo: LeaseOpts, delete_with_children: bool) -> R<CheckpointRecord> {
+        for x in [lo.idle_timeout_s, lo.ttl_s].into_iter().flatten() {
+            if !x.is_finite() || x < 0.0 {
+                return Err(ApiError::new(400, "state idle_timeout_s and ttl_s must be >= 0 (0 = no limit)"));
+            }
+        }
+        let state_lease = Lease::resolve(lo.idle_timeout_s, lo.ttl_s, self.cfg.lease.state());
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        let st = slot.view.read().unwrap().state.begin(Op::Capture).map_err(|e| ApiError::new(409, e.to_string()))?;
+        let st = begin_op(&slot, Op::Capture)?;
         self.put_slot(&slot, |r| r.state = st);
         let num = slot.view.read().unwrap().num;
         let t0 = Instant::now();
@@ -1609,6 +1694,8 @@ impl Manager {
                     t
                 });
                 c.quiescence = Some(quiescence.clone());
+                c.lease = Some(state_lease);
+                c.delete_with_children = delete_with_children;
                 self.put_ckpt(&c);
                 c
             });
@@ -1728,14 +1815,21 @@ impl Manager {
         Ok(out.lines().rev().find(|l| l.starts_with('{')).and_then(|l| serde_json::from_str(l).ok()).unwrap_or(json!({"stdout": out})))
     }
 
-    /// Capture the slot's current state and start `n` children from it, concurrently.
-    pub async fn branch_with(self: &Arc<Self>, id: &str, n: usize, o: QuiesceOpts) -> R<Value> {
+    /// Capture the slot's current state and start `n` children from it, concurrently. `child`: the children's lease;
+    /// `state`: the saved state's lease; `delete_state_with_children`: the state the fork made is deleted as soon as
+    /// its last env (child or other) is closed.
+    pub async fn branch_leased(self: &Arc<Self>, id: &str, n: usize, o: QuiesceOpts, child: LeaseOpts, state: LeaseOpts, delete_state_with_children: bool) -> R<Value> {
         if n == 0 || n > 64 {
             return Err(ApiError::new(400, "n must be 1..64"));
         }
+        for x in [child.idle_timeout_s, child.ttl_s].into_iter().flatten() {
+            if !x.is_finite() || x < 0.0 {
+                return Err(ApiError::new(400, "idle_timeout_s and ttl_s must be >= 0 (0 = no limit)"));
+            }
+        }
         let t0 = Instant::now();
         let parent = self.slot(id)?;
-        let c = match self.capture_with(id, None, o).await {
+        let c = match self.capture_leased(id, None, o, state, delete_state_with_children).await {
             Ok(c) => c,
             Err(e) => {
                 let secs = t0.elapsed().as_secs_f64();
@@ -1744,31 +1838,42 @@ impl Manager {
             }
         };
         let t_cap = t0.elapsed().as_secs_f64();
+        // the reaper must not delete the new state (delete_state_with_children) before its children exist
+        self.pinned_states.lock().unwrap().insert(c.id.clone());
         let futs: Vec<_> = (0..n)
             .map(|_| {
                 let me = self.clone();
                 let cid = c.id.clone();
+                let lo = child.clone();
                 // children inherit the checkpoint's task (setup already in the state)
-                tokio::spawn(async move { me.create_with(cid, None, Some(false)).await })
+                tokio::spawn(async move { me.create_leased(cid, None, Some(false), lo).await })
             })
             .collect();
         let mut children = vec![];
         for f in futs {
-            match f.await.map_err(e500)? {
-                Ok(r) => children.push(serde_json::to_value(view(&r)).unwrap()),
-                Err(e) => children.push(json!({"error": e.message})),
+            match f.await {
+                Ok(Ok(r)) => children.push(serde_json::to_value(view(&r)).unwrap()),
+                Ok(Err(e)) => children.push(json!({"error": e.message})),
+                Err(e) => children.push(json!({"error": format!("child task: {e}")})),
             }
+        }
+        self.pinned_states.lock().unwrap().remove(&c.id);
+        if delete_state_with_children && self.state_users(&c.id).is_empty() {
+            // every child failed to get a record: nothing will ever release the state
+            let me = self.clone();
+            let cid = c.id.clone();
+            tokio::spawn(async move { me.reap_state(&cid, "children_closed").await });
         }
         let secs = t0.elapsed().as_secs_f64();
         let all_up = children.iter().all(|c| c["state"] == "ready");
         self.account(Some(&parent), |l| l.op("fork", secs, all_up));
-        Ok(json!({"checkpoint": c, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(secs - t_cap), "seconds": round3(secs)}))
+        Ok(json!({"checkpoint": c, "state": c.id, "delete_state_with_children": delete_state_with_children, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(secs - t_cap), "seconds": round3(secs)}))
     }
 
     pub async fn quarantine(self: &Arc<Self>, id: &str, reason: String) -> R<SlotRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        let st = slot.view.read().unwrap().state.begin(Op::Quarantine).map_err(|e| ApiError::new(409, e.to_string()))?;
+        let st = begin_op(&slot, Op::Quarantine)?;
         Ok(self.put_slot(&slot, |r| {
             r.state = match st {
                 SlotState::Quarantined { .. } => SlotState::Quarantined { reason: reason.clone() },
@@ -1780,7 +1885,7 @@ impl Manager {
     pub async fn release(self: &Arc<Self>, id: &str) -> R<SlotRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        let st = slot.view.read().unwrap().state.begin(Op::Release).map_err(|e| ApiError::new(409, e.to_string()))?;
+        let st = begin_op(&slot, Op::Release)?;
         // a released slot never keeps the tree that was quarantined
         let num = slot.view.read().unwrap().num;
         let marker = slotfs::marker_for(&self.cfg.state_dir, num);
@@ -1795,9 +1900,18 @@ impl Manager {
     }
 
     pub async fn destroy(self: &Arc<Self>, id: &str) -> R<SlotRecord> {
+        self.destroy_why(id, None).await
+    }
+
+    /// Destroy an env. Idempotent: an env that is already destroyed returns its record. `why` is recorded as the
+    /// record's `closed_reason` when it was not the client (a lease).
+    pub async fn destroy_why(self: &Arc<Self>, id: &str, why: Option<String>) -> R<SlotRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        let st = slot.view.read().unwrap().state.begin(Op::Destroy).map_err(|e| ApiError::new(409, e.to_string()))?;
+        if slot.view.read().unwrap().state.is_terminal() {
+            return Ok(slot.view.read().unwrap().clone());
+        }
+        let st = begin_op(&slot, Op::Destroy)?;
         self.finalize_episode(&slot);
         // what the env was when it was closed: decides whether its records are kept in full or as a summary
         let last = slot.view.read().unwrap().clone();
@@ -1834,15 +1948,147 @@ impl Manager {
             u.closed_slot_seconds += (now - created.max(u.window_start_epoch)).max(0.0);
             let _ = self.journal.put("meta", "usage", &*u);
         }
-        Ok(self.put_slot(&slot, |r| {
+        let rec = self.put_slot(&slot, |r| {
             r.state = SlotState::finish(Op::Destroy, &outcome);
             r.init_pid = None;
             r.closed_epoch = Some(drumsd_linux::now_epoch());
+            r.closed_reason = why.clone();
             if let Ok(k) = &res {
                 r.timings.insert("destroyed_records_at_epoch".into(), drumsd_linux::now_epoch());
                 r.last_error = Some(format!("records kept at {}", k.display()));
             }
-        }))
+        });
+        self.state_released(&rec.checkpoint);
+        Ok(rec)
+    }
+
+    /// Envs made from this state that are not destroyed.
+    fn state_users(&self, ckpt: &str) -> Vec<String> {
+        self.slots.read().unwrap().values().filter_map(|s| {
+            let v = s.view.read().unwrap();
+            (v.checkpoint == ckpt && !v.state.is_terminal()).then(|| v.id.clone())
+        }).collect()
+    }
+
+    /// An env made from `ckpt` closed: the saved state's idle time starts now, and a state made by a fork with
+    /// keep_state=false is deleted once its last env is gone.
+    fn state_released(self: &Arc<Self>, ckpt: &str) {
+        let Some(mut c) = self.ckpts.read().unwrap().get(ckpt).cloned() else { return };
+        if c.captured_from.is_none() {
+            return;
+        }
+        c.last_used_epoch = Some(drumsd_linux::now_epoch());
+        self.put_ckpt(&c);
+        if c.delete_with_children && self.state_users(ckpt).is_empty() && !self.pinned_states.lock().unwrap().contains(ckpt) {
+            let me = self.clone();
+            let id = ckpt.to_string();
+            tokio::spawn(async move { me.reap_state(&id, "children_closed").await });
+        }
+    }
+
+    /// Delete a saved state because of its lease (or because its last child closed), counted and recorded.
+    async fn reap_state(self: &Arc<Self>, id: &str, why: &str) {
+        match self.delete_checkpoint(id, false).await {
+            Ok(r) => {
+                self.metrics.inc("drumsd_lease_reaped_total", &[("kind", "state"), ("reason", why)], 1.0);
+                *self.lease_reaped.lock().unwrap().entry(format!("state:{why}")).or_default() += 1;
+                self.event(json!({"lease_reaped": {"state": id, "reason": why, "freed_bytes": r["freed_bytes"]}}));
+            }
+            // a new env from it, or already deleted: nothing to do
+            Err(e) => self.event(json!({"lease_reap_skipped": {"state": id, "reason": why, "error": e.message}})),
+        }
+    }
+
+    /// Record a request naming this env (the lease's idle clock). Memory only; journaled with the next record write
+    /// or by the ledger flusher within a second.
+    pub fn touch(&self, id: &str) {
+        let Some(s) = self.slots.read().unwrap().get(id).cloned() else { return };
+        let mut v = s.view.write().unwrap();
+        if v.state.is_terminal() {
+            return;
+        }
+        v.last_used_epoch = Some(drumsd_linux::now_epoch());
+        drop(v);
+        self.dirty_slots.lock().unwrap().insert(id.to_string());
+    }
+
+    fn env_lease(&self, r: &SlotRecord) -> Lease {
+        r.lease.unwrap_or_else(|| self.cfg.lease.env())
+    }
+
+    fn state_lease(&self, c: &CheckpointRecord) -> Lease {
+        c.lease.unwrap_or_else(|| self.cfg.lease.state())
+    }
+
+    /// One pass of the reaper: destroy envs and delete saved states whose lease ran out. An env busy with an
+    /// operation (its lock held) is in use and skipped; so is one in a transient state.
+    pub async fn reap_once(self: &Arc<Self>) -> Value {
+        let now = drumsd_linux::now_epoch();
+        let mut envs = vec![];
+        for s in self.slots.read().unwrap().values() {
+            let Ok(_busy) = s.op.try_lock() else { continue };
+            let v = s.view.read().unwrap();
+            if v.state.is_terminal() || v.state.is_transient() {
+                continue;
+            }
+            let l = self.env_lease(&v);
+            if let Some(why) = l.expired(v.created_epoch, v.last_used_epoch.unwrap_or(v.created_epoch), now) {
+                let secs = if why == "ttl" { l.ttl_s } else { l.idle_timeout_s }.unwrap_or(0.0);
+                envs.push((v.id.clone(), why, format!("lease: {why} {secs} s")));
+            }
+        }
+        let mut done = vec![];
+        let futs: Vec<_> = envs.into_iter().map(|(id, why, text)| {
+            let me = self.clone();
+            tokio::spawn(async move {
+                let r = me.destroy_why(&id, Some(text)).await;
+                if r.is_ok() {
+                    me.metrics.inc("drumsd_lease_reaped_total", &[("kind", "env"), ("reason", why)], 1.0);
+                    *me.lease_reaped.lock().unwrap().entry(format!("env:{why}")).or_default() += 1;
+                    me.event(json!({"lease_reaped": {"env": id, "reason": why}}));
+                }
+                json!({"env": id, "reason": why, "ok": r.is_ok(), "error": r.err().map(|e| e.message)})
+            })
+        }).collect();
+        for f in futs {
+            if let Ok(v) = f.await {
+                done.push(v);
+            }
+        }
+        // saved states (never installed images): only once no env made from them exists
+        let pinned = self.pinned_states.lock().unwrap().clone();
+        let cands: Vec<CheckpointRecord> = self.ckpts.read().unwrap().values().filter(|c| c.captured_from.is_some() && !pinned.contains(&c.id)).cloned().collect();
+        let states: Vec<(String, &'static str)> = cands.iter().filter_map(|c| {
+            if !self.state_users(&c.id).is_empty() {
+                return None;
+            }
+            if c.delete_with_children {
+                return Some((c.id.clone(), "children_closed"));
+            }
+            self.state_lease(c).expired(c.created_epoch, c.last_used_epoch.unwrap_or(c.created_epoch), now).map(|w| (c.id.clone(), w))
+        }).collect();
+        for (id, why) in states {
+            self.reap_state(&id, why).await;
+            done.push(json!({"state": id, "reason": why}));
+        }
+        json!(done)
+    }
+
+    /// Start the reaper (every `lease.reap_interval_s`).
+    pub fn start_reaper(self: &Arc<Self>) {
+        let w = Arc::downgrade(self);
+        let every = Duration::from_secs_f64(self.cfg.lease.reap_interval_s.clamp(1.0, 3600.0));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                match w.upgrade() {
+                    Some(m) => {
+                        m.reap_once().await;
+                    }
+                    None => return,
+                }
+            }
+        });
     }
 
     // ------------------------------------------------------------------------------------------------ OSWorld tasks
@@ -1906,7 +2152,7 @@ impl Manager {
         }
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
-        slot.view.read().unwrap().state.begin(Op::Step).map_err(|e| ApiError::new(409, e.to_string()))?;
+        begin_op(&slot, Op::Step)?;
         let num = slot.view.read().unwrap().num;
         let me = self.clone();
         let t = task.clone();
@@ -1942,6 +2188,7 @@ impl Manager {
     pub async fn verify(self: &Arc<Self>, id: &str) -> R<Value> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
+        self.gone_check(&slot, "verify")?;
         let t0 = Instant::now();
         let (task, state, pid) = {
             let v = slot.view.read().unwrap();
@@ -1958,9 +2205,17 @@ impl Manager {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let num = slot.view.read().unwrap().num;
+        // a quarantined env's state is not trusted: its checker is not run (no score; the reward is invalid and says why)
+        let quarantined = match &slot.view.read().unwrap().state {
+            SlotState::Quarantined { reason } => Some(reason.clone()),
+            _ => None,
+        };
         let me = self.clone();
         let t = task.clone();
-        let r = tokio::task::spawn_blocking(move || me.osw("evaluate", num, &t, None)).await.map_err(e500)?;
+        let r = match &quarantined {
+            None => tokio::task::spawn_blocking(move || me.osw("evaluate", num, &t, None)).await.map_err(e500)?,
+            Some(why) => Ok(json!({"skipped": format!("quarantined: {why}")})),
+        };
         // an OOM kill since the last step (GIMP was killed while it built the filter the last click opened, then the
         // checker scored 0.0 and the reward came back valid) or during the checker's own postconfig actions: the
         // validity the reward carries is read only after this check
@@ -1972,22 +2227,28 @@ impl Manager {
             Err(e) => (None, Some(e.clone()), Value::Null),
         };
         let secs = t0.elapsed().as_secs_f64();
+        let skipped = quarantined.is_some();
         self.account(Some(&slot), |l| {
-            l.op("verify", secs, score.is_some());
-            l.verified(score, valid);
-            if score.is_none() {
-                l.failure("checker_error");
+            l.op("verify", secs, skipped || score.is_some());
+            if skipped {
+                l.verify_skipped();
+            } else {
+                l.verified(score, valid);
+                if score.is_none() {
+                    l.failure("checker_error");
+                }
             }
         });
         let out = json!({
             "slot": v.id, "episode": v.episode, "task_id": tid, "score": score, "valid": valid,
-            "validity": v.validity, "state": v.state.name(), "gates": v.gates, "checker_error": err,
+            "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "checker_skipped": detail.get("skipped"),
+            "state": v.state.name(), "gates": v.gates, "checker_error": err,
             "checker": {"func": task["evaluator"]["func"], "osworld_commit": detail["osworld_commit"], "seconds": detail["seconds"],
                         "postconfig_ran": detail["postconfig_ran"]},
             "seconds": round3(secs),
         });
         self.event(json!({"slot": v.id, "verify": {"episode": v.episode, "task": tid, "score": score, "valid": valid, "error": err}}));
-        self.metrics.inc("drumsd_verify_total", &[("valid", if valid { "true" } else { "false" }), ("scored", if score.is_some() { "true" } else { "false" })], 1.0);
+        self.metrics.inc("drumsd_verify_total", &[("valid", if valid { "true" } else { "false" }), ("scored", if score.is_some() { "true" } else if skipped { "skipped" } else { "false" })], 1.0);
         self.put_slot(&slot, |r| r.verified = Some(out.clone()));
         Ok(out)
     }
@@ -2068,7 +2329,9 @@ impl Manager {
         }
         json!({"window": {"start_epoch": u.window_start_epoch, "now_epoch": now, "wall_s": round3(wall)},
                "slots_by_state": states, "cost": c, "usage": u.ledger.summary(),
-               "definitions": "seconds = wall time inside drumsd per op, failed attempts included; episodes counted once when the verdict resolves; cost = host_usd_per_hour x wall hours of the window, divided by valid episodes / verified rewards from valid episodes; price is the operator's configured number"})
+               "leases_reaped": *self.lease_reaped.lock().unwrap(),
+               "cost_note": "cost.host_usd is the host price times the WHOLE window's wall time, idle time included (the window starts when drumsd first started or at the last POST /v1/metrics/reset). Call client.reset_metrics() at the start of a run to measure that run.",
+               "definitions": "seconds = wall time inside drumsd per op, failed attempts included; episodes counted once when the verdict resolves (a valid episode that is later quarantined or OOM-killed is moved to invalid); cost = host_usd_per_hour x wall hours of the window, divided by valid episodes / verified rewards from valid episodes; price is the operator's configured number"})
     }
 
     pub fn slot_metrics(&self, id: &str) -> R<Value> {
@@ -2180,6 +2443,7 @@ impl Manager {
                    .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
                "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
                "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores},
+               "leases": {"defaults": self.cfg.lease, "reaped": *self.lease_reaped.lock().unwrap()},
                "admission": self.admission_view()})
     }
 
@@ -2194,6 +2458,17 @@ impl Manager {
             if !swept.is_empty() {
                 let bytes: u64 = swept.iter().filter(|f| f.archived).map(|f| f.bytes_on_tmpfs).sum();
                 me.event(json!({"forgotten_swept": swept.len(), "archived": swept.iter().filter(|f| f.archived).count(), "tmpfs_bytes_freed": bytes}));
+            }
+            // template-server logs drumsd < 0.4.2 wrote to the state dir itself; any no process holds open are packed
+            // to disk like other records (one archive), so an upgraded host gets that tmpfs back
+            match template::collect_loose_logs(&me.cfg.state_dir, (drumsd_linux::now_epoch() * 1000.0) as u64) {
+                Ok(Some((dir, n, bytes))) => {
+                    let name = dir.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+                    let at = me.forget_dir(&dir, &name, ForgetBasis::Rejected);
+                    me.event(json!({"template_logs_moved": {"files": n, "bytes": bytes, "to": at.as_ref().map(|p| p.display().to_string()).map_err(|e| e.to_string())}}));
+                }
+                Ok(None) => {}
+                Err(e) => me.event(json!({"template_logs_moved": {"error": e.to_string()}})),
             }
         });
         let ckpts: Vec<(String, CheckpointRecord)> = self.journal.all("checkpoints").map_err(|e| e.to_string())?;
@@ -2280,6 +2555,74 @@ impl Manager {
         self.refresh_slot_gauges();
         Ok(json!(report))
     }
+}
+
+/// Begin `op` on the slot, or refuse it: 410 `env_gone` when the env is destroyed, 409 `wrong_state` otherwise.
+fn begin_op(slot: &Slot, op: Op) -> Result<SlotState, ApiError> {
+    let v = slot.view.read().unwrap();
+    v.state.begin(op).map_err(|e| refused(&v, e))
+}
+
+/// The error for an operation the env's state does not allow.
+pub fn refused(r: &SlotRecord, e: drumsd_core::state::TransitionError) -> ApiError {
+    if matches!(r.state, SlotState::Destroyed | SlotState::Destroying) {
+        let drumsd_core::state::TransitionError::NotAllowed { op, .. } = &e;
+        return gone_error(r, op);
+    }
+    ApiError::new(409, e.to_string()).with(json!({"code": "wrong_state", "state": r.state.name()}))
+}
+
+/// 410 `env_gone`: the env was destroyed (by a client's DELETE or by its lease); nothing can be done with it but read its record.
+pub fn gone_error(r: &SlotRecord, op: &str) -> ApiError {
+    let why = r.closed_reason.as_ref().map(|w| format!(" ({w})")).unwrap_or_default();
+    ApiError::new(410, format!("env {} is destroyed{why}: {op} is not possible; create a new env", r.id))
+        .with(json!({"code": "env_gone", "env": r.id, "closed_reason": r.closed_reason}))
+}
+
+/// When the env is quarantined, its current episode gets a failed `not_quarantined` gate that names the reason (once
+/// per episode), and its validity is recomputed: a quarantined env is never valid. Returns true when it added one.
+pub fn mark_quarantined(r: &mut SlotRecord) -> bool {
+    let SlotState::Quarantined { reason } = &r.state else { return false };
+    if r.episode == 0 || r.gates.get(Gate::NotQuarantined).is_some() {
+        return false;
+    }
+    let reason = reason.clone();
+    r.gates.push(GateResult::fail(Gate::NotQuarantined, 0.0, json!({"reason": reason})));
+    r.validity = r.gates.validity(&required_gates());
+    true
+}
+
+/// Why an episode is not valid, in words: every failed gate (a quarantine names its reason, an OOM kill its count),
+/// every pending gate, and, when no gate explains it, the env's state. Empty for a valid episode.
+pub fn invalid_reasons(r: &SlotRecord) -> Vec<String> {
+    let mut out = vec![];
+    let (failed, pending) = match &r.validity {
+        Validity::Valid => return out,
+        Validity::Invalid { gates } => (gates.clone(), vec![]),
+        Validity::Pending { gates } => (vec![], gates.clone()),
+    };
+    for g in &failed {
+        let d = r.gates.get(*g).map(|x| &x.detail);
+        out.push(match g {
+            Gate::NotQuarantined => format!("quarantined: {}", d.and_then(|d| d["reason"].as_str()).unwrap_or("?")),
+            Gate::NoOomKill => format!("no_oom_kill: the OOM killer took {} task(s) of the env", d.map(|d| d["oom_kills"].to_string()).unwrap_or_else(|| "?".into())),
+            _ if r.gates.get(*g).is_none() => format!("gate {} missing", g.as_str()),
+            _ => format!("gate {} failed", g.as_str()),
+        });
+    }
+    for g in &pending {
+        out.push(format!("gate {} still pending", g.as_str()));
+    }
+    if out.is_empty() {
+        out.push(match &r.state {
+            SlotState::Down { reason } => format!("env is down: {reason}"),
+            SlotState::Quarantined { reason } => format!("quarantined: {reason}"),
+            s => format!("episode ended in state {}{}", s.name(), r.last_error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()),
+        });
+    } else if !matches!(r.state, SlotState::Ready | SlotState::Quarantined { .. }) {
+        out.push(format!("env is {}", r.state.name()));
+    }
+    out
 }
 
 /// Key in slot.json that marks an env that failed at some point (value: the first reason seen).
@@ -2519,6 +2862,10 @@ pub fn pyautogui_command(code: &str) -> String {
 pub fn view(r: &SlotRecord) -> Value {
     let mut v = serde_json::to_value(r).unwrap();
     v["url"] = json!(format!("http://127.0.0.1:{}", r.port));
+    v["lease_expires_epoch"] = match (&r.lease, r.state.is_terminal()) {
+        (Some(l), false) => json!(l.expires_at(r.created_epoch, r.last_used_epoch.unwrap_or(r.created_epoch))),
+        _ => Value::Null,
+    };
     v
 }
 
@@ -2543,10 +2890,88 @@ pub fn b64(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn qrec(state: SlotState) -> SlotRecord {
+        let mut gates = GateReport::default();
+        for g in Gate::ALL {
+            gates.push(GateResult::pass(g, 0.0, json!({})));
+        }
+        SlotRecord { id: "s147".into(), num: 147, checkpoint: "osworld-ubuntu".into(), state, episode: 1, init_pid: Some(1), init_start_ticks: None,
+                     restore_generation: 1, leaf: 1, mode: "template".into(), port: 25147, extra_ports: vec![], validity: gates.validity(&required_gates()), gates,
+                     cost: CostRecord::default(), timings: BTreeMap::new(), last_error: None, task: None, ready_epoch: None, created_epoch: 0.0,
+                     updated_epoch: 0.0, task_setup_on_restore: false, usage: Ledger::default(), verified: None, closed_epoch: None, lease: None,
+                     last_used_epoch: None, closed_reason: None }
+    }
+
+    #[test]
+    fn a_quarantined_env_is_invalid_with_the_reason_named() {
+        // the blind user's case: a valid episode, then env.quarantine("client")
+        let mut r = qrec(SlotState::Ready);
+        assert_eq!(r.validity, Validity::Valid);
+        assert!(!mark_quarantined(&mut r), "a ready env is not marked");
+        assert!(invalid_reasons(&r).is_empty());
+        r.state = SlotState::Quarantined { reason: "client".into() };
+        assert!(mark_quarantined(&mut r));
+        assert_eq!(r.validity, Validity::Invalid { gates: vec![Gate::NotQuarantined] });
+        assert_eq!(r.gates.get(Gate::NotQuarantined).unwrap().detail["reason"], "client");
+        assert_eq!(invalid_reasons(&r), vec!["quarantined: client".to_string()]);
+        assert!(!mark_quarantined(&mut r), "once per episode");
+        assert_eq!(r.gates.gates.iter().filter(|g| g.gate == Gate::NotQuarantined).count(), 1);
+        // the API's verdict object says so
+        let v = serde_json::to_value(&r.validity).unwrap();
+        assert_eq!(v, json!({"verdict": "invalid", "gates": ["not_quarantined"]}));
+        // a new episode (reset after release) starts from its own gates
+        let mut n = qrec(SlotState::Ready);
+        n.episode = 2;
+        assert_eq!(n.validity, Validity::Valid);
+    }
+
+    #[test]
+    fn invalid_reasons_never_come_back_empty_for_an_invalid_episode() {
+        let mut r = qrec(SlotState::Down { reason: "task setup failed: download".into() });
+        r.validity = Validity::Invalid { gates: vec![] };
+        assert_eq!(invalid_reasons(&r), vec!["env is down: task setup failed: download".to_string()]);
+        let mut o = qrec(SlotState::Ready);
+        o.gates.push(GateResult::fail(Gate::NoOomKill, 0.0, json!({"oom_kills": 2})));
+        o.validity = o.gates.validity(&required_gates());
+        assert_eq!(invalid_reasons(&o), vec!["no_oom_kill: the OOM killer took 2 task(s) of the env".to_string()]);
+        let mut p = qrec(SlotState::Ready);
+        p.gates.push(GateResult::pending(Gate::AliveAfterResume));
+        p.validity = p.gates.validity(&required_gates());
+        assert_eq!(invalid_reasons(&p), vec!["gate alive_after_resume still pending".to_string()]);
+    }
+
+    #[test]
+    fn operations_on_a_destroyed_env_are_410_env_gone() {
+        let mut r = qrec(SlotState::Destroyed);
+        r.closed_reason = Some("lease: idle 1800 s".into());
+        let e = refused(&r, SlotState::Destroyed.begin(Op::Step).unwrap_err());
+        assert_eq!(e.status, 410);
+        assert_eq!(e.detail.as_ref().unwrap()["code"], "env_gone");
+        assert!(e.message.contains("lease: idle 1800 s") && e.message.contains("step"), "{}", e.message);
+        let e = refused(&qrec(SlotState::Destroying), SlotState::Destroying.begin(Op::Reset).unwrap_err());
+        assert_eq!(e.status, 410);
+        // a live env in the wrong state is still 409, with a code
+        let q = qrec(SlotState::Quarantined { reason: "x".into() });
+        let e = refused(&q, q.state.begin(Op::Step).unwrap_err());
+        assert_eq!((e.status, e.detail.unwrap()["code"].clone()), (409, json!("wrong_state")));
+    }
+
+    #[test]
+    fn the_view_shows_when_the_lease_runs_out() {
+        let mut r = qrec(SlotState::Ready);
+        r.created_epoch = 1000.0;
+        r.last_used_epoch = Some(1500.0);
+        r.lease = Some(Lease { idle_timeout_s: Some(60.0), ttl_s: None });
+        assert_eq!(view(&r)["lease_expires_epoch"], json!(1560.0));
+        r.state = SlotState::Destroyed;
+        assert!(view(&r)["lease_expires_epoch"].is_null());
+    }
+
     fn ck(captured_from: Option<&str>, provenance: Option<Value>) -> CheckpointRecord {
         CheckpointRecord { id: "osworld-ubuntu".into(), slot: 0, socket: "/s".into(), server_pid: None, argv_marker: "m".into(),
                            expected_state_hash: None, hash_reference: "r".into(), captured_from: captured_from.map(|s| s.into()),
-                           created_epoch: 0.0, server_ready_s: 0.0, task: None, quiescence: None, provenance }
+                           created_epoch: 0.0, server_ready_s: 0.0, task: None, quiescence: None, provenance,
+                           lease: None, delete_with_children: false, last_used_epoch: None }
     }
 
     #[test]

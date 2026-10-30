@@ -116,6 +116,56 @@ pub struct Config {
     /// Health warns when the state dir's free space falls below this percentage (default 15).
     #[serde(default = "d_state_warn_pct")]
     pub state_warn_free_pct: f64,
+    /// Leases: envs and saved states nobody uses are reaped (see `drumsd_core::lease`).
+    #[serde(default)]
+    pub lease: LeaseConfig,
+}
+
+/// `lease` in the config file: the defaults for envs and saved states (create, fork and save can override them).
+/// `null` or 0 turns a limit off.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseConfig {
+    /// An env nobody used (no API request naming it) for this long is destroyed. Default 1800 s.
+    #[serde(default = "d_env_idle")]
+    pub env_idle_timeout_s: Option<f64>,
+    /// An env is destroyed this long after it was created. Default none.
+    #[serde(default)]
+    pub env_ttl_s: Option<f64>,
+    /// A saved state with no env made from it for this long is deleted. Default 1800 s.
+    #[serde(default = "d_state_idle")]
+    pub state_idle_timeout_s: Option<f64>,
+    /// A saved state is deleted this long after it was made (once no env made from it exists). Default none.
+    #[serde(default)]
+    pub state_ttl_s: Option<f64>,
+    /// How often the reaper looks (default 15 s).
+    #[serde(default = "d_reap")]
+    pub reap_interval_s: f64,
+}
+
+impl Default for LeaseConfig {
+    fn default() -> Self {
+        LeaseConfig { env_idle_timeout_s: d_env_idle(), env_ttl_s: None, state_idle_timeout_s: d_state_idle(), state_ttl_s: None, reap_interval_s: d_reap() }
+    }
+}
+
+impl LeaseConfig {
+    pub fn env(&self) -> drumsd_core::lease::Lease {
+        drumsd_core::lease::Lease::resolve(None, None, drumsd_core::lease::Lease { idle_timeout_s: self.env_idle_timeout_s, ttl_s: self.env_ttl_s })
+    }
+    pub fn state(&self) -> drumsd_core::lease::Lease {
+        drumsd_core::lease::Lease::resolve(None, None, drumsd_core::lease::Lease { idle_timeout_s: self.state_idle_timeout_s, ttl_s: self.state_ttl_s })
+    }
+}
+
+fn d_env_idle() -> Option<f64> {
+    Some(1800.0)
+}
+fn d_state_idle() -> Option<f64> {
+    Some(1800.0)
+}
+fn d_reap() -> f64 {
+    15.0
 }
 
 /// `retention` in the config file.
@@ -322,6 +372,24 @@ mod tests {
         let caps = c.forget_caps();
         assert_eq!((caps.summary, caps.full, caps.total), (Some(2 << 30), None, None), "failure records are never pruned by default");
         assert_eq!(c.state_min_free_mib, 1024);
+        assert_eq!(c.lease, LeaseConfig::default(), "an old config gets the default leases");
+        assert_eq!(c.lease.env().idle_timeout_s, Some(1800.0));
+        assert_eq!(c.lease.state().idle_timeout_s, Some(1800.0));
+        assert_eq!((c.lease.env().ttl_s, c.lease.state().ttl_s), (None, None));
+    }
+
+    #[test]
+    fn lease_config_parses_and_null_or_zero_is_off() {
+        let mut v = serde_json::json!({"state_dir": "/s", "journal_dir": "/j", "lower": "/l", "image_sha256": "x", "py_src": "/p",
+            "py_config": "/c", "criu": "/criu", "vcpus": 4, "memory_mib": 4096, "port_base": 25000, "listen": "127.0.0.1:1"});
+        v["lease"] = serde_json::json!({"env_idle_timeout_s": null, "env_ttl_s": 7200, "state_idle_timeout_s": 0, "reap_interval_s": 5});
+        let c: Config = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(c.lease.env().idle_timeout_s, None);
+        assert_eq!(c.lease.env().ttl_s, Some(7200.0));
+        assert_eq!(c.lease.state().idle_timeout_s, None);
+        assert_eq!(c.lease.reap_interval_s, 5.0);
+        v["lease"] = serde_json::json!({"env_idle_timeout": 5});
+        assert!(serde_json::from_value::<Config>(v).is_err(), "a misspelt lease field is refused");
     }
 
     #[test]
