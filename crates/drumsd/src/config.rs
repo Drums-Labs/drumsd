@@ -92,6 +92,39 @@ pub struct Config {
     /// Capture readiness: before every capture (save, fork) the tree must be quiescent, and the dump must match it.
     #[serde(default)]
     pub quiesce: QuiesceConfig,
+    /// Where records of destroyed envs, deleted states and rejected dumps go (one .tar.zst each). Must be on disk,
+    /// not the state tmpfs. Default: `<parent of journal_dir>/forgotten`.
+    #[serde(default)]
+    pub forgotten_dir: Option<PathBuf>,
+    /// Retention of `forgotten_dir`: None (default) keeps everything; a number deletes the oldest archives beyond it.
+    #[serde(default)]
+    pub forgotten_max_gib: Option<f64>,
+    /// Health warns when `forgotten_dir` holds more than this (default 50 GiB).
+    #[serde(default = "d_forgotten_warn")]
+    pub forgotten_warn_gib: f64,
+    /// Restores and captures are refused (a clear `state_dir_full` error, never a half-written upper layer) when
+    /// the state dir has less free space than this (default 1024 MiB).
+    #[serde(default = "d_state_min_free")]
+    pub state_min_free_mib: u64,
+    /// Health warns when the state dir's free space falls below this percentage (default 15).
+    #[serde(default = "d_state_warn_pct")]
+    pub state_warn_free_pct: f64,
+}
+
+fn d_forgotten_warn() -> f64 {
+    50.0
+}
+fn d_state_min_free() -> u64 {
+    1024
+}
+fn d_state_warn_pct() -> f64 {
+    15.0
+}
+
+impl Config {
+    pub fn forgotten_dir(&self) -> PathBuf {
+        self.forgotten_dir.clone().unwrap_or_else(|| self.journal_dir.parent().map(|p| p.join("forgotten")).unwrap_or_else(|| self.journal_dir.join("forgotten")))
+    }
 }
 
 /// Capture readiness (see `drumsd_core::quiesce`). A capture waits until the slot's tree shows no task leaving and
@@ -234,5 +267,8 @@ mod tests {
         let c = cfg("127.0.0.1:7070", false, None);
         assert!(!c.nested_pidns && c.osw.is_none() && c.host_usd_per_hour == 0.0);
         assert_eq!(c.quiesce, QuiesceConfig::default(), "an old config gets the readiness check with its defaults");
+        assert_eq!(c.forgotten_dir(), PathBuf::from("/forgotten"), "records go next to the journal, not to the state dir");
+        assert!(c.forgotten_max_gib.is_none(), "keep everything by default");
+        assert_eq!(c.state_min_free_mib, 1024);
     }
 }

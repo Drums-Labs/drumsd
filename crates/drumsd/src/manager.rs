@@ -17,7 +17,7 @@ use drumsd_core::recovery::{self, Action, Attempt, CostRecord, FailureClass, Pol
 use drumsd_core::state::{Op, Outcome, SlotState};
 use drumsd_core::statehash;
 use drumsd_core::usage::{self, Ledger, Usage};
-use drumsd_linux::{cgroup, checks, guest::Guest, hook, procfs, proxy, quiesce, restore, slotfs, template};
+use drumsd_linux::{cgroup, checks, forget, guest::Guest, hook, procfs, proxy, quiesce, restore, slotfs, template};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -200,6 +200,10 @@ impl Manager {
         metrics.counter("drumsd_upper_spare_total", "Fresh upper layers by source (warm spare or cold copy)");
         metrics.counter("drumsd_recoveries_total", "Restores that succeeded after a retry");
         metrics.gauge("drumsd_slots", "Slots by state");
+        metrics.gauge("drumsd_state_dir_free_bytes", "Free bytes on the state dir (tmpfs)");
+        metrics.gauge("drumsd_forgotten_bytes", "Bytes of kept records of destroyed envs, by where they are");
+        metrics.counter("drumsd_forget_total", "Slot directories moved off the state dir, by whether they were packed");
+        metrics.counter("drumsd_forget_tmpfs_bytes_freed_total", "Bytes of kept records moved off the state dir");
         metrics.gauge("drumsd_template_servers", "Template servers by liveness");
         metrics.histogram("drumsd_reset_seconds", "Reset latency, kill to all synchronous gates passed", LATENCY_BUCKETS);
         metrics.histogram("drumsd_create_seconds", "Create latency, branch dir to all synchronous gates passed", LATENCY_BUCKETS);
@@ -418,10 +422,8 @@ impl Manager {
                     std::fs::remove_dir_all(&p)?;
                 }
             }
-            let keep = me.cfg.state_dir.join("forgotten").join(format!("slot{}-{}", c2.slot, (drumsd_linux::now_epoch() * 1000.0) as u64));
-            std::fs::create_dir_all(keep.parent().unwrap())?;
             if sp.dir.exists() {
-                std::fs::rename(&sp.dir, &keep)?;
+                me.forget_dir(&sp.dir, &format!("slot{}-{}", c2.slot, (drumsd_linux::now_epoch() * 1000.0) as u64))?;
             }
             Ok::<_, std::io::Error>(freed)
         })
@@ -880,7 +882,8 @@ impl Manager {
         let cg_rel = format!("/{}", cg.strip_prefix(cgroup::CG_ROOT).unwrap().display());
         t.insert("kill".into(), round3(ts.elapsed().as_secs_f64()));
 
-        // 2. fresh upper/work (warm spare when ready)
+        // 2. fresh upper/work (warm spare when ready), only with room for it on the state dir
+        self.state_space_ok().map_err(|e| fail(FailureClass::StateDirFull, e, &gates, &t))?;
         let ts = Instant::now();
         let swap = slotfs::swap_in_fresh_upper(&sp).map_err(|e| fail(FailureClass::Infra, format!("fresh upper: {e}"), &gates, &t))?;
         t.insert("upper".into(), round3(ts.elapsed().as_secs_f64()));
@@ -1299,7 +1302,12 @@ impl Manager {
                 let rep = json!({"attempts": attempts, "unstable": rep.unstable, "seconds": round3(t0.elapsed().as_secs_f64())});
                 return Err(self.not_quiescent(&slot, id, &rep, &format!("no quiescent window of {} s within {} s", params.window_s, params.timeout_s)));
             };
-            // 2. dump (the tree keeps running)
+            // 2. dump (the tree keeps running), only with room for the images on the state dir
+            if let Err(e) = self.state_space_ok() {
+                back_to_ready(self);
+                self.account(Some(&slot), |l| l.failure("capture:state_dir_full"));
+                return Err(ApiError::new(507, e).with(json!({"code": "state_dir_full"})));
+            }
             let into = match self.alloc_num() {
                 Ok(x) => x,
                 Err(e) => {
@@ -1422,11 +1430,43 @@ impl Manager {
                 let _ = std::fs::remove_dir_all(&p);
             }
         }
-        let keep = self.cfg.state_dir.join("forgotten").join(format!("slot{into}-rejected-{}", (drumsd_linux::now_epoch() * 1000.0) as u64));
-        let _ = std::fs::create_dir_all(keep.parent().unwrap());
-        match std::fs::rename(&sp.dir, &keep) {
-            Ok(()) => keep.display().to_string(),
+        match self.forget_dir(&sp.dir, &format!("slot{into}-rejected-{}", (drumsd_linux::now_epoch() * 1000.0) as u64)) {
+            Ok(p) => p.display().to_string(),
             Err(e) => format!("not moved: {e}"),
+        }
+    }
+
+    /// Move a slot directory's kept records off the state tmpfs into `forgotten_dir` (packed), apply retention, and
+    /// account for it. Returns where the records are. Blocking.
+    fn forget_dir(&self, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+        let fd = self.cfg.forgotten_dir();
+        let f = forget::forget(&self.cfg.state_dir, &fd, dir, name)?;
+        self.metrics.inc("drumsd_forget_total", &[("archived", if f.archived { "true" } else { "false" })], 1.0);
+        self.metrics.inc("drumsd_forget_tmpfs_bytes_freed_total", &[], if f.archived { f.bytes_on_tmpfs as f64 } else { 0.0 });
+        if !f.archived {
+            self.event(json!({"forget": name, "archived": false, "kept_at": f.at, "error": f.error}));
+            tracing::error!("records of {name} could not be packed to {}: {:?}; kept on the state dir", fd.display(), f.error);
+        }
+        if let Some(max) = self.cfg.forgotten_max_gib {
+            let gone = forget::prune(&fd, (max * (1u64 << 30) as f64) as u64);
+            if !gone.is_empty() {
+                self.event(json!({"forgotten_retention": {"max_gib": max, "deleted": gone}}));
+            }
+        }
+        Ok(f.at)
+    }
+
+    /// Free space on the state dir, refused below the reserve.
+    fn state_space_ok(&self) -> Result<(), String> {
+        let free = forget::free_bytes(&self.cfg.state_dir);
+        if let Some(f) = free {
+            self.metrics.set("drumsd_state_dir_free_bytes", &[], f as f64);
+        }
+        match free {
+            Some(f) if f < self.cfg.state_min_free_mib << 20 => Err(format!(
+                "state dir {} has {} MiB free, below the {} MiB reserve (state_min_free_mib): refused before writing anything; close envs or delete saved states",
+                self.cfg.state_dir.display(), f >> 20, self.cfg.state_min_free_mib)),
+            _ => Ok(()),
         }
     }
 
@@ -1543,10 +1583,8 @@ impl Manager {
                     std::fs::remove_dir_all(&p)?;
                 }
             }
-            // records and logs are kept; the directory moves aside so the number can be reused
-            let keep = me.cfg.state_dir.join("forgotten").join(format!("slot{num}-{}", (drumsd_linux::now_epoch() * 1000.0) as u64));
-            std::fs::create_dir_all(keep.parent().unwrap())?;
-            std::fs::rename(&sp.dir, &keep)?;
+            // records and logs are kept (packed on disk, off the state tmpfs); the number can be reused
+            let keep = me.forget_dir(&sp.dir, &format!("slot{num}-{}", (drumsd_linux::now_epoch() * 1000.0) as u64))?;
             Ok::<_, std::io::Error>(keep)
         })
         .await
@@ -1840,11 +1878,39 @@ impl Manager {
             (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
         };
         let ok = ck.iter().all(|c| !c["template_server"].is_null());
+        let mut warnings: Vec<String> = vec![];
+        let (sf, st) = (forget::free_bytes(&self.cfg.state_dir), forget::total_bytes(&self.cfg.state_dir));
+        if let (Some(f), Some(t)) = (sf, st) {
+            self.metrics.set("drumsd_state_dir_free_bytes", &[], f as f64);
+            let pct = 100.0 * f as f64 / t.max(1) as f64;
+            if pct < self.cfg.state_warn_free_pct {
+                warnings.push(format!("state dir {} is {:.1}% free ({} MiB; restores are refused below {} MiB)", self.cfg.state_dir.display(), pct, f >> 20, self.cfg.state_min_free_mib));
+            }
+        }
+        let fd = self.cfg.forgotten_dir();
+        let fbytes: u64 = forget::archives(&fd).iter().map(|x| x.1).sum();
+        let left_on_tmpfs = forget::dir_bytes(&self.cfg.state_dir.join("forgotten"));
+        self.metrics.set("drumsd_forgotten_bytes", &[("where", "disk")], fbytes as f64);
+        self.metrics.set("drumsd_forgotten_bytes", &[("where", "state_dir")], left_on_tmpfs as f64);
+        if fbytes as f64 > self.cfg.forgotten_warn_gib * (1u64 << 30) as f64 {
+            warnings.push(format!("{} holds {:.1} GiB of kept env records (forgotten_warn_gib {}; set forgotten_max_gib for retention)", fd.display(), fbytes as f64 / (1u64 << 30) as f64, self.cfg.forgotten_warn_gib));
+        }
+        if left_on_tmpfs > 0 {
+            warnings.push(format!("{} MiB of env records could not be packed and are on the state dir ({}/forgotten)", left_on_tmpfs >> 20, self.cfg.state_dir.display()));
+        }
+        {
+            use std::os::unix::fs::MetadataExt;
+            let dev = |p: &Path| std::fs::metadata(p).ok().map(|m| m.dev());
+            if dev(&fd).is_some() && dev(&fd) == dev(&self.cfg.state_dir) {
+                warnings.push(format!("forgotten_dir {} is on the same filesystem as the state dir", fd.display()));
+            }
+        }
         json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"), "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
                "image_sha256": self.cfg.image_sha256, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
-               "state_dir_free_bytes": free(&self.cfg.state_dir),
+               "state_dir_free_bytes": free(&self.cfg.state_dir), "warnings": warnings,
+               "forgotten": {"dir": fd, "bytes": fbytes, "on_state_dir_bytes": left_on_tmpfs, "max_gib": self.cfg.forgotten_max_gib},
                "host_mem_available_bytes": std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:"))
                    .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
                "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
@@ -1855,6 +1921,15 @@ impl Manager {
     /// Reconcile the journal with the kernel after a (re)start. Transient states mean the daemon died mid-operation.
     pub async fn recover(self: &Arc<Self>) -> Result<Value, String> {
         let mut report = vec![];
+        // records an older daemon left on the state tmpfs (or a forget cut short) are packed to disk, in the background
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let swept = forget::sweep(&me.cfg.state_dir, &me.cfg.forgotten_dir());
+            if !swept.is_empty() {
+                let bytes: u64 = swept.iter().filter(|f| f.archived).map(|f| f.bytes_on_tmpfs).sum();
+                me.event(json!({"forgotten_swept": swept.len(), "archived": swept.iter().filter(|f| f.archived).count(), "tmpfs_bytes_freed": bytes}));
+            }
+        });
         let ckpts: Vec<(String, CheckpointRecord)> = self.journal.all("checkpoints").map_err(|e| e.to_string())?;
         for (_, c) in ckpts {
             let sp = slotfs::paths(&self.cfg.state_dir, c.slot);

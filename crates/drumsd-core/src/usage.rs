@@ -191,6 +191,7 @@ pub fn cause_of(class: &crate::recovery::FailureClass, gate: Option<&str>) -> St
         TemplateServerDown => "template_server_down".into(),
         RestoreFailed => "restore_failed".into(),
         Infra => "infra".into(),
+        StateDirFull => "state_dir_full".into(),
     }
 }
 

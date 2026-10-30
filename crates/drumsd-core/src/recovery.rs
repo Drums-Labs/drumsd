@@ -27,6 +27,8 @@ pub enum FailureClass {
     GateFailed,
     /// Host-side plumbing failed (cgroup, mount, files).
     Infra,
+    /// The state tmpfs has less free space than the configured reserve: refused before anything was restored.
+    StateDirFull,
 }
 
 /// Classify a failed restore from its error text and CRIU log tail.
