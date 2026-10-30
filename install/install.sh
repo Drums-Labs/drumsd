@@ -28,7 +28,11 @@ done
 LOG=/var/log/drums-install.log
 D=/var/lib/drums; O=/opt/drums; E=/etc/drums
 mkdir -p "$D" "$O" "$E"
+exec 9> "$D/install.lock"
+flock -n 9 || { echo "another install.sh is running (lock $D/install.lock)" >&2; exit 1; }
 exec > >(tee -a "$LOG") 2>&1
+BG=""
+trap '[ -n "$BG" ] && kill $BG 2>/dev/null; true' EXIT
 T0=$(date +%s)
 PH="$D/install-phases.jsonl"; : > "$PH"
 ts() { date -u +%FT%TZ; }
@@ -122,7 +126,7 @@ IMG="$D/image"; mkdir -p "$IMG"
   echo "$QSHA $(stat -c %s.%Y "$Q")" > "$IMG/qcow2.verified"
   echo "image verified"
 ) > "$D/image.log" 2>&1 &
-IMG_PID=$!
+IMG_PID=$!; BG=$IMG_PID
 
 # ------------------------------------------------------------------------------------------------ 5. CRIU build
 t=$(date +%s)
@@ -159,6 +163,7 @@ phase osworld $t
 
 # ------------------------------------------------------------------------------------------------ 8. wait for the image, attach it read-only, inspect the root
 wait $IMG_PID || { cat "$D/image.log"; die "image download/verify"; }
+BG=""
 phase image_download_verify $t_img
 t=$(date +%s)
 LAB="$O/src/drums-lab/benchmark"
