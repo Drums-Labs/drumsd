@@ -1459,6 +1459,11 @@ impl Manager {
             let out = match res {
                 Ok(out) => out,
                 Err(e) => {
+                    // the verb's directory (records and the failed dump's log) leaves the state dir like a rejected
+                    // dump's: it held the tmpfs and the slot number until the next restart before
+                    let me = self.clone();
+                    let kept = tokio::task::spawn_blocking(move || me.discard_dump(into)).await.unwrap_or_else(|e| format!("not moved: {e}"));
+                    self.event(json!({"slot": id, "capture_failed": e, "into": into, "records": kept}));
                     let secs = t0.elapsed().as_secs_f64();
                     self.account(Some(&slot), |l| {
                         l.op("capture", secs, false);
@@ -2368,6 +2373,15 @@ mod tests {
         if let Ok(o) = std::process::Command::new("python3").args(["-c", &format!("import ast; ast.parse({:?})", c)]).output() {
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         }
+    }
+
+    #[test]
+    fn a_failed_capture_verb_moves_its_directory_off_the_state_dir() {
+        let src = include_str!("manager.rs");
+        let f = src.find("let res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into)).await;").unwrap();
+        let body = &src[f..f + 1500];
+        let err = body.find("Err(e) => {").unwrap();
+        assert!(body[err..].find("me.discard_dump(into)").unwrap() < body[err..].find("return Err(ApiError::new(500, e));").unwrap());
     }
 
     #[test]
