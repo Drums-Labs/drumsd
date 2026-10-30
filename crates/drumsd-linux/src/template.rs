@@ -158,6 +158,50 @@ pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path) -> io::Res
     Ok(Server { socket: sock.into(), pidfile: pidf, pid, images: images.into(), log, ready_s: t0.elapsed().as_secs_f64(), cgroup: tcg, memory_current: cur })
 }
 
+/// Files any process on the host holds open (from /proc/*/fd).
+fn open_files() -> std::collections::BTreeSet<PathBuf> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok(rd) = fs::read_dir("/proc") else { return out };
+    for e in rd.flatten() {
+        if !e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(fds) = fs::read_dir(e.path().join("fd")) else { continue };
+        for f in fds.flatten() {
+            if let Ok(t) = fs::read_link(f.path()) {
+                out.insert(t);
+            }
+        }
+    }
+    out
+}
+
+/// Template-server logs (`template-server-<ms>.{log,out}`) that drumsd < 0.4.2 wrote into the state dir itself, where
+/// nothing removed them when their checkpoint was deleted. Those no process holds open are moved into one new
+/// directory `<state_dir>/template-logs-<now_ms>` (same filesystem: a rename) for the caller to pack to disk.
+/// Returns (that dir, files, bytes), or None when there was nothing to move.
+pub fn collect_loose_logs(state_dir: &Path, now_ms: u64) -> io::Result<Option<(PathBuf, usize, u64)>> {
+    let held = open_files();
+    let mut loose = vec![];
+    for e in fs::read_dir(state_dir)?.flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.starts_with("template-server-") && (n.ends_with(".log") || n.ends_with(".out")) && e.path().is_file() && !held.contains(&e.path()) {
+            loose.push(e.path());
+        }
+    }
+    if loose.is_empty() {
+        return Ok(None);
+    }
+    let dir = state_dir.join(format!("template-logs-{now_ms}"));
+    fs::create_dir_all(&dir)?;
+    let mut bytes = 0;
+    for p in &loose {
+        bytes += fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        fs::rename(p, dir.join(p.file_name().unwrap()))?;
+    }
+    Ok(Some((dir, loose.len(), bytes)))
+}
+
 pub fn alive(s: &Server) -> bool {
     adopt(&s.socket, &s.images) == Some(s.pid)
 }
@@ -206,6 +250,27 @@ mod upgrade_tests {
         assert!(!is_orphan_server(&srv, "/var/lib/other", 11, &owned), "another state dir is not ours");
         assert!(!is_orphan_server(&cl("/opt/drums/criu/bin/criu restore -D x"), "/var/lib/drums/state", 11, &owned));
     }
+    #[test]
+    fn loose_template_logs_are_collected_and_open_ones_left() {
+        let d = tempfile::tempdir().unwrap();
+        for n in ["template-server-1.log", "template-server-1.out", "template-server-2.log"] {
+            fs::write(d.path().join(n), vec![b'x'; 100]).unwrap();
+        }
+        fs::write(d.path().join("other.log"), b"keep").unwrap();
+        fs::create_dir(d.path().join("slot100")).unwrap();
+        // one log still written by a live process (this test): stays
+        let _held = fs::OpenOptions::new().append(true).open(d.path().join("template-server-2.log")).unwrap();
+        let (dir, n, bytes) = collect_loose_logs(d.path(), 7).unwrap().unwrap();
+        assert_eq!((n, bytes), (2, 200));
+        assert_eq!(dir, d.path().join("template-logs-7"));
+        assert!(dir.join("template-server-1.out").is_file());
+        assert!(d.path().join("template-server-2.log").is_file(), "an open log is not moved");
+        assert!(d.path().join("other.log").is_file());
+        drop(_held);
+        assert_eq!(collect_loose_logs(d.path(), 8).unwrap().map(|x| x.1), Some(1));
+        assert!(collect_loose_logs(d.path(), 9).unwrap().is_none(), "nothing left");
+    }
+
     #[test]
     fn a_server_of_a_replaced_criu_binary_is_not_adopted() {
         assert!(exe_replaced(Path::new("/opt/drums/criu/bin/criu (deleted)")));
