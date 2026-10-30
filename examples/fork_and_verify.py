@@ -129,10 +129,9 @@ def one_task(client, task_id, prefix, conts, log):
     for a in prefix:
         r = env.step(a)
         log.append({"env": env.id, "action": a, "seconds": r.seconds})
-    # settle before the checkpoint: a process ended by the last action (closing a tab ends its renderer) must be gone
-    # before the capture, or it exits in every child after the restore and the alive gate counts it (it cannot tell
-    # that exit from a bad restore)
-    env.step({"type": "sleep", "seconds": 3})
+    # no settle sleep: fork() waits on the server until the tree is quiescent (no process or thread starting or
+    # exiting, nothing being reaped) and checks that the dump is that tree, so a process the last action is ending
+    # (closing a tab can end its renderer) is never captured half-way out
     obs = env.observe()
     rec["parent_observation"] = {"size": [obs.width, obs.height], "meta": obs.meta}
     t1 = time.monotonic()
@@ -147,6 +146,7 @@ def one_task(client, task_id, prefix, conts, log):
         env.close()
         raise
     rec["fork_s"] = round(time.monotonic() - t1, 3)
+    rec["fork_quiescence"] = ((env.last_fork or {}).get("checkpoint") or {}).get("quiescence")
     print(f"[{task_id[:8]}] fork(8) in {rec['fork_s']} s: {[k.id for k in kids]}", flush=True)
 
     def cont(pair):
