@@ -2240,6 +2240,35 @@ mod tests {
     }
 
     #[test]
+    fn restore_permit_is_released_before_the_gates() {
+        // L128a: the permit was held through gates, guest probe and task setup, so creates queued ~56 s for one.
+        // restore_once must drop it once CRIU's restore is done (the pid is read) and before the kernel gates.
+        let src = include_str!("manager.rs");
+        let f = src.find("fn restore_once(&self, slot: &Slot, private: bool, permit: tokio::sync::OwnedSemaphorePermit)").expect("restore_once takes the permit");
+        let body = &src[f..];
+        let drop_at = body.find("drop(permit);").expect("restore_once drops the permit");
+        let restore_at = body.find("restore::run(").unwrap();
+        let gates_at = body.find("// 5. kernel-side gates").unwrap();
+        assert!(restore_at < drop_at && drop_at < gates_at, "permit must cover the CRIU restore and end before the gates");
+        // and the caller no longer holds it after restore_once returns
+        assert!(src.contains("spawn_blocking(move || me.restore_once(&s2, private, permit))"));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_permit_lets_the_next_restore_start_at_once() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let p = sem.clone().acquire_owned().await.unwrap();
+        let held = std::thread::spawn(move || {
+            drop(p); // what restore_once does after CRIU
+            std::thread::sleep(Duration::from_millis(300)); // gates and setup, without the permit
+        });
+        let t = Instant::now();
+        let _p2 = tokio::time::timeout(Duration::from_millis(200), sem.clone().acquire_owned()).await.expect("next restore must not wait for the gates").unwrap();
+        assert!(t.elapsed() < Duration::from_millis(200));
+        held.join().unwrap();
+    }
+
+    #[test]
     fn base64_matches_rfc4648() {
         assert_eq!(b64(b""), "");
         assert_eq!(b64(b"f"), "Zg==");
