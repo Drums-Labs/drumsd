@@ -183,6 +183,8 @@ pub struct Manager {
     pub token: String,
     pub started_epoch: f64,
     pub criu_sha256: String,
+    /// Records pruned by retention since start, by class: (files, bytes).
+    forget_pruned: StdMutex<BTreeMap<&'static str, (u64, u64)>>,
 }
 
 /// Per-request overrides of the capture-readiness wait (the daemon's `quiesce` config gives the defaults).
@@ -203,6 +205,9 @@ pub fn write_dumped_reference(dir: &Path) -> Result<usize, String> {
     std::fs::write(dir.join("dumped-reference.json"), serde_json::to_vec_pretty(&rec).unwrap()).map_err(|e| e.to_string())?;
     Ok(r.len())
 }
+
+/// Health warns when the filesystem holding `forgotten_dir` has less than this percentage free.
+const FORGOTTEN_DISK_MIN_FREE_PCT: f64 = 10.0;
 
 pub fn required_gates() -> Vec<Gate> {
     Gate::ALL.to_vec()
@@ -247,8 +252,11 @@ impl Manager {
         metrics.counter("drumsd_recoveries_total", "Restores that succeeded after a retry");
         metrics.gauge("drumsd_slots", "Slots by state");
         metrics.gauge("drumsd_state_dir_free_bytes", "Free bytes on the state dir (tmpfs)");
-        metrics.gauge("drumsd_forgotten_bytes", "Bytes of kept records of destroyed envs, by where they are");
-        metrics.counter("drumsd_forget_total", "Slot directories moved off the state dir, by whether they were packed");
+        metrics.gauge("drumsd_forgotten_bytes", "Bytes of kept records of destroyed envs, by where they are (where) and by class (full, summary)");
+        metrics.gauge("drumsd_forgotten_files", "Kept records of destroyed envs, by class (full, summary)");
+        metrics.counter("drumsd_forget_total", "Slot directories moved off the state dir, by class (full, summary) and whether they were kept off the tmpfs");
+        metrics.counter("drumsd_forget_pruned_total", "Kept records deleted by retention, by class");
+        metrics.counter("drumsd_forget_pruned_bytes_total", "Bytes of kept records deleted by retention, by class");
         metrics.counter("drumsd_forget_tmpfs_bytes_freed_total", "Bytes of kept records moved off the state dir");
         metrics.gauge("drumsd_template_servers", "Template servers by liveness");
         metrics.histogram("drumsd_reset_seconds", "Reset latency, kill to all synchronous gates passed", LATENCY_BUCKETS);
@@ -271,6 +279,7 @@ impl Manager {
             token,
             started_epoch: drumsd_linux::now_epoch(),
             criu_sha256,
+            forget_pruned: StdMutex::new(BTreeMap::new()),
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
             exe,
@@ -346,6 +355,14 @@ impl Manager {
         let from = v.state.name();
         f(&mut v);
         v.updated_epoch = drumsd_linux::now_epoch();
+        // a failure leaves a sticky mark in slot.json: the env's records are kept in full at the end, even after a
+        // later reset succeeded and cleared last_error
+        if let Some(why) = failure_seen(&v) {
+            let sp = slotfs::paths(&self.cfg.state_dir, v.num);
+            if sp.dir.is_dir() {
+                let _ = slotfs::record(&sp, json!({FAILURE_SEEN: why}));
+            }
+        }
         if let Err(e) = self.journal.put("slots", &v.id, &*v) {
             tracing::error!("journal put {}: {e}", v.id);
         }
@@ -554,7 +571,7 @@ impl Manager {
                 }
             }
             if sp.dir.exists() {
-                me.forget_dir(&sp.dir, &format!("slot{}-{}", c2.slot, (drumsd_linux::now_epoch() * 1000.0) as u64))?;
+                me.forget_dir(&sp.dir, &format!("slot{}-{}", c2.slot, (drumsd_linux::now_epoch() * 1000.0) as u64), ForgetBasis::Checkpoint(&c2))?;
             }
             Ok::<_, std::io::Error>(freed)
         })
@@ -1573,30 +1590,58 @@ impl Manager {
                 let _ = std::fs::remove_dir_all(&p);
             }
         }
-        match self.forget_dir(&sp.dir, &format!("slot{into}-rejected-{}", (drumsd_linux::now_epoch() * 1000.0) as u64)) {
+        match self.forget_dir(&sp.dir, &format!("slot{into}-rejected-{}", (drumsd_linux::now_epoch() * 1000.0) as u64), ForgetBasis::Rejected) {
             Ok(p) => p.display().to_string(),
             Err(e) => format!("not moved: {e}"),
         }
     }
 
-    /// Move a slot directory's kept records off the state tmpfs into `forgotten_dir` (packed), apply retention, and
-    /// account for it. Returns where the records are. Blocking.
-    fn forget_dir(&self, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    /// Move a slot directory's kept records off the state tmpfs into `forgotten_dir` (a full archive, or a summary for
+    /// an env that ended valid, see `forget_disposition`), apply retention, and account for it. Returns where the
+    /// records are. Blocking.
+    fn forget_dir(&self, dir: &Path, name: &str, basis: ForgetBasis) -> std::io::Result<PathBuf> {
         let fd = self.cfg.forgotten_dir();
-        let f = forget::forget(&self.cfg.state_dir, &fd, dir, name)?;
-        self.metrics.inc("drumsd_forget_total", &[("archived", if f.archived { "true" } else { "false" })], 1.0);
+        let seen = slotfs::read_json(&dir.join("slot.json")).ok();
+        let disp = forget_disposition(self.cfg.retention.mode, &basis, seen.as_ref());
+        let f = forget::forget(&self.cfg.state_dir, &fd, dir, name, disp)?;
+        let archived = if f.archived { "true" } else { "false" };
+        self.metrics.inc("drumsd_forget_total", &[("class", f.class.name()), ("archived", archived)], 1.0);
         self.metrics.inc("drumsd_forget_tmpfs_bytes_freed_total", &[], if f.archived { f.bytes_on_tmpfs as f64 } else { 0.0 });
-        if !f.archived {
-            self.event(json!({"forget": name, "archived": false, "kept_at": f.at, "error": f.error}));
-            tracing::error!("records of {name} could not be packed to {}: {:?}; kept on the state dir", fd.display(), f.error);
-        }
-        if let Some(max) = self.cfg.forgotten_max_gib {
-            let gone = forget::prune(&fd, (max * (1u64 << 30) as f64) as u64);
-            if !gone.is_empty() {
-                self.event(json!({"forgotten_retention": {"max_gib": max, "deleted": gone}}));
+        if !f.archived || f.error.is_some() {
+            self.event(json!({"forget": name, "archived": f.archived, "class": f.class.name(), "kept_at": f.at, "error": f.error}));
+            if !f.archived {
+                tracing::error!("records of {name} could not be packed to {}: {:?}; kept on the state dir", fd.display(), f.error);
             }
         }
+        let caps = self.cfg.forget_caps();
+        let gone = forget::prune(&fd, caps, Some(&f.at));
+        if !gone.is_empty() {
+            let mut p = self.forget_pruned.lock().unwrap();
+            for g in &gone {
+                self.metrics.inc("drumsd_forget_pruned_total", &[("class", g.class.name())], 1.0);
+                self.metrics.inc("drumsd_forget_pruned_bytes_total", &[("class", g.class.name())], g.bytes as f64);
+                let e = p.entry(g.class.name()).or_insert((0, 0));
+                e.0 += 1;
+                e.1 += g.bytes;
+            }
+            drop(p);
+            self.event(json!({"forgotten_retention": {"summary_max_bytes": caps.summary, "full_max_bytes": caps.full,
+                "max_gib": self.cfg.forgotten_max_gib, "after": name, "deleted": gone}}));
+        }
+        self.refresh_forgotten_gauges();
         Ok(f.at)
+    }
+
+    fn refresh_forgotten_gauges(&self) {
+        let fd = self.cfg.forgotten_dir();
+        let mut total = 0u64;
+        for c in [forget::Class::Full, forget::Class::Summary] {
+            let (b, n) = forget::class_totals(&fd, c);
+            total += b;
+            self.metrics.set("drumsd_forgotten_bytes", &[("class", c.name())], b as f64);
+            self.metrics.set("drumsd_forgotten_files", &[("class", c.name())], n as f64);
+        }
+        self.metrics.set("drumsd_forgotten_bytes", &[("where", "disk")], total as f64);
     }
 
     /// Free space on the state dir, refused below the reserve.
@@ -1703,6 +1748,8 @@ impl Manager {
         let _g = slot.op.lock().await;
         let st = slot.view.read().unwrap().state.begin(Op::Destroy).map_err(|e| ApiError::new(409, e.to_string()))?;
         self.finalize_episode(&slot);
+        // what the env was when it was closed: decides whether its records are kept in full or as a summary
+        let last = slot.view.read().unwrap().clone();
         self.put_slot(&slot, |r| r.state = st);
         for tg in &slot.targets {
             tg.clear();
@@ -1720,7 +1767,7 @@ impl Manager {
             }
             let _ = std::fs::remove_dir(cgroup::slot_cg(&marker));
             // records and logs are kept (packed on disk, off the state tmpfs); the number can be reused
-            retire_slot_dir(&me.cfg.state_dir, num, (drumsd_linux::now_epoch() * 1000.0) as u64, |d, n| me.forget_dir(d, n))
+            retire_slot_dir(&me.cfg.state_dir, num, (drumsd_linux::now_epoch() * 1000.0) as u64, |d, n| me.forget_dir(d, n, ForgetBasis::Env(&last)))
         })
         .await
         .map_err(e500)?;
@@ -2029,12 +2076,28 @@ impl Manager {
             }
         }
         let fd = self.cfg.forgotten_dir();
-        let fbytes: u64 = forget::archives(&fd).iter().map(|x| x.1).sum();
+        let (full_b, full_n) = forget::class_totals(&fd, forget::Class::Full);
+        let (sum_b, sum_n) = forget::class_totals(&fd, forget::Class::Summary);
+        let fbytes = full_b + sum_b;
+        let legacy_n = forget::entries(&fd).iter().filter(|e| e.legacy).count();
         let left_on_tmpfs = forget::dir_bytes(&self.cfg.state_dir.join("forgotten"));
-        self.metrics.set("drumsd_forgotten_bytes", &[("where", "disk")], fbytes as f64);
+        self.refresh_forgotten_gauges();
         self.metrics.set("drumsd_forgotten_bytes", &[("where", "state_dir")], left_on_tmpfs as f64);
-        if fbytes as f64 > self.cfg.forgotten_warn_gib * (1u64 << 30) as f64 {
-            warnings.push(format!("{} holds {:.1} GiB of kept env records (forgotten_warn_gib {}; set forgotten_max_gib for retention)", fd.display(), fbytes as f64 / (1u64 << 30) as f64, self.cfg.forgotten_warn_gib));
+        let gibf = |b: u64| b as f64 / (1u64 << 30) as f64;
+        if full_b as f64 > self.cfg.forgotten_warn_gib * (1u64 << 30) as f64 {
+            warnings.push(format!("{} holds {:.1} GiB of full failure records (forgotten_warn_gib {}); full records are never pruned by default: set retention.full_max_gib (or forgotten_max_gib) to cap them", fd.display(), gibf(full_b), self.cfg.forgotten_warn_gib));
+        }
+        let pruned = self.forget_pruned.lock().unwrap().clone();
+        let pruned_of = |c: &str| pruned.get(c).copied().unwrap_or((0, 0));
+        {
+            let mut probe = fd.clone();
+            while !probe.exists() && probe.pop() {}
+            if let (Some(f), Some(t)) = (forget::free_bytes(&probe), forget::total_bytes(&probe)) {
+                let pct = 100.0 * f as f64 / t.max(1) as f64;
+                if pct < FORGOTTEN_DISK_MIN_FREE_PCT {
+                    warnings.push(format!("the filesystem of forgotten_dir {} is {:.1}% free ({} MiB): kept records may stop being written", fd.display(), pct, f >> 20));
+                }
+            }
         }
         if left_on_tmpfs > 0 {
             warnings.push(format!("{} MiB of env records could not be packed and are on the state dir ({}/forgotten)", left_on_tmpfs >> 20, self.cfg.state_dir.display()));
@@ -2051,7 +2114,13 @@ impl Manager {
                "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
                "state_dir_free_bytes": free(&self.cfg.state_dir), "warnings": warnings,
-               "forgotten": {"dir": fd, "bytes": fbytes, "on_state_dir_bytes": left_on_tmpfs, "max_gib": self.cfg.forgotten_max_gib},
+               "forgotten": {"dir": fd, "bytes": fbytes, "on_state_dir_bytes": left_on_tmpfs, "max_gib": self.cfg.forgotten_max_gib,
+                             "mode": self.cfg.retention.mode.name(),
+                             "caps_gib": {"summary": self.cfg.retention.summary_max_gib, "full": self.cfg.retention.full_max_gib, "all": self.cfg.forgotten_max_gib},
+                             "warn_gib": self.cfg.forgotten_warn_gib,
+                             "full": {"bytes": full_b, "files": full_n, "legacy_files": legacy_n, "pruned_files": pruned_of("full").0, "pruned_bytes": pruned_of("full").1},
+                             "summary": {"bytes": sum_b, "files": sum_n, "pruned_files": pruned_of("summary").0, "pruned_bytes": pruned_of("summary").1},
+                             "summaries_pruned": pruned_of("summary").0 > 0},
                "host_mem_available_bytes": std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:"))
                    .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
                "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
@@ -2147,6 +2216,66 @@ impl Manager {
         self.event(json!({"recovered": report}));
         self.refresh_slot_gauges();
         Ok(json!(report))
+    }
+}
+
+/// Key in slot.json that marks an env that failed at some point (value: the first reason seen).
+pub const FAILURE_SEEN: &str = "drumsd_failure_seen";
+
+/// Why this slot record shows a failure (a failed or quarantined state, an invalid verdict, a failed gate, an error).
+fn failure_seen(r: &SlotRecord) -> Option<String> {
+    match &r.state {
+        SlotState::Quarantined { reason } => return Some(format!("quarantined: {reason}")),
+        SlotState::Down { reason } => return Some(format!("down: {reason}")),
+        SlotState::Destroyed | SlotState::Destroying => return None,
+        _ => {}
+    }
+    if let Some(g) = r.gates.first_failure() {
+        return Some(format!("gate {:?} failed", g.gate));
+    }
+    if matches!(r.validity, Validity::Invalid { .. }) {
+        return Some("validity invalid".into());
+    }
+    r.last_error.as_ref().map(|e| format!("error: {e}"))
+}
+
+/// What the manager knows about a directory it forgets.
+pub enum ForgetBasis<'a> {
+    /// A rejected or failed dump: always kept in full.
+    Rejected,
+    /// An env being destroyed: its record as it was when closed.
+    Env(&'a SlotRecord),
+    /// A deleted saved state (or installed image).
+    Checkpoint(&'a CheckpointRecord),
+}
+
+/// Full archive or summary. A summary only when the manager knows the env ended valid: closed from `ready` with a
+/// valid verdict, no failed gate, no error, and no failure mark in slot.json. Everything else, and everything that
+/// cannot be classified with certainty, is kept in full.
+pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Option<&Value>) -> forget::Disposition {
+    use forget::Disposition::{Full, Summary};
+    if mode == forget::Mode::KeepAll {
+        return Full;
+    }
+    if slot_json.map_or(false, |j| j.get(FAILURE_SEEN).is_some()) {
+        return Full;
+    }
+    match basis {
+        ForgetBasis::Rejected => Full,
+        ForgetBasis::Env(r) => {
+            let clean = matches!(r.state, SlotState::Ready) && r.validity == Validity::Valid && r.gates.first_failure().is_none() && r.last_error.is_none();
+            if !clean {
+                return Full;
+            }
+            Summary { record: serde_json::to_value(r).unwrap_or(Value::Null), reason: "env ended valid (closed from ready, valid verdict, no failed gate, never quarantined)".into() }
+        }
+        ForgetBasis::Checkpoint(c) => {
+            let rejected = c.quiescence.as_ref().and_then(|q| q["attempts"].as_array()).map_or(false, |a| a.iter().any(|x| !x["rejected"].is_null()));
+            if c.captured_from.is_none() || rejected {
+                return Full; // installed images and saved states that needed a rejected dump keep their logs
+            }
+            Summary { record: serde_json::to_value(c).unwrap_or(Value::Null), reason: "saved state deleted; no rejected dump in its capture".into() }
+        }
     }
 }
 
@@ -2496,9 +2625,9 @@ mod tests {
         std::fs::create_dir_all(sp.dir.join("upper")).unwrap();
         std::fs::write(sp.dir.join("slot.json"), "{}").unwrap();
         let fd = d.join("disk-forgotten");
-        let k = retire_slot_dir(&d, 887, 1, |dir, n| forget::forget(&d, &fd, dir, n).map(|f| f.at)).unwrap();
-        assert!(k.ends_with("slot887-1.tar.zst") && k.exists() && !sp.dir.exists(), "{k:?}");
-        assert!(retire_slot_dir(&d, 887, 2, |dir, n| forget::forget(&d, &fd, dir, n).map(|f| f.at)).is_ok(), "the retry must not fail");
+        let k = retire_slot_dir(&d, 887, 1, |dir, n| forget::forget(&d, &fd, dir, n, forget::Disposition::Full).map(|f| f.at)).unwrap();
+        assert!(k.ends_with("full/slot887-1.tar.zst") && k.exists() && !sp.dir.exists(), "{k:?}");
+        assert!(retire_slot_dir(&d, 887, 2, |dir, n| forget::forget(&d, &fd, dir, n, forget::Disposition::Full).map(|f| f.at)).is_ok(), "the retry must not fail");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2549,5 +2678,78 @@ mod tests {
         assert_eq!(b64(b"fo"), "Zm8=");
         assert_eq!(b64(b"foo"), "Zm9v");
         assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+    }
+
+    fn rec(state: SlotState) -> SlotRecord {
+        serde_json::from_value(json!({"id": "s-1", "num": 900, "checkpoint": "c", "state": state.name(), "reason": "x", "episode": 2, "init_pid": null,
+            "init_start_ticks": null, "restore_generation": 1, "mode": "template", "port": 1, "extra_ports": [],
+            "gates": {"gates": []}, "validity": {"verdict": "valid"}, "cost": CostRecord::default(), "timings": {"restore_s": 1.0},
+            "last_error": null, "task": null, "ready_epoch": null, "created_epoch": 1.0, "updated_epoch": 2.0})).unwrap()
+    }
+
+    fn is_summary(d: &forget::Disposition) -> bool {
+        matches!(d, forget::Disposition::Summary { .. })
+    }
+
+    #[test]
+    fn valid_envs_get_a_summary_and_failed_ones_a_full_archive() {
+        use forget::Mode::*;
+        let ok = rec(SlotState::Ready);
+        assert!(is_summary(&forget_disposition(FailuresFull, &ForgetBasis::Env(&ok), None)));
+        // keep_all keeps everything in full
+        assert!(!is_summary(&forget_disposition(KeepAll, &ForgetBasis::Env(&ok), None)));
+        // quarantined, down, invalid, pending, a failed gate, an error, a failure mark
+        let q = rec(SlotState::Quarantined { reason: "gate alive failed".into() });
+        let d = rec(SlotState::Down { reason: "restore refused".into() });
+        let mut inv = rec(SlotState::Ready);
+        inv.validity = Validity::Invalid { gates: vec![] };
+        let mut pend = rec(SlotState::Ready);
+        pend.validity = Validity::Pending { gates: vec![] };
+        let mut err = rec(SlotState::Ready);
+        err.last_error = Some("boom".into());
+        for r in [&q, &d, &inv, &pend, &err] {
+            assert!(!is_summary(&forget_disposition(FailuresFull, &ForgetBasis::Env(r), None)), "{:?}", r.state);
+        }
+        let mark = json!({FAILURE_SEEN: "quarantined: earlier"});
+        assert!(!is_summary(&forget_disposition(FailuresFull, &ForgetBasis::Env(&ok), Some(&mark))), "a past failure keeps the full records");
+        assert!(is_summary(&forget_disposition(FailuresFull, &ForgetBasis::Env(&ok), Some(&json!({"restore_generation": 1})))));
+        // rejected dumps are always full
+        assert!(!is_summary(&forget_disposition(FailuresFull, &ForgetBasis::Rejected, None)));
+    }
+
+    #[test]
+    fn failure_marks_follow_the_record() {
+        assert!(failure_seen(&rec(SlotState::Ready)).is_none());
+        assert!(failure_seen(&rec(SlotState::Quarantined { reason: "r".into() })).unwrap().contains("quarantined"));
+        assert!(failure_seen(&rec(SlotState::Destroyed)).is_none());
+        let mut r = rec(SlotState::Resetting);
+        r.last_error = Some("e".into());
+        assert!(failure_seen(&r).is_some());
+    }
+
+    #[test]
+    fn retire_keeps_full_for_a_quarantined_env_and_a_summary_for_a_valid_one() {
+        let d = std::env::temp_dir().join(format!("drumsd-retire-class-{}", std::process::id()));
+        let fd = d.join("disk");
+        for (num, state, want) in [(881u32, SlotState::Ready, forget::Class::Summary), (882, SlotState::Quarantined { reason: "gate".into() }, forget::Class::Full)] {
+            let sp = slotfs::paths(&d, num);
+            std::fs::create_dir_all(sp.dir.join("upper")).unwrap();
+            std::fs::write(sp.dir.join("slot.json"), "{}").unwrap();
+            std::fs::write(sp.dir.join("restore.log"), vec![b'x'; 1 << 20]).unwrap();
+            let r = rec(state);
+            let mut class = None;
+            let at = retire_slot_dir(&d, num, 5, |dir, n| {
+                let disp = forget_disposition(forget::Mode::FailuresFull, &ForgetBasis::Env(&r), slotfs::read_json(&dir.join("slot.json")).ok().as_ref());
+                let f = forget::forget(&d, &fd, dir, n, disp)?;
+                class = Some(f.class);
+                Ok(f.at)
+            })
+            .unwrap();
+            assert_eq!(class, Some(want));
+            assert!(at.exists());
+        }
+        assert_eq!(forget::class_totals(&fd, forget::Class::Summary).1, 1);
+        assert_eq!(forget::class_totals(&fd, forget::Class::Full).1, 1);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
