@@ -39,6 +39,9 @@ pub struct RestoreSpec {
     /// `--empty-ns net`: CRIU leaves the restored network namespace empty and the setup-namespaces action brings
     /// `lo` up (labelled variant; see hook.rs). Off = CRIU restores the namespace from the images.
     pub empty_net: bool,
+    /// `--nested-pidns` (drums-criu app-compat): restore the pid/user/net namespaces sandboxed apps nest below the
+    /// slot's, as launch.py's CRIU_COMMON does on that branch.
+    pub nested_pidns: bool,
 }
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
@@ -55,7 +58,13 @@ pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
         v.push("--action-script".into());
         v.push(h.display().to_string());
     }
-    v.extend(CRIU_COMMON.iter().map(|x| x.to_string()));
+    for x in CRIU_COMMON {
+        // launch.py (app-compat): ("--shell-job", "--tcp-close", "--manage-cgroups=ignore", "--nested-pidns", "-v4")
+        if x == "-v4" && s.nested_pidns {
+            v.push("--nested-pidns".into());
+        }
+        v.push(x.to_string());
+    }
     v.extend(["--pidfile".into(), s.pidfile.display().to_string(), "-o".into(), s.log.display().to_string()]);
     v
 }
@@ -291,6 +300,7 @@ mod tests {
             criu_bin: "/opt/drumsd/criu-bin/criu".into(),
             out: "/s/slot5/restore-drumsd-3.out".into(),
             empty_net: false,
+            nested_pidns: false,
         }
     }
 
@@ -305,6 +315,14 @@ mod tests {
         assert!(!criu_argv(&s).contains(&"--file-locks".to_string()));
         s.empty_net = true;
         assert!(criu_argv(&s).windows(2).any(|w| w[0] == "--empty-ns" && w[1] == "net"));
+    }
+
+    #[test]
+    fn nested_pidns_sits_where_launch_py_puts_it() {
+        let mut s = spec(None);
+        s.nested_pidns = true;
+        let j = criu_argv(&s).join(" ");
+        assert!(j.contains("--shell-job --tcp-close --manage-cgroups=ignore --nested-pidns -v4 --pidfile"), "{j}");
     }
 
     #[test]
