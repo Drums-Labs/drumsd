@@ -294,16 +294,15 @@ systemctl daemon-reload
 systemctl enable -q drums-osw.service
 systemctl restart drums-osw.service
 if [ "$PROCVIEW" = 1 ]; then
-  systemctl unmask -q --runtime drums-procview.service 2>/dev/null || true
   systemctl enable -q drums-procview.service
   # a running view keeps serving across this restart (the fd store carries its connection to the new binary)
   systemctl restart drums-procview.service || { journalctl -u drums-procview --no-pager | tail -20; die "drums-procview did not start"; }
   grep -q ' /run/drums/procview .* - fuse.drums-procview ' /proc/self/mountinfo || die "the per-env view is not mounted at /run/drums/procview"
 else
   say "per-env memory/CPU view OFF (--no-procview): envs read the host's /proc/meminfo, cpuinfo and sysinfo(2)"
-  # masked for this boot: drumsd.service Wants= it and would start it again
+  # the unit is removed: drumsd.service Wants= it and would start it again (a later install without the flag writes it back)
   systemctl disable -q --now drums-procview.service 2>/dev/null || true
-  systemctl mask -q --runtime drums-procview.service
+  rm -f /etc/systemd/system/drums-procview.service; systemctl daemon-reload
   rm -f /sys/fs/bpf/drums-procview-sysinfo
   umount -l /run/drums/procview 2>/dev/null || true
 fi
