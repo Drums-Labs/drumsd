@@ -1225,6 +1225,13 @@ impl Manager {
             (Err(e), _) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"error": e, "sections_s": sections_s,
                                                                                     "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64()}))),
         }
+        // one line per state-hash gate with the host's load at that moment: the 60 s budget must not hide overload
+        // (the gate's own seconds and each guest request's are what a report computes the 10/30/60 s tails from)
+        if let Some(g) = gates.gates.iter().rev().find(|g| g.gate == Gate::StateHash) {
+            self.event(json!({"state_hash_gate": {"slot": slot.id, "status": g.status, "seconds": round3(hs), "sections_s": sections_s,
+                "error": g.detail.get("error"), "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64(), "guest_ready_s": t.get("guest_ready"),
+                "load": load_snapshot(), "admit_in_flight_mib": self.admit_in_flight.load(std::sync::atomic::Ordering::SeqCst)}}));
+        }
         gates.push(iso);
         t.insert("hash_isolation".into(), round3(ts.elapsed().as_secs_f64()));
         gates.push(GateResult::pending(Gate::AliveAfterResume));
@@ -2415,6 +2422,15 @@ pub fn status_str(s: &GateStatus) -> &'static str {
 /// and were quarantined with "Resource temporarily unavailable" (the socket read timeout), not with a hash mismatch.
 /// The gate itself is unchanged: the hash must equal the checkpoint's; no answer within this time still fails it.
 pub const STATE_HASH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// drumsd's thread count, memory and CPU pressure (some avg10) and the 1-minute load, read now (cheap: four small files).
+pub fn load_snapshot() -> Value {
+    let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+    let threads = rd("/proc/self/status").lines().find_map(|l| l.strip_prefix("Threads:").and_then(|v| v.trim().parse::<u64>().ok()));
+    let psi = |p: &str| rd(p).lines().find(|l| l.starts_with("some")).and_then(|l| l.split_whitespace().find_map(|f| f.strip_prefix("avg10=").and_then(|v| v.parse::<f64>().ok())));
+    let la = rd("/proc/loadavg").split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
+    json!({"drumsd_threads": threads, "mem_psi_some_avg10": psi("/proc/pressure/memory"), "cpu_psi_some_avg10": psi("/proc/pressure/cpu"), "loadavg1": la})
+}
 
 pub fn state_hash(g: &Guest) -> Result<String, String> {
     state_hash_timed(g).0
