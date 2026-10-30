@@ -193,7 +193,7 @@ pub fn isolation_gate(pid: i32, others: &[i32], slot_cg: &Path) -> GateResult {
             break;
         };
         let foreign: Vec<(i32, Option<String>)> =
-            ps.into_iter().filter(|p| procfs::ns_inode(*p, "pid") != pidns).map(|p| (p, procfs::comm(p))).collect();
+            ps.into_iter().filter(|p| !pidns.as_deref().map(|ns| procfs::pidns_within(*p, ns)).unwrap_or(false)).map(|p| (p, procfs::comm(p))).collect();
         let only_exiting_criu = !foreign.is_empty() && foreign.iter().all(|(_, c)| c.as_deref() == Some("criu"));
         if only_exiting_criu && tries < 40 {
             tries += 1;
@@ -201,7 +201,7 @@ pub fn isolation_gate(pid: i32, others: &[i32], slot_cg: &Path) -> GateResult {
             continue;
         }
         for (p, c) in foreign {
-            problems.push(format!("process {p} ({c:?}) in the slot cgroup is outside the slot's pid namespace"));
+            problems.push(format!("process {p} ({c:?}) in the slot cgroup is outside the slot's pid namespace (and not in one nested below it)"));
         }
         break;
     }

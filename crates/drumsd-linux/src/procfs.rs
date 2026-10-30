@@ -56,6 +56,37 @@ pub fn ns_inode(pid: i32, kind: &str) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/ns/{kind}")).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Whether `pid`'s pid namespace is the namespace `ns` (a `pid:[N]` link) or nested below it. Sandboxed apps (Chrome,
+/// Electron) run helpers in pid namespaces they create inside the slot's; those are still the slot's processes. Walks
+/// up with NS_GET_PARENT; reaching the top (or a namespace we may not see) without meeting `ns` means outside.
+pub fn pidns_within(pid: i32, ns: &str) -> bool {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::MetadataExt;
+    let Some(want) = ns.strip_prefix("pid:[").and_then(|x| x.strip_suffix(']')).and_then(|x| x.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Ok(f) = fs::File::open(format!("/proc/{pid}/ns/pid")) else {
+        return false;
+    };
+    let mut fd: OwnedFd = f.into();
+    const NS_GET_PARENT: libc::c_ulong = 0xb702; // _IO(0xb7, 0x2)
+    for _ in 0..40 {
+        let ino = match fs::File::from(fd.try_clone().unwrap()).metadata() {
+            Ok(m) => m.ino(),
+            Err(_) => return false,
+        };
+        if ino == want {
+            return true;
+        }
+        let p = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_PARENT as _) };
+        if p < 0 {
+            return false;
+        }
+        fd = unsafe { OwnedFd::from_raw_fd(p) };
+    }
+    false
+}
+
 /// The unified (cgroup v2) path of a process, e.g. `/system.slice/drumsbench-pool.scope/drumsbench-x-pool.scope`.
 pub fn cgroup_path(pid: i32) -> Option<String> {
     let s = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
@@ -118,6 +149,36 @@ pub fn ns_members_and_procs(init: i32) -> (Vec<i64>, BTreeMap<String, String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_pid_namespace_is_within_its_parent() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        let me = std::process::id() as i32;
+        let mine = super::ns_inode(me, "pid").unwrap();
+        assert!(super::pidns_within(me, &mine));
+        let mut c = std::process::Command::new("unshare").args(["--pid", "--fork", "sleep", "5"]).spawn().unwrap();
+        let mut kid = None;
+        for _ in 0..200 {
+            if let Ok(s) = std::fs::read_to_string(format!("/proc/{}/task/{}/children", c.id(), c.id())) {
+                if let Some(k) = s.split_whitespace().next() {
+                    kid = k.parse::<i32>().ok();
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let kid = kid.expect("unshare child");
+        let inner = super::ns_inode(kid, "pid").unwrap();
+        assert_ne!(inner, mine);
+        assert!(super::pidns_within(kid, &mine), "nested ns is within ours");
+        assert!(!super::pidns_within(me, &inner), "ours is not within the nested one");
+        assert!(!super::pidns_within(me, "pid:[1]"));
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+
     use super::*;
 
     #[test]
