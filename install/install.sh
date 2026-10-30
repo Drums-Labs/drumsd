@@ -30,6 +30,7 @@ D=/var/lib/drums; O=/opt/drums; E=/etc/drums
 mkdir -p "$D" "$O" "$E"
 exec 9> "$D/install.lock"
 flock -n 9 || { echo "another install.sh is running (lock $D/install.lock)" >&2; exit 1; }
+touch "$LOG"; chmod 0600 "$LOG"      # the log ends with the API token
 exec > >(tee -a "$LOG") 2>&1
 BG=""
 trap '[ -n "$BG" ] && kill $BG 2>/dev/null; true' EXIT
