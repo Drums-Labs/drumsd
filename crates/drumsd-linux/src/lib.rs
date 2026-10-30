@@ -10,6 +10,7 @@ pub mod guest;
 pub mod hook;
 pub mod pidfd;
 pub mod procfs;
+pub mod procview;
 pub mod proxy;
 pub mod quiesce;
 pub mod restore;
