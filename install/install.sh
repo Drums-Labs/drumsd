@@ -231,7 +231,30 @@ Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
 EOF
+# OSWorld checker fork server: imports OSWorld once; drumsd's per-call helper hands it each setup/evaluate (and does
+# the work itself if the server is not there)
+cat > /etc/systemd/system/drums-osw.service <<EOF
+[Unit]
+Description=Drums OSWorld checker fork server (imports OSWorld once, one forked worker per setup/evaluate)
+Before=drumsd.service
+[Service]
+User=drums-osw
+Group=drums-osw
+RuntimeDirectory=drums-osw
+RuntimeDirectoryMode=0750
+WorkingDirectory=$O/src/OSWorld
+Environment=HOME=$D/osw-cache PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OSWORLD_DIR=$O/src/OSWorld OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+ExecStart=$O/osw-venv/bin/python -I $O/osw/drums_osw.py serve --osworld-dir $O/src/OSWorld --sock /run/drums-osw/osw.sock
+Restart=always
+RestartSec=1
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
+systemctl enable -q drums-osw.service
+systemctl restart drums-osw.service
+for i in $(seq 1 60); do [ -S /run/drums-osw/osw.sock ] && break; sleep 0.5; done
+[ -S /run/drums-osw/osw.sock ] || { journalctl -u drums-osw --no-pager | tail -20; die "OSWorld checker server did not start"; }
 phase config $t
 
 # ------------------------------------------------------------------------------------------------ 10. clean checkpoint of the image, then drumsd
