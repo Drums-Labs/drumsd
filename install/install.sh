@@ -237,6 +237,10 @@ KillMode=process
 # each env holds listeners, guest connections and pidfds: the default soft limit (1024) ran out at 64 envs
 LimitNOFILE=1048576
 Environment=RUST_LOG=info
+# glibc malloc: drumsd reads 6-20 MB CRIU logs on up to 1024 blocking threads; with per-thread arenas and the dynamic
+# mmap threshold the freed buffers stayed in ~450 arenas (RSS 10 GB after 25 min at 128 envs). Large buffers go to
+# mmap (returned on free) and the arena count is capped.
+Environment=MALLOC_ARENA_MAX=8 MALLOC_MMAP_THRESHOLD_=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
