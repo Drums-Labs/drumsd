@@ -2,7 +2,7 @@
 # Drums one-command install: a fresh Ubuntu 24.04 x86_64 host -> a running drumsd with the drums-criu build, the OSWorld
 # image as a clean checkpoint, OSWorld's checkers, and an API token.
 #
-#   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N]
+#   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N] [--no-procview]
 #
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
@@ -13,14 +13,15 @@ set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$REL/install/lock.json"
-REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0
+REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=1; shift;;
     --port) PORT="${2:?}"; shift 2;;
     --host-usd-per-hour) PRICE="${2:?}"; shift 2;;
     --state-tmpfs-gib) TMPFS_GIB="${2:?}"; shift 2;;
-    --swap-mib) SWAP_MIB="${2:?}"; shift 2;;   # swap per env (needs host swap, e.g. zram); default 0
+    --swap-mib) SWAP_MIB="${2:?}"; shift 2;;
+    --no-procview) PROCVIEW=0; shift;;   # labelled A/B control only: envs see the host's memory and CPU files   # swap per env (needs host swap, e.g. zram); default 0
     -h|--help) sed -n 2,12p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
@@ -209,7 +210,7 @@ cat > "$E/rootfs-config.json" <<EOF
 {"state_dir": "$D/state", "lower": "/mnt/osworld", "inspection": "$E/inspection.json", "image_sha256": "$IMGSHA",
  "vcpus": $(lk runtime.vcpus), "memory_mib": $(lk runtime.memory_mib), "screen": "$(lk runtime.screen)", "profile": "gnome_x11",
  "service_base_port": 25000, "guest_service_port": 5000, "display_stage_deb": "$D/packages/dummy.deb",
- "procview_dir": "/run/drums/procview"}
+ "procview_dir": $([ "$PROCVIEW" = 1 ] && echo '"/run/drums/procview"' || echo null)}
 EOF
 [ -s "$E/token" ] || (umask 077; python3 -c "import secrets; print(secrets.token_urlsafe(32))" > "$E/token")
 chmod 0600 "$E/token"
@@ -290,11 +291,19 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable -q drums-osw.service drums-procview.service
+systemctl enable -q drums-osw.service
 systemctl restart drums-osw.service
-# a running view keeps serving across this restart (the fd store carries its connection to the new binary)
-systemctl restart drums-procview.service || { journalctl -u drums-procview --no-pager | tail -20; die "drums-procview did not start"; }
-grep -q ' /run/drums/procview .* - fuse.drums-procview ' /proc/self/mountinfo || die "the per-env view is not mounted at /run/drums/procview"
+if [ "$PROCVIEW" = 1 ]; then
+  systemctl enable -q drums-procview.service
+  # a running view keeps serving across this restart (the fd store carries its connection to the new binary)
+  systemctl restart drums-procview.service || { journalctl -u drums-procview --no-pager | tail -20; die "drums-procview did not start"; }
+  grep -q ' /run/drums/procview .* - fuse.drums-procview ' /proc/self/mountinfo || die "the per-env view is not mounted at /run/drums/procview"
+else
+  say "per-env memory/CPU view OFF (--no-procview): envs read the host's /proc/meminfo, cpuinfo and sysinfo(2)"
+  systemctl disable -q --now drums-procview.service 2>/dev/null || true
+  rm -f /sys/fs/bpf/drums-procview-sysinfo
+  umount -l /run/drums/procview 2>/dev/null || true
+fi
 for i in $(seq 1 60); do [ -S /run/drums-osw/osw.sock ] && break; sleep 0.5; done
 [ -S /run/drums-osw/osw.sock ] || { journalctl -u drums-osw --no-pager | tail -20; die "OSWorld checker server did not start"; }
 phase config $t
