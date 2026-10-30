@@ -148,10 +148,46 @@ pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
     v
 }
 
+/// Whether `mp` is a mount point now (an entry of /proc/self/mountinfo).
+pub fn is_mounted(mp: &Path) -> bool {
+    let want = mp.to_string_lossy();
+    let want = want.trim_end_matches('/');
+    std::fs::read_to_string("/proc/self/mountinfo").map(|m| m.lines().any(|l| {
+        l.split(' ').nth(4).map(|f| f.replace("\\040", " ").trim_end_matches('/') == want).unwrap_or(false)
+    })).unwrap_or(false)
+}
+
+/// Why a checkpoint's state is gone (None: all of it is there). After a host reboot the state dir (a tmpfs) is empty and
+/// the image mount is gone; the journal on disk still lists the checkpoint. `lower_mounted`: the lower layer is mounted.
+pub fn state_lost(c: &CheckpointRecord, state_dir: &Path, lower: &Path, lower_mounted: bool) -> Option<String> {
+    let sp = slotfs::paths(state_dir, c.slot);
+    let mut gone: Vec<String> = vec![];
+    if sp.dir.symlink_metadata().is_err() {
+        gone.push(format!("slot directory {} is missing", sp.dir.display()));
+    } else {
+        let empty = std::fs::read_dir(&sp.images).map(|mut d| d.next().is_none()).unwrap_or(true);
+        if empty {
+            gone.push(format!("{} is missing or empty", sp.images.display()));
+        }
+        if sp.snap.symlink_metadata().is_err() {
+            gone.push(format!("{} is missing", sp.snap.display()));
+        }
+    }
+    if !lower_mounted {
+        gone.push(format!("the image mount {} is not mounted", lower.display()));
+    }
+    (!gone.is_empty()).then(|| format!("state_lost: {} (the host was restarted or its state dir emptied: run the installer or drums-boot.service to re-provision)", gone.join("; ")))
+}
+
 /// What the API returns for a checkpoint: its record plus `stale` (and why).
 pub fn ckpt_view(c: &CheckpointRecord, current: &Value) -> Value {
+    ckpt_view_on(c, current, None)
+}
+
+/// As `ckpt_view`, with the reason its state is lost (`state_lost`), which comes before a provenance mismatch.
+pub fn ckpt_view_on(c: &CheckpointRecord, current: &Value, lost: Option<String>) -> Value {
     let mut v = serde_json::to_value(c).unwrap();
-    let why = stale_reason(c, current);
+    let why = lost.or_else(|| stale_reason(c, current));
     v["stale"] = json!(why.is_some());
     v["stale_reason"] = json!(why);
     v
@@ -468,6 +504,15 @@ impl Manager {
         self.ckpts.read().unwrap().get(id).cloned().ok_or_else(|| ApiError::new(404, format!("no checkpoint {id}")))
     }
 
+    /// Why this checkpoint refuses envs: its state is gone (a few stats, checked on every call) or its origin is stale.
+    pub fn stale(&self, c: &CheckpointRecord) -> Option<String> {
+        state_lost(c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower)).or_else(|| stale_reason(c, &self.provenance))
+    }
+
+    pub fn ckpt_view(&self, c: &CheckpointRecord) -> Value {
+        ckpt_view_on(c, &self.provenance, state_lost(c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower)))
+    }
+
     fn live_inits(&self, except: &str) -> Vec<i32> {
         self.slots
             .read()
@@ -553,9 +598,12 @@ impl Manager {
         if c.captured_from.is_none() && !installed {
             return Err(ApiError::new(409, format!("checkpoint {id} is an installed image, not a saved state (installed=true deletes it; the installer re-provisions it)")));
         }
+        // a checkpoint whose state is gone (host restart) can be deleted though envs made from it are still on record: the
+        // ones that are down hold nothing of it any more
+        let lost = state_lost(&c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower)).is_some();
         let users: Vec<String> = self.slots.read().unwrap().values().filter_map(|s| {
             let v = s.view.read().unwrap();
-            (v.checkpoint == id && !v.state.is_terminal()).then(|| v.id.clone())
+            (v.checkpoint == id && !v.state.is_terminal() && !(lost && matches!(v.state, SlotState::Down { .. }))).then(|| v.id.clone())
         }).collect();
         if !users.is_empty() {
             return Err(ApiError::new(409, format!("checkpoint {id} is used by envs {users:?}: close them first")));
@@ -666,7 +714,7 @@ impl Manager {
     /// inherited from the checkpoint (it was captured after the setup ran).
     pub async fn create_with(self: &Arc<Self>, checkpoint: String, task: Option<Value>, setup: Option<bool>) -> R<SlotRecord> {
         let c = self.ckpt(&checkpoint)?;
-        if let Some(why) = stale_reason(&c, &self.provenance) {
+        if let Some(why) = self.stale(&c) {
             return Err(ApiError::new(409, format!("checkpoint {checkpoint} is stale: {why} (run the installer again)"))
                 .with(json!({"code": "checkpoint_stale", "provenance": c.provenance, "current": self.provenance})));
         }
@@ -2074,7 +2122,7 @@ impl Manager {
         let ck: Vec<Value> = self.ckpts.read().unwrap().values().map(|c| {
             let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
             json!({"id": c.id, "template_server": template::adopt(&c.socket, &sp.images), "task": c.task.as_ref().map(|t| t["id"].clone()),
-                   "stale_reason": stale_reason(c, &self.provenance)})
+                   "stale_reason": self.stale(c)})
         }).collect();
         let mut states: BTreeMap<&'static str, u64> = BTreeMap::new();
         for s in self.slots.read().unwrap().values() {
@@ -2085,7 +2133,7 @@ impl Manager {
             let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
             (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
         };
-        let ok = ck.iter().all(|c| !c["template_server"].is_null());
+        let ok = ck.iter().all(|c| !c["template_server"].is_null() && c["stale_reason"].as_str().map_or(true, |w| !w.starts_with("state_lost")));
         let mut warnings: Vec<String> = vec![];
         for c in &ck {
             if let Some(w) = c["stale_reason"].as_str() {
@@ -2177,10 +2225,17 @@ impl Manager {
         for (_, c) in ckpts {
             let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
             let mut c2 = c.clone();
-            let adopted = template::adopt(&c.socket, &sp.images);
+            let lost = state_lost(&c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower));
+            let adopted = if lost.is_some() { None } else { template::adopt(&c.socket, &sp.images) };
             c2.server_pid = adopted;
             self.put_ckpt(&c2);
-            report.push(json!({"checkpoint": c.id, "server": adopted}));
+            match lost {
+                Some(why) => {
+                    tracing::error!("checkpoint {} LOST, refusing envs: {why}", c.id);
+                    report.push(json!({"checkpoint": c.id, "server": null, "lost": why}));
+                }
+                None => report.push(json!({"checkpoint": c.id, "server": adopted})),
+            }
         }
         // template servers no checkpoint owns hold memory for nothing: stop them (recorded)
         let owned: BTreeSet<i32> = self.ckpts.read().unwrap().values().filter_map(|c| c.server_pid).collect();
@@ -2220,7 +2275,8 @@ impl Manager {
                 rec2.validity = Validity::Invalid { gates: vec![] };
                 action = "transient -> cleaned";
             } else if matches!(rec.state, SlotState::Ready) && !alive {
-                rec2.state = SlotState::Down { reason: "tree not running after daemon restart".into() };
+                let gone = !slotfs::paths(&self.cfg.state_dir, num).dir.exists();
+                rec2.state = SlotState::Down { reason: if gone { format!("state_lost: slot directory {} is gone and the tree is not running (the host was restarted)", slotfs::paths(&self.cfg.state_dir, num).dir.display()) } else { "tree not running after daemon restart".into() } };
                 rec2.init_pid = None;
                 action = "ready but dead -> down";
             } else {
@@ -2554,6 +2610,45 @@ mod tests {
         old.as_object_mut().unwrap().remove("provenance");
         let back: CheckpointRecord = serde_json::from_value(old).unwrap();
         assert!(back.provenance.is_none());
+    }
+
+    #[test]
+    fn a_checkpoint_whose_state_is_gone_is_state_lost() {
+        let d = std::env::temp_dir().join(format!("drumsd-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let lower = d.join("lower");
+        let c = ck(None, None);
+        // state dir emptied (tmpfs after a reboot): the slot directory is missing
+        let r = state_lost(&c, &d, &lower, true).unwrap();
+        assert!(r.starts_with("state_lost:") && r.contains("slot directory") && r.contains("missing"), "{r}");
+        // slot directory present but images empty and no upper.snap
+        let sp = slotfs::paths(&d, 0);
+        std::fs::create_dir_all(&sp.images).unwrap();
+        let r = state_lost(&c, &d, &lower, true).unwrap();
+        assert!(r.contains("images") && r.contains("upper.snap"), "{r}");
+        // everything there, image mount gone
+        std::fs::write(sp.images.join("core-1.img"), b"x").unwrap();
+        std::fs::create_dir_all(&sp.snap).unwrap();
+        let r = state_lost(&c, &d, &lower, false).unwrap();
+        assert!(r.contains("not mounted") && !r.contains("images"), "{r}");
+        // all present: not lost, and the view is not stale
+        assert_eq!(state_lost(&c, &d, &lower, true), None);
+        let cur = json!({"source_sha256": "a", "inspection_sha256": "i"});
+        let ok = ckpt_view_on(&ck(None, Some(cur.clone())), &cur, None);
+        assert_eq!(ok["stale"], json!(false));
+        let bad = ckpt_view_on(&ck(None, Some(cur.clone())), &cur, state_lost(&c, &d, &lower, false));
+        assert_eq!(bad["stale"], json!(true));
+        assert!(bad["stale_reason"].as_str().unwrap().starts_with("state_lost:"));
+        // the state vanishing later (checked on every create) is seen at once
+        std::fs::remove_dir_all(&sp.dir).unwrap();
+        assert!(state_lost(&c, &d, &lower, true).is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn is_mounted_sees_root_and_not_a_plain_directory() {
+        assert!(is_mounted(Path::new("/")) || std::fs::read_to_string("/proc/self/mountinfo").is_err());
+        assert!(!is_mounted(&std::env::temp_dir().join("drumsd-not-a-mount-xyz")));
     }
 
     /// A guest that answers each command after `delay`, with fixed outputs.
