@@ -26,7 +26,8 @@ OSWorld 044bc339.
 - Template-server logs live in their saved state's directory and leave the RAM-backed state dir with it; leftovers of
   0.4.1 are packed to disk when drumsd starts.
 - Reboots (from 0.5): `drums-boot.service` and `drums-origin.service` bring the host back after a stop/start; the
-  installer is idempotent and reuses the built CRIU.
+  installer is idempotent and reuses the built CRIU. Envs left down or quarantined by the reboot no longer block
+  re-provisioning the lost origin (409 "used by envs").
 
 **API and SDK**
 - Any operation on a destroyed env is HTTP 410 `env_gone` (SDK `EnvGone`, a `NotFound`); `DELETE` on it returns its
