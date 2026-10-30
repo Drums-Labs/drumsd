@@ -38,21 +38,36 @@ pub fn pidfile_for(sock: &Path) -> PathBuf {
 
 /// The pid in the pidfile, if it is alive and really a template server for `images`.
 pub fn adopt(sock: &Path, images: &Path) -> Option<i32> {
+    let pid = server_pid(sock, images)?;
+    if exe_replaced(&fs::read_link(format!("/proc/{pid}/exe")).ok()?) {
+        return None; // a server of a criu binary that has since been replaced: not adopted, see start()
+    }
+    crate::restore::socket_exists(sock).then_some(pid)
+}
+
+/// The pid in the socket's pidfile, if it is a template server of these images.
+fn server_pid(sock: &Path, images: &Path) -> Option<i32> {
     let pid: i32 = fs::read_to_string(pidfile_for(sock)).ok()?.trim().parse().ok()?;
     let cl = crate::procfs::cmdline(pid)?;
-    let joined = cl.join(" ");
     let img = images.display().to_string();
-    if joined.contains("--template-server") && cl.iter().any(|a| a == &img) && crate::restore::socket_exists(sock) {
-        Some(pid)
-    } else {
-        None
-    }
+    (cl.join(" ").contains("--template-server") && cl.iter().any(|a| a == &img)).then_some(pid)
+}
+
+/// The running binary was replaced on disk (an install upgraded criu): /proc/PID/exe reads "<path> (deleted)".
+/// A reinstall from runtime-v0.2 to v0.3 kept the old template server: its restored inits came up at
+/// oom_score_adj 0 instead of +300 and the cgroup gate quarantined every env (scale run L128v3).
+pub fn exe_replaced(exe: &Path) -> bool {
+    exe.to_string_lossy().ends_with(" (deleted)")
 }
 
 pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path) -> io::Result<Server> {
     cgroup::pool_init()?;
     if let Some(pid) = adopt(sock, images) {
         return Ok(Server { socket: sock.into(), pidfile: pidfile_for(sock), pid, images: images.into(), log: PathBuf::new(), ready_s: 0.0, cgroup: PathBuf::new(), memory_current: 0 });
+    }
+    if let Some(stale) = server_pid(sock, images) {
+        // still running on the replaced binary: stop it before its socket is taken over
+        unsafe { libc::kill(stale, libc::SIGKILL) };
     }
     let _ = fs::remove_file(sock);
     let pidf = pidfile_for(sock);
@@ -146,5 +161,15 @@ mod tests {
     fn pidfile_next_to_socket() {
         assert_eq!(pidfile_for(Path::new("/s/ps-0.sock")), PathBuf::from("/s/ps-0.pid"));
         assert_eq!(pidfile_for(Path::new("/s/x")), PathBuf::from("/s/x.pid"));
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    #[test]
+    fn a_server_of_a_replaced_criu_binary_is_not_adopted() {
+        assert!(exe_replaced(Path::new("/opt/drums/criu/bin/criu (deleted)")));
+        assert!(!exe_replaced(Path::new("/opt/drums/criu/bin/criu")));
     }
 }
