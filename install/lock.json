@@ -89,8 +89,8 @@
     },
     "drums-lab": {
       "repo": "sahiljagtap08/drums-lab",
-      "branch": "app-compat",
-      "commit": "0f6b2b608d524d0da43c3c8bca12b84d6580fc2a"
+      "branch": "fix/session-fidelity",
+      "commit": "15e29e4376b4323d1bf1e35f092b23d1ed68f5ea"
     },
     "osworld": {
       "repo": "https://github.com/xlang-ai/OSWorld.git",
