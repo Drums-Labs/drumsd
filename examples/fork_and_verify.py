@@ -80,18 +80,20 @@ def gold_b64():
 
 
 def calc_write_file(content_b64, label):
-    code = ("import base64, subprocess, time\n"
-            "subprocess.run(['pkill', '-f', 'soffice']); time.sleep(3)\n"
-            f"open('/home/user/IncomeStatement2.xlsx', 'wb').write(base64.b64decode('{content_b64}'))\n"
-            "subprocess.Popen(['libreoffice', '--calc', '/home/user/IncomeStatement2.xlsx'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)\n"
+    # pkill -x (exact process name): `pkill -f soffice` would also match this python command line and kill it
+    write = ("import base64, subprocess, time\n"
+             "subprocess.run(['pkill', '-x', 'soffice.bin']); time.sleep(3)\n"
+             f"open('/home/user/IncomeStatement2.xlsx', 'wb').write(base64.b64decode('{content_b64}'))\n")
+    wait = ("import subprocess, time\n"
             "for i in range(90):\n"
-            "    out = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True).stdout\n"
-            "    if 'IncomeStatement2.xlsx' in out: break\n"
+            "    if 'IncomeStatement2.xlsx' in subprocess.run(['wmctrl', '-l'], capture_output=True, text=True).stdout: break\n"
             "    time.sleep(1)\n"
-            "time.sleep(3)\nprint('ok')\n")
+            "time.sleep(3)\n")
 
     def run(env):
-        env.step({"type": "execute", "command": ["python3", "-c", code], "shell": False})
+        env.step({"type": "execute", "command": ["python3", "-c", write], "shell": False})
+        env.step({"type": "launch", "command": ["libreoffice", "--calc", "/home/user/IncomeStatement2.xlsx"], "shell": False})
+        env.step({"type": "execute", "command": ["python3", "-c", wait], "shell": False})
     run.__name__ = label
     return run
 
