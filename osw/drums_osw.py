@@ -144,8 +144,16 @@ class OswEnv:
 def main(argv) -> dict:
     verb = argv[1] if len(argv) > 1 else ""
     if verb not in ("setup", "evaluate", "stage"):
-        return {"ok": False, "error": f"usage: drums_osw.py setup|evaluate|stage < request.json (got {verb!r})"}
+        return {"ok": False, "error": f"usage: drums_osw.py setup|evaluate|stage|serve < request.json (got {verb!r})"}
     req = json.load(sys.stdin)
+    if verb != "stage" and not os.environ.get("DRUMS_OSW_NO_SERVER"):
+        out = via_server(verb, req)
+        if out is not None:
+            return out
+    return run_request(verb, req)
+
+
+def run_request(verb, req) -> dict:
     task = req["task"]
     t0 = time.monotonic()
     staged = stage(task, req["cache_dir"])
@@ -180,7 +188,126 @@ def run_verb(verb, env, task, staged, t0) -> dict:
             "postconfig_ran": bool(ev.get("postconfig"))}
 
 
+# ------------------------------------------------------------------------------------------------ fork server
+# Importing OSWorld's controllers, getters and metrics costs about 4 s and 12 CPU-seconds per helper process; at 128+
+# envs the checkers' imports alone needed more cores than the host has. `serve` imports once and forks a worker per
+# request (copy-on-write; nothing is shared between requests but the read-only imported code). The client side is
+# this same script run by drumsd as before: it hands its request to the server if the socket answers, else does the
+# work itself. A worker dies with its client: if the client goes away (drumsd's timeout kills it), the worker's
+# process group is killed.
+SOCK = "/run/drums-osw/osw.sock"
+
+
+def via_server(verb, req, sock_path=SOCK):
+    import socket
+    try:
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(sock_path)
+    except OSError:
+        return None
+    with c:
+        c.sendall(json.dumps({"verb": verb, "req": req}).encode() + b"\n")
+        buf = b""
+        while True:
+            b = c.recv(1 << 16)
+            if not b:
+                break
+            buf += b
+    line = buf.decode(errors="replace").strip().splitlines()
+    if not line:
+        return {"ok": False, "error": "osw server closed the connection without a reply"}
+    return json.loads(line[-1])
+
+
+def _worker(verb, req, wfd, efd):
+    os.setpgid(0, 0)
+    os.dup2(efd, 2)
+    sys.stdout = sys.stderr = os.fdopen(2, "w", buffering=1)
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
+    try:
+        out = run_request(verb, req)
+    except Exception as e:  # noqa: BLE001
+        out = {"ok": False, "error": f"{type(e).__name__}: {e}"[:1200], "trace": traceback.format_exc()[-2000:]}
+    os.write(wfd, (json.dumps(out, default=str) + "\n").encode())
+    os._exit(0)
+
+
+def _handle(conn):
+    import select
+    import signal
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    f = conn.makefile("rb")
+    msg = json.loads(f.readline())
+    r, w = os.pipe()
+    err = tempfile.TemporaryFile()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        conn.close()
+        _worker(msg["verb"], msg["req"], w, err.fileno())
+    os.close(w)
+    reply = b""
+    while True:
+        rd, _, _ = select.select([r, conn], [], [])
+        if conn in rd and not conn.recv(1, __import__("socket").MSG_PEEK):
+            os.killpg(pid, signal.SIGKILL)      # the client went away: so does the work
+            os.waitpid(pid, 0)
+            return
+        if r in rd:
+            b = os.read(r, 1 << 16)
+            if not b:
+                break
+            reply += b
+    os.waitpid(pid, 0)
+    try:
+        os.killpg(pid, signal.SIGKILL)          # anything the worker left running
+    except OSError:
+        pass
+    if not reply.strip():
+        err.seek(0)
+        tail = err.read()[-1200:].decode(errors="replace")
+        reply = (json.dumps({"ok": False, "error": f"osw worker exited without a reply; stderr: {tail}"}) + "\n").encode()
+    conn.sendall(reply)
+
+
+def serve(argv):
+    import signal
+    import socket
+    sock_path = argv[argv.index("--sock") + 1] if "--sock" in argv else SOCK
+    osworld_dir = argv[argv.index("--osworld-dir") + 1]
+    os.chdir(osworld_dir)
+    sys.path.insert(0, osworld_dir)
+    import desktop_env.controllers.python  # noqa: F401
+    import desktop_env.controllers.setup  # noqa: F401
+    import desktop_env.desktop_env  # noqa: F401
+    import desktop_env.evaluators.getters  # noqa: F401
+    import desktop_env.evaluators.metrics  # noqa: F401
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)      # connection handlers are reaped by the kernel
+    try:
+        os.unlink(sock_path)
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    os.chmod(sock_path, 0o600)
+    srv.listen(1024)
+    print(f"drums_osw serve: OSWorld imported, listening on {sock_path}", file=sys.stderr, flush=True)
+    while True:
+        conn, _ = srv.accept()
+        if os.fork() == 0:
+            srv.close()
+            try:
+                _handle(conn)
+            finally:
+                os._exit(0)
+        conn.close()
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+        serve(sys.argv)
+        sys.exit(1)
     # OSWorld logs and prints; keep stdout for the one reply line
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
