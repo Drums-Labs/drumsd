@@ -19,6 +19,15 @@ It prints the URL and the API token. The token is also in `/etc/drums/token` (ro
 Every input is pinned in `install/lock.json` (apt snapshot and versions, image and file sha256, source commits,
 Rust toolchain, a hashed Python lock); the installer stops at the first mismatch. Log: `/var/log/drums-install.log`.
 
+## Reboots (EC2 stop/start)
+
+The state dir is a tmpfs and the image mount is an nbd attachment, so a reboot removes both; envs that were running are gone.
+`drums-boot.service` (before drumsd) mounts the state tmpfs again, loads nbd/overlay and re-attaches the verified image
+read-only; `drums-origin.service` then re-provisions the clean checkpoint (a few minutes). Nothing is downloaded or rebuilt.
+Until it finishes, `GET /v1/checkpoints` shows `stale: true` with `stale_reason: "state_lost: ..."`, `/v1/health` has
+`ok: false` and a warning, and creating from it returns 409 `checkpoint_stale` (SDK: `CheckpointStale`). If a unit fails,
+see `journalctl -u drums-boot -u drums-origin`; re-running `install.sh` is also safe (it reuses the built CRIU).
+
 ## Use
 
 ```
