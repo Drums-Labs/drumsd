@@ -47,12 +47,20 @@ pub struct Ctx {
     pub cg_root: PathBuf,
     pub proc: PathBuf,
     pub host: Arc<Mutex<(std::time::Instant, view::HostFacts)>>,
+    /// Last rendering per (slot cgroup, file), reused for [`RENDER_TTL`]: a slot that floods its view costs the daemon
+    /// one cgroup read per request instead of a full rendering (measured before: 16 readers in one env took ~8 host
+    /// CPUs of the daemon's time, outside the env's cpu.max).
+    pub cache: Arc<Mutex<HashMap<(String, &'static str), (std::time::Instant, Vec<u8>)>>>,
 }
+
+/// How long a rendering is reused for the same slot and file. Values change continuously anyway; 100 ms is far below
+/// what any reader polls at (top, free -s: 1 s and up).
+pub const RENDER_TTL: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Ctx {
     pub fn system() -> io::Result<Ctx> {
         let h = view::HostFacts::read(Path::new("/proc"))?;
-        Ok(Ctx { cg_root: "/sys/fs/cgroup".into(), proc: "/proc".into(), host: Arc::new(Mutex::new((std::time::Instant::now(), h))) })
+        Ok(Ctx { cg_root: "/sys/fs/cgroup".into(), proc: "/proc".into(), host: Arc::new(Mutex::new((std::time::Instant::now(), h))), cache: Default::default() })
     }
     /// Host facts, refreshed at most once a second (uptime moves; swap devices can change).
     fn host(&self) -> view::HostFacts {
@@ -70,7 +78,20 @@ impl Ctx {
         if !view::is_slot_path(&rel) {
             return Err(libc::EACCES);
         }
-        view::render(name, &self.cg_root, &rel, &self.host()).map(String::into_bytes).map_err(|e| if e.kind() == io::ErrorKind::PermissionDenied { libc::EACCES } else { libc::EIO })
+        let Some(key_name) = view::FILES.iter().map(|(n, _)| *n).find(|n| *n == name) else { return Err(libc::ENOENT) };
+        let key = (rel.clone(), key_name);
+        if let Some((at, d)) = self.cache.lock().unwrap().get(&key) {
+            if at.elapsed() < RENDER_TTL {
+                return Ok(d.clone());
+            }
+        }
+        let d = view::render(name, &self.cg_root, &rel, &self.host()).map(String::into_bytes).map_err(|e| if e.kind() == io::ErrorKind::PermissionDenied { libc::EACCES } else { libc::EIO })?;
+        let mut c = self.cache.lock().unwrap();
+        if c.len() > 8192 {
+            c.retain(|_, v| v.0.elapsed() < RENDER_TTL);
+        }
+        c.insert(key, (std::time::Instant::now(), d.clone()));
+        Ok(d)
     }
     fn is_slot(&self, pid: u32) -> bool {
         view::cgroup_of(&self.proc, pid).map(|r| view::is_slot_path(&r)).unwrap_or(false)
@@ -434,7 +455,7 @@ mod tests {
             fs::write(s.join(f), v).unwrap();
         }
         let host = view::HostFacts { mem_total: 64 << 30, swap_total: 0, cpus: 16, cpuinfo: "processor\t: 0\n\n".into(), uptime_s: 10.0, btime: 1, overcommit_ratio: 50 };
-        Ctx { cg_root: cg, proc, host: Arc::new(Mutex::new((std::time::Instant::now(), host))) }
+        Ctx { cg_root: cg, proc, host: Arc::new(Mutex::new((std::time::Instant::now(), host))), cache: Default::default() }
     }
 
     fn req(op: u32, node: u64, pid: u32, body: &[u8]) -> Vec<u8> {
@@ -512,6 +533,32 @@ mod tests {
         init.extend_from_slice(&[0u8; 52]);
         let (e, o) = handle(&c, &hs, &req(FUSE_INIT, 0, 0, &init)).unwrap();
         assert_eq!((e, o.len(), u32_at(&o, 0), u32_at(&o, 4)), (0, 64, 7, 31));
+    }
+
+    #[test]
+    fn renderings_are_reused_briefly_per_slot_and_never_across_slots() {
+        let t = tempfile::tempdir().unwrap();
+        let c = ctx(t.path());
+        let a = c.render_for("meminfo", 100).unwrap();
+        // a second slot with another limit reads its own value even right after the first
+        let s2 = c.cg_root.join("system.slice/drumsbench-rootfs-cd-4.scope");
+        fs::create_dir_all(&s2).unwrap();
+        for (f, v) in [("memory.max", "2147483648"), ("memory.swap.max", "0"), ("cpu.max", "100000 100000"), ("memory.current", "1"),
+                       ("memory.swap.current", "0"), ("memory.stat", "anon 1\n"), ("cpu.stat", "usage_usec 1\n"), ("pids.current", "1")] {
+            fs::write(s2.join(f), v).unwrap();
+        }
+        fs::create_dir_all(c.proc.join("300")).unwrap();
+        fs::write(c.proc.join("300/cgroup"), "0::/system.slice/drumsbench-rootfs-cd-4.scope\n").unwrap();
+        let b = c.render_for("meminfo", 300).unwrap();
+        assert!(String::from_utf8_lossy(&a).starts_with("MemTotal:        4194304 kB"));
+        assert!(String::from_utf8_lossy(&b).starts_with("MemTotal:        2097152 kB"));
+        // within the TTL the same slot gets the cached rendering; after it, a fresh one
+        fs::write(c.cg_root.join("system.slice/drumsbench-rootfs-ab-3.scope/memory.max"), "3221225472").unwrap();
+        assert_eq!(c.render_for("meminfo", 100).unwrap(), a);
+        std::thread::sleep(RENDER_TTL + std::time::Duration::from_millis(20));
+        assert!(String::from_utf8_lossy(&c.render_for("meminfo", 100).unwrap()).starts_with("MemTotal:        3145728 kB"));
+        // a host reader is still refused, cache or not
+        assert_eq!(c.render_for("meminfo", 200).unwrap_err(), libc::EACCES);
     }
 
     #[test]

@@ -247,6 +247,8 @@ Before=drumsd.service
 Type=notify
 NotifyAccess=main
 ExecStart=$O/bin/drumsd procview --mount /run/drums/procview
+# the view renders on behalf of envs outside their cpu.max: bound what one flooding env can take from the host
+CPUQuota=200%
 FileDescriptorStoreMax=4
 FileDescriptorStorePreserve=restart
 Restart=always
