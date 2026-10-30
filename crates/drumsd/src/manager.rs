@@ -675,11 +675,7 @@ impl Manager {
             let me = self.clone();
             let s2 = slot.clone();
             let ta = Instant::now();
-            let res = tokio::task::spawn_blocking(move || {
-                let r = me.restore_once(&s2, private);
-                drop(permit);
-                r
-            })
+            let res = tokio::task::spawn_blocking(move || me.restore_once(&s2, private, permit))
             .await
             .map_err(e500)?;
             let mode = if private { "private" } else { "template" };
@@ -855,7 +851,11 @@ impl Manager {
     }
 
     /// One complete restore of the slot: kill, fresh upper, restore, gates. Blocking.
-    fn restore_once(&self, slot: &Slot, private: bool) -> Result<RestoreOk, RestoreFailure> {
+    /// One restore attempt. `permit` (one of max_concurrent_restores) is held from the kill through CRIU's restore
+    /// and released as soon as the restored init is known: the gates, the guest probe and the task's setup run
+    /// without it. Holding it to the end made the permits the bottleneck at 128 envs (a create waited ~56 s for a
+    /// permit while its own pipeline took ~5.5 s, most of it gates and setup under CPU contention).
+    fn restore_once(&self, slot: &Slot, private: bool, permit: tokio::sync::OwnedSemaphorePermit) -> Result<RestoreOk, RestoreFailure> {
         let mut t: BTreeMap<String, f64> = BTreeMap::new();
         let mut gates = GateReport::default();
         let fail = |class: FailureClass, error: String, gates: &GateReport, t: &BTreeMap<String, f64>| RestoreFailure { class, error, gates: gates.clone(), timings: t.clone() };
@@ -986,6 +986,7 @@ impl Manager {
             return Err(fail(class, error, &gates, &t));
         }
         let pid = pid.unwrap();
+        drop(permit); // CRIU is done with this restore: the next one may start while this one's gates run
         let start_ticks = procfs::start_ticks(pid).unwrap_or_default();
 
         // 5. kernel-side gates, in parallel
