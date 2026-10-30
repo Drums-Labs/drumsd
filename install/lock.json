@@ -81,10 +81,10 @@
   "sources": {
     "drums-criu": {
       "repo": "sahiljagtap08/drums-criu",
-      "branch": "fix/dump-sigchld",
-      "commit": "eaf4989ea7e22b26344e2fc03d98e4ff2cad26d6",
+      "branch": "fix/dump-fsize",
+      "commit": "e10195158b5b1289497609d36efdd0eb5d728733",
       "tag": null,
-      "note": "runtime-20261030a (ade3f3da8) plus fault point 10 and the dump fix: SIGCHLD blocked from fork to waitpid of the creds helpers (scale run L32a)",
+      "note": "integration/runtime-c 7a2f7f138 (ade3f3da8 restore-hang fix, ee9118f93 restore takes the client's oom_score_adj, capture-latency fix, creds-helper SIGCHLD fix) plus e10195158: the compel parasite logs through a pipe, so a task with RLIMIT_FSIZE 0 (rtkit-daemon) no longer gets SIGXFSZ from a --leave-running dump",
       "reference_binary_sha256": "unknown (not built yet at this pin)"
     },
     "drums-lab": {
