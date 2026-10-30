@@ -1,6 +1,7 @@
 //! HTTP/JSON API (spec: api/openapi.json, served at GET /openapi.json).
 
 use crate::manager::{view, ApiError, Manager, QuiesceOpts};
+use drumsd_core::admission::Need;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
@@ -163,6 +164,7 @@ async fn list_slots(State(m): S) -> Json<Value> {
     Json(json!(v))
 }
 async fn create(State(m): S, Json(r): Json<CreateReq>) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let _admitted = m.admit("create", Need { envs: 1, captures: 0 })?;
     let rec = m.create_with(r.checkpoint, r.task, r.setup).await?;
     Ok((StatusCode::CREATED, Json(view(&rec))))
 }
@@ -187,10 +189,12 @@ async fn screenshot(State(m): S, Path(id): Path<String>) -> Result<Response, Api
 async fn capture(State(m): S, Path(id): Path<String>, body: Option<Json<CaptureReq>>) -> J {
     let r = body.map(|b| b.0).unwrap_or_default();
     let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
+    let _admitted = m.admit("capture", Need { envs: 0, captures: 1 })?;
     Ok(Json(json!(m.capture_with(&id, r.id, o).await?)))
 }
 async fn branch(State(m): S, Path(id): Path<String>, Json(r): Json<BranchReq>) -> J {
     let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
+    let _admitted = m.admit("fork", Need { envs: r.n as u64, captures: 1 })?;
     Ok(Json(m.branch_with(&id, r.n, o).await?))
 }
 async fn quiescent(State(m): S, Path(id): Path<String>, body: Option<Json<QuiescentReq>>) -> J {

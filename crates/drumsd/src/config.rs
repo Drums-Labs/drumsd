@@ -92,6 +92,9 @@ pub struct Config {
     /// Capture readiness: before every capture (save, fork) the tree must be quiescent, and the dump must match it.
     #[serde(default)]
     pub quiesce: QuiesceConfig,
+    /// Admission control (memory, memory pressure, state tmpfs space) for create, capture and fork.
+    #[serde(default)]
+    pub admission: drumsd_core::admission::AdmissionConfig,
     /// Where records of destroyed envs, deleted states and rejected dumps go (one .tar.zst each). Must be on disk,
     /// not the state tmpfs. Default: `<parent of journal_dir>/forgotten`.
     #[serde(default)]

@@ -130,6 +130,8 @@ pub struct Manager {
     alloc: StdMutex<BTreeSet<u32>>,
     alloc_cursor: std::sync::atomic::AtomicU32,
     usage_dirty: std::sync::atomic::AtomicBool,
+    admit_in_flight: Arc<std::sync::atomic::AtomicU64>,
+    admit_counts: StdMutex<BTreeMap<String, u64>>,
     dirty_slots: StdMutex<BTreeSet<String>>,
     source_sha: String,
     limits: cgroup::Limits,
@@ -236,6 +238,8 @@ impl Manager {
             alloc: StdMutex::new(BTreeSet::new()),
             alloc_cursor: std::sync::atomic::AtomicU32::new(0),
             usage_dirty: std::sync::atomic::AtomicBool::new(false),
+            admit_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admit_counts: StdMutex::new(BTreeMap::new()),
             dirty_slots: StdMutex::new(BTreeSet::new()),
             source_sha,
             limits,
@@ -243,6 +247,45 @@ impl Manager {
             policy,
         };
         Ok(Arc::new(m))
+    }
+
+    // ------------------------------------------------------------------------------------------------ admission
+    fn host_mem(&self) -> drumsd_core::admission::HostMem {
+        let mut h = drumsd_core::admission::parse_host(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
+                                                       &std::fs::read_to_string("/proc/pressure/memory").unwrap_or_default());
+        h.state_free_mib = statvfs_free(&self.cfg.state_dir).map(|b| b / (1024 * 1024));
+        h
+    }
+
+    /// Admit an operation that starts `need` envs/captures, or refuse it (HTTP 429, code `overloaded`, with the
+    /// reason). The returned guard holds the operation's expected memory as "in flight" until it is dropped.
+    pub fn admit(&self, op: &str, need: drumsd_core::admission::Need) -> R<AdmitGuard> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let c = &self.cfg.admission;
+        let h = self.host_mem();
+        let in_flight = self.admit_in_flight.load(SeqCst);
+        match drumsd_core::admission::decide(c, &h, in_flight, need) {
+            Ok(()) => {
+                let mib = if c.enabled { need.mib(c) } else { 0 };
+                self.admit_in_flight.fetch_add(mib, SeqCst);
+                *self.admit_counts.lock().unwrap().entry(format!("admitted:{op}")).or_default() += 1;
+                Ok(AdmitGuard { in_flight: self.admit_in_flight.clone(), mib })
+            }
+            Err(r) => {
+                *self.admit_counts.lock().unwrap().entry(format!("refused:{op}:{}", r.reason)).or_default() += 1;
+                self.metrics.inc("drumsd_admission_refused_total", &[("op", op), ("reason", &r.reason)], 1.0);
+                Err(ApiError::new(429, format!("overloaded: {op} refused: {}", r.message))
+                    .with(json!({"code": "overloaded", "reason": r.reason, "admission": r})))
+            }
+        }
+    }
+
+    pub fn admission_view(&self) -> Value {
+        let h = self.host_mem();
+        json!({"enabled": self.cfg.admission.enabled, "config": self.cfg.admission, "host": h,
+               "floor_mib": drumsd_core::admission::floor_mib(&self.cfg.admission, &h),
+               "in_flight_mib": self.admit_in_flight.load(std::sync::atomic::Ordering::SeqCst),
+               "counts": *self.admit_counts.lock().unwrap()})
     }
 
     // ------------------------------------------------------------------------------------------------ records
@@ -1949,7 +1992,8 @@ impl Manager {
                "host_mem_available_bytes": std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:"))
                    .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
                "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
-               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores}})
+               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores},
+               "admission": self.admission_view()})
     }
 
     // ------------------------------------------------------------------------------------------------ restart
@@ -2059,6 +2103,24 @@ pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64, forget: impl FnO
         }
     }
     forget(&sp.dir, &format!("slot{num}-{now_ms}"))
+}
+
+/// Expected memory of an admitted operation, counted as in flight until the operation ends.
+pub struct AdmitGuard {
+    in_flight: Arc<std::sync::atomic::AtomicU64>,
+    mib: u64,
+}
+
+impl Drop for AdmitGuard {
+    fn drop(&mut self) {
+        self.in_flight.fetch_sub(self.mib, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn statvfs_free(p: &Path) -> Option<u64> {
+    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 /// The first number at or after `from` (wrapping around `range`) not held, not reserved and with nothing on disk.

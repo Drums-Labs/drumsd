@@ -6,10 +6,12 @@
 //! * [`journal`]: crash-safe per-slot records (write, fsync, rename) and an append-only event log.
 //! * [`metrics`]: a small Prometheus text-format registry.
 //! * [`quiesce`]: capture readiness (no task leaving, a stable tree for a window, the dump matches it).
+//! * [`admission`]: refuse creates, captures and forks that would push the host into memory thrash.
 //! * [`usage`]: per-slot and daemon ledgers (op latency, episodes by verdict, failures/retries by cause, rewards) and cost.
 //! * [`locks`], [`mounts`], [`net`], [`statehash`], [`alive`]: pure ports of the Python runtime's checks
 //!   (sharedos_rootfs/locks.py, candidate.py, iarun/checks.py, fcbench.py) so both paths judge a restore the same way.
 
+pub mod admission;
 pub mod alive;
 pub mod gates;
 pub mod journal;
