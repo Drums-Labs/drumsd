@@ -98,13 +98,25 @@ pub fn cgroup_gate(pid: i32, tree_cg: &Path, limits_cg: &Path, want: &cgroup::Li
         }
     }
     let init_cg = procfs::cgroup_path(pid);
-    let ok = got.as_ref().map(|g| g == want).unwrap_or(false) && init_cg.as_deref() == Some(rel.as_str()) && stray.is_empty();
-    let d = json!({"cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().map_err(|e| e.to_string()), "want": want, "members": members.len(), "outside_cgroup": stray});
+    let (init_adj, negative) = oom_priority(pid, &procfs::ns_members_and_procs(pid).0);
+    let oom_ok = init_adj == Some(cgroup::SLOT_OOM_SCORE_ADJ) && negative.is_empty();
+    let ok = got.as_ref().map(|g| g == want).unwrap_or(false) && init_cg.as_deref() == Some(rel.as_str()) && stray.is_empty() && oom_ok;
+    let d = json!({"cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().map_err(|e| e.to_string()), "want": want, "members": members.len(), "outside_cgroup": stray,
+                   "init_oom_score_adj": init_adj, "want_oom_score_adj": cgroup::SLOT_OOM_SCORE_ADJ, "negative_oom_score_adj": negative});
     if ok {
         GateResult::pass(Gate::Cgroup, secs(t0), d)
     } else {
         GateResult::fail(Gate::Cgroup, secs(t0), d)
     }
+}
+
+/// The slot's OOM priority after a restore: the init (0 in every image) must have the client's SLOT_OOM_SCORE_ADJ, and no
+/// process of the slot may be below 0. A restore whose tasks inherited the template server's -900 (a CRIU without the
+/// pageshare oom fix) would protect the slot over the server: it fails the cgroup gate.
+fn oom_priority(pid: i32, host_pids: &[i64]) -> (Option<i32>, Vec<(i64, i32)>) {
+    let adj = |p: i64| fs::read_to_string(format!("/proc/{p}/oom_score_adj")).ok().and_then(|v| v.trim().parse::<i32>().ok());
+    let neg = host_pids.iter().filter_map(|&p| adj(p).filter(|v| *v < 0).map(|v| (p, v))).collect();
+    (adj(pid as i64), neg)
 }
 
 pub fn mount_gate(pid: i32, slot_dir: &Path) -> GateResult {

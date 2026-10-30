@@ -242,6 +242,9 @@ fn client_inner(args: &[String]) -> io::Result<i32> {
     let cg = opt("--cgroup").ok_or_else(|| io::Error::other("--cgroup required"))?;
     let ovl = opt("--overlay").ok_or_else(|| io::Error::other("--overlay required"))?;
     let root = opt("--root").ok_or_else(|| io::Error::other("--root required"))?;
+    // 0. the slot's OOM priority: CRIU (or the template server's child, which copies ours) and every restored task whose
+    //    image holds 0 run at SLOT_OOM_SCORE_ADJ, so the OOM killer takes slot processes before the template server
+    fs::write("/proc/self/oom_score_adj", crate::cgroup::SLOT_OOM_SCORE_ADJ.to_string())?;
     // 1. the slot's persistent cgroup: CRIU (or the template server's child, which joins our cgroup) and every restored
     //    task stay in it, so the limits hold from the first instruction
     fs::write(Path::new(&cg).join("cgroup.procs"), std::process::id().to_string())?;
