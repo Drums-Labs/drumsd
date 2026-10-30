@@ -5,7 +5,7 @@
 # drums-criu and drums-lab (the commits pinned in install/lock.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:?out dir}"
+OUT="$(mkdir -p "${1:?out dir}" && cd "$1" && pwd)"
 CRIU="${DRUMS_CRIU:?set DRUMS_CRIU}"; LAB="${DRUMS_LAB:?set DRUMS_LAB}"
 [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ] || { echo "drumsd tree has uncommitted changes" >&2; exit 1; }
 C=$(git -C "$HERE" rev-parse HEAD)
