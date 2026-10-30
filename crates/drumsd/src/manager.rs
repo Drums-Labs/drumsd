@@ -1974,6 +1974,12 @@ impl Manager {
             self.put_ckpt(&c2);
             report.push(json!({"checkpoint": c.id, "server": adopted}));
         }
+        // template servers no checkpoint owns hold memory for nothing: stop them (recorded)
+        let owned: BTreeSet<i32> = self.ckpts.read().unwrap().values().filter_map(|c| c.server_pid).collect();
+        for (pid, cmd) in template::orphans(&self.cfg.state_dir, &owned) {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            report.push(json!({"orphan_template_server_killed": pid, "cmdline": cmd}));
+        }
         let recs: Vec<(String, SlotRecord)> = self.journal.all("slots").map_err(|e| e.to_string())?;
         for (_, rec) in recs {
             if rec.state.is_terminal() {

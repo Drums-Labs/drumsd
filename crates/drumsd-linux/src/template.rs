@@ -53,6 +53,35 @@ fn server_pid(sock: &Path, images: &Path) -> Option<i32> {
     (cl.join(" ").contains("--template-server") && cl.iter().any(|a| a == &img)).then_some(pid)
 }
 
+/// Template servers of this state dir that no live checkpoint owns: their pid is not the pidfile pid of an adopted
+/// checkpoint. They come from a daemon killed between starting a capture's server and journaling the checkpoint,
+/// or from a server whose socket was taken over; each holds its checkpoint's pages in memory (scale runs: 10 such
+/// servers had piled up after 6 drumsd kills). `owned` is the set of adopted server pids.
+pub fn orphans(state_dir: &Path, owned: &std::collections::BTreeSet<i32>) -> Vec<(i32, String)> {
+    let sd = state_dir.display().to_string();
+    let mut out = vec![];
+    let Ok(rd) = fs::read_dir("/proc") else { return out };
+    for e in rd.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
+        let Some(cl) = crate::procfs::cmdline(pid) else { continue };
+        // a restore child forked by an owned server has the server's argv: not an orphan
+        let ppid = fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|st| st.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|x| x.parse::<i32>().ok()));
+        if ppid.map(|pp| owned.contains(&pp)).unwrap_or(false) {
+            continue;
+        }
+        if is_orphan_server(&cl, &sd, pid, owned) {
+            out.push((pid, cl.join(" ").chars().take(200).collect()));
+        }
+    }
+    out
+}
+
+pub fn is_orphan_server(cl: &[String], state_dir: &str, pid: i32, owned: &std::collections::BTreeSet<i32>) -> bool {
+    let Some(i) = cl.iter().position(|a| a == "--template-server") else { return false };
+    let Some(sock) = cl.get(i + 1) else { return false };
+    cl.first().map(|a| a.ends_with("criu")).unwrap_or(false) && sock.starts_with(&format!("{state_dir}/")) && !owned.contains(&pid)
+}
+
 /// The running binary was replaced on disk (an install upgraded criu): /proc/PID/exe reads "<path> (deleted)".
 /// A reinstall from runtime-v0.2 to v0.3 kept the old template server: its restored inits came up at
 /// oom_score_adj 0 instead of +300 and the cgroup gate quarantined every env (scale run L128v3).
@@ -167,6 +196,16 @@ mod tests {
 #[cfg(test)]
 mod upgrade_tests {
     use super::*;
+    #[test]
+    fn only_unowned_servers_of_this_state_dir_are_orphans() {
+        let cl = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let owned: std::collections::BTreeSet<i32> = [10].into();
+        let srv = cl("/opt/drums/criu/bin/criu restore --template-server /var/lib/drums/state/ps-301.sock -D /var/lib/drums/state/slot301/images");
+        assert!(is_orphan_server(&srv, "/var/lib/drums/state", 11, &owned));
+        assert!(!is_orphan_server(&srv, "/var/lib/drums/state", 10, &owned), "an adopted server is not an orphan");
+        assert!(!is_orphan_server(&srv, "/var/lib/other", 11, &owned), "another state dir is not ours");
+        assert!(!is_orphan_server(&cl("/opt/drums/criu/bin/criu restore -D x"), "/var/lib/drums/state", 11, &owned));
+    }
     #[test]
     fn a_server_of_a_replaced_criu_binary_is_not_adopted() {
         assert!(exe_replaced(Path::new("/opt/drums/criu/bin/criu (deleted)")));
