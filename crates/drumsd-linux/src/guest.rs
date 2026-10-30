@@ -50,7 +50,20 @@ impl Guest {
         Guest { addr: SocketAddr::from(([127, 0, 0, 1], port)), timeout }
     }
 
+    /// One request. A guest that does not answer within `timeout` gives an error of kind TimedOut that says so.
+    /// (A socket read or write past SO_RCVTIMEO/SO_SNDTIMEO fails with EAGAIN, which std reports as "Resource
+    /// temporarily unavailable (os error 11)": that is how 479 slow state-hash replies at 256 envs were reported.)
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> io::Result<Response> {
+        self.request_inner(method, path, body).map_err(|e| match e.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("guest did not answer {method} {path} within {:.1} s ({e})", self.timeout.as_secs_f64()),
+            ),
+            _ => e,
+        })
+    }
+
+    fn request_inner(&self, method: &str, path: &str, body: Option<&Value>) -> io::Result<Response> {
         let mut s = TcpStream::connect_timeout(&self.addr, self.timeout)?;
         s.set_read_timeout(Some(self.timeout))?;
         s.set_write_timeout(Some(self.timeout))?;
@@ -131,6 +144,33 @@ mod tests {
             c.write_all(reply).unwrap();
         });
         port
+    }
+
+    #[test]
+    fn a_guest_that_does_not_answer_in_time_is_a_timeout_not_eagain() {
+        // the raw std behavior: a read past SO_RCVTIMEO is EAGAIN ("Resource temporarily unavailable (os error 11)")
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let held = std::thread::spawn(move || {
+            let mut v = vec![];
+            for _ in 0..2 {
+                v.push(l.accept().unwrap().0); // accept, never answer
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        let mut raw = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        raw.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let e = raw.read(&mut [0u8; 8]).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EAGAIN));
+        assert!(e.to_string().contains("os error 11"), "{e}");
+        // the guest client names it
+        let g = Guest::new(port, Duration::from_millis(300));
+        let t0 = std::time::Instant::now();
+        let e = g.sh("ls -A ~").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert!(e.to_string().contains("did not answer POST /execute within 0.3 s"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        held.join().unwrap();
     }
 
     #[test]

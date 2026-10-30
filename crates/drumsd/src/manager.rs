@@ -1174,24 +1174,26 @@ impl Manager {
         // 7. state hash and isolation, in parallel
         let ts = Instant::now();
         let others = self.live_inits(&slot.id);
-        let (hash, iso) = std::thread::scope(|s| {
-            let h = s.spawn(|| state_hash(&g));
+        let gh = Guest::new(self.cfg.port_base + num as u16, STATE_HASH_TIMEOUT);
+        let ((hash, sections_s), iso) = std::thread::scope(|s| {
+            let h = s.spawn(|| state_hash_timed(&gh));
             let i = s.spawn(|| checks::isolation_gate(pid, &others, &cg));
             (h.join().unwrap(), i.join().unwrap())
         });
         let hs = ts.elapsed().as_secs_f64();
         match (&hash, &c.expected_state_hash) {
-            (Ok(h), Some(want)) if h == want => gates.push(GateResult::pass(Gate::StateHash, hs, json!({"hash": h}))),
-            (Ok(h), Some(want)) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"expected": want, "got": h}))),
+            (Ok(h), Some(want)) if h == want => gates.push(GateResult::pass(Gate::StateHash, hs, json!({"hash": h, "sections_s": sections_s}))),
+            (Ok(h), Some(want)) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"expected": want, "got": h, "sections_s": sections_s}))),
             (Ok(h), None) => {
                 // the first child defines the reference (recorded as such on the checkpoint)
                 let mut c2 = c.clone();
                 c2.expected_state_hash = Some(h.clone());
                 c2.hash_reference = format!("first child {}", slot.id);
                 self.put_ckpt(&c2);
-                gates.push(GateResult::pass(Gate::StateHash, hs, json!({"hash": h, "reference": "this restore defined it"})));
+                gates.push(GateResult::pass(Gate::StateHash, hs, json!({"hash": h, "reference": "this restore defined it", "sections_s": sections_s})));
             }
-            (Err(e), _) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"error": e}))),
+            (Err(e), _) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"error": e, "sections_s": sections_s,
+                                                                                    "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64()}))),
         }
         gates.push(iso);
         t.insert("hash_isolation".into(), round3(ts.elapsed().as_secs_f64()));
@@ -2252,16 +2254,35 @@ pub fn status_str(s: &GateStatus) -> &'static str {
 }
 
 /// The three STATE_SECTIONS through the guest server, concurrently, hashed exactly as the Python path does.
+/// How long the state-hash gate waits for the guest's answer to each of its three read-only commands (run at once).
+/// It was the 10 s of the guest probe: at 256 envs on one host, 479 freshly restored trees answered later than that
+/// and were quarantined with "Resource temporarily unavailable" (the socket read timeout), not with a hash mismatch.
+/// The gate itself is unchanged: the hash must equal the checkpoint's; no answer within this time still fails it.
+pub const STATE_HASH_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub fn state_hash(g: &Guest) -> Result<String, String> {
-    let outs: Vec<Result<String, String>> = std::thread::scope(|s| {
-        let hs: Vec<_> = statehash::STATE_SECTIONS.iter().map(|c| s.spawn(move || g.sh(c).map_err(|e| e.to_string()))).collect();
+    state_hash_timed(g).0
+}
+
+/// The state hash and each section's seconds (how long the guest took to answer it).
+pub fn state_hash_timed(g: &Guest) -> (Result<String, String>, Vec<f64>) {
+    let outs: Vec<(Result<String, String>, f64)> = std::thread::scope(|s| {
+        let hs: Vec<_> = statehash::STATE_SECTIONS.iter().map(|c| s.spawn(move || {
+            let t = Instant::now();
+            let r = g.sh(c).map_err(|e| e.to_string());
+            (r, round3(t.elapsed().as_secs_f64()))
+        })).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let secs: Vec<f64> = outs.iter().map(|x| x.1).collect();
     let mut o: [String; 3] = Default::default();
-    for (i, r) in outs.into_iter().enumerate() {
-        o[i] = r?;
+    for (i, (r, _)) in outs.into_iter().enumerate() {
+        match r {
+            Ok(v) => o[i] = v,
+            Err(e) => return (Err(format!("section {i}: {e}")), secs),
+        }
     }
-    Ok(statehash::state_hash(&o))
+    (Ok(statehash::state_hash(&o)), secs)
 }
 
 /// Actions: {"type": "execute", "command": [..] | "..", "shell": bool}, {"type": "pyautogui", "code": "..."},
@@ -2356,6 +2377,47 @@ mod tests {
         old.as_object_mut().unwrap().remove("provenance");
         let back: CheckpointRecord = serde_json::from_value(old).unwrap();
         assert!(back.provenance.is_none());
+    }
+
+    /// A guest that answers each command after `delay`, with fixed outputs.
+    fn slow_guest(delay: Duration) -> u16 {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let mut c = c.unwrap();
+                std::thread::spawn(move || {
+                    let mut got = vec![];
+                    let mut buf = [0u8; 4096];
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") || !got.ends_with(b"}") {
+                        let n = c.read(&mut buf).unwrap();
+                        if n == 0 { return; }
+                        got.extend_from_slice(&buf[..n]);
+                    }
+                    std::thread::sleep(delay);
+                    let _ = c.write_all(b"HTTP/1.0 200 OK\r\n\r\n{\"status\": \"success\", \"output\": \"a\\n\", \"error\": \"\", \"returncode\": 0}");
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_slow_guest_is_hashed_within_the_gate_timeout_and_a_silent_one_fails_with_a_timeout() {
+        // the gate waits STATE_HASH_TIMEOUT, not the 10 s guest probe: 479 trees at 256 envs answered later than 10 s
+        assert!(STATE_HASH_TIMEOUT >= Duration::from_secs(60));
+        let src = include_str!("manager.rs");
+        assert!(src.contains("let gh = Guest::new(self.cfg.port_base + num as u16, STATE_HASH_TIMEOUT);"));
+        let p = slow_guest(Duration::from_millis(700));
+        let (h, secs) = state_hash_timed(&Guest::new(p, Duration::from_secs(5)));
+        assert_eq!(h.unwrap(), statehash::state_hash(&["a\n".into(), "a\n".into(), "a\n".into()]));
+        assert_eq!(secs.len(), 3);
+        assert!(secs.iter().all(|s| *s >= 0.7), "{secs:?}");
+        // the same guest with too short a wait: a named timeout, never a hash (the gate fails closed)
+        let (h, _) = state_hash_timed(&Guest::new(p, Duration::from_millis(200)));
+        let e = h.unwrap_err();
+        assert!(e.contains("did not answer POST /execute within 0.2 s") && !e.starts_with("Resource"), "{e}");
     }
 
     #[test]
