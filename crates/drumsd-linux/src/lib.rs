@@ -11,6 +11,7 @@ pub mod hook;
 pub mod pidfd;
 pub mod procfs;
 pub mod proxy;
+pub mod quiesce;
 pub mod restore;
 pub mod slotfs;
 pub mod checks;

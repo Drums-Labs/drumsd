@@ -89,6 +89,44 @@ pub struct Config {
     /// Host price in USD per hour (on-demand or what the operator pays), for the cost metrics. 0 = cost not reported.
     #[serde(default)]
     pub host_usd_per_hour: f64,
+    /// Capture readiness: before every capture (save, fork) the tree must be quiescent, and the dump must match it.
+    #[serde(default)]
+    pub quiesce: QuiesceConfig,
+}
+
+/// Capture readiness (see `drumsd_core::quiesce`). A capture waits until the slot's tree shows no task leaving and
+/// no process or thread starting or exiting for `window_s`, dumps it, and rejects the dump if CRIU's seized tree
+/// differs from the quiescent sample or a dumped process exits in the source right after; it then waits and dumps
+/// again, at most `max_attempts` dumps within `timeout_s`. Otherwise the capture fails with `not_quiescent`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct QuiesceConfig {
+    #[serde(default = "d_q_window")]
+    pub window_s: f64,
+    #[serde(default = "d_q_timeout")]
+    pub timeout_s: f64,
+    #[serde(default = "d_q_poll")]
+    pub poll_ms: u64,
+    #[serde(default = "d_q_attempts")]
+    pub max_attempts: u32,
+}
+
+impl Default for QuiesceConfig {
+    fn default() -> Self {
+        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts() }
+    }
+}
+
+fn d_q_window() -> f64 {
+    1.0
+}
+fn d_q_timeout() -> f64 {
+    30.0
+}
+fn d_q_poll() -> u64 {
+    50
+}
+fn d_q_attempts() -> u32 {
+    3
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,5 +228,6 @@ mod tests {
     fn old_configs_still_load() {
         let c = cfg("127.0.0.1:7070", false, None);
         assert!(!c.nested_pidns && c.osw.is_none() && c.host_usd_per_hour == 0.0);
+        assert_eq!(c.quiesce, QuiesceConfig::default(), "an old config gets the readiness check with its defaults");
     }
 }

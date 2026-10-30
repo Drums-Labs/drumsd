@@ -9,6 +9,7 @@
 
 use crate::config::Config;
 use drumsd_core::alive;
+use drumsd_core::quiesce as q;
 use drumsd_core::gates::{Gate, GateReport, GateResult, GateStatus, Validity};
 use drumsd_core::journal::Journal;
 use drumsd_core::metrics::{Registry, LATENCY_BUCKETS};
@@ -16,7 +17,7 @@ use drumsd_core::recovery::{self, Action, Attempt, CostRecord, FailureClass, Pol
 use drumsd_core::state::{Op, Outcome, SlotState};
 use drumsd_core::statehash;
 use drumsd_core::usage::{self, Ledger, Usage};
-use drumsd_linux::{cgroup, checks, guest::Guest, hook, procfs, proxy, restore, slotfs, template};
+use drumsd_linux::{cgroup, checks, guest::Guest, hook, procfs, proxy, quiesce, restore, slotfs, template};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,11 +30,17 @@ use tokio::sync::{Mutex, Semaphore};
 pub struct ApiError {
     pub status: u16,
     pub message: String,
+    /// Extra fields merged into the error body (e.g. `code: "not_quiescent"` and the unstable processes).
+    pub detail: Option<Value>,
 }
 
 impl ApiError {
     pub fn new(status: u16, m: impl Into<String>) -> Self {
-        ApiError { status, message: m.into() }
+        ApiError { status, message: m.into(), detail: None }
+    }
+    pub fn with(mut self, detail: Value) -> Self {
+        self.detail = Some(detail);
+        self
     }
 }
 
@@ -99,6 +106,9 @@ pub struct CheckpointRecord {
     /// The task of the slot this checkpoint was captured from (its setup already ran): slots made from it inherit it.
     #[serde(default)]
     pub task: Option<Value>,
+    /// Capture readiness record: the quiescence wait, every dump attempt and why a rejected one was rejected.
+    #[serde(default)]
+    pub quiescence: Option<Value>,
 }
 
 pub struct Slot {
@@ -126,6 +136,25 @@ pub struct Manager {
     pub token: String,
     pub started_epoch: f64,
     pub criu_sha256: String,
+}
+
+/// Per-request overrides of the capture-readiness wait (the daemon's `quiesce` config gives the defaults).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct QuiesceOpts {
+    pub timeout_s: Option<f64>,
+    pub window_s: Option<f64>,
+}
+
+/// Write `<dir>/dumped-reference.json`: the alive gate's reference set taken from what CRIU dumped (its log).
+pub fn write_dumped_reference(dir: &Path) -> Result<usize, String> {
+    let b = std::fs::read(dir.join("dump.log")).map_err(|e| format!("dump.log: {e}"))?;
+    let d = q::parse_dump_log(&String::from_utf8_lossy(&b))?;
+    let r = q::dumped_reference(&d)?;
+    let zombies: Vec<_> = d.values().filter(|t| t.state == q::TASK_DEAD).map(|t| json!([t.levels.last(), t.comm])).collect();
+    let rec = json!({"procs": r, "source": "dump.log (CRIU's seized tasks)", "dumped_tasks": d.len(), "dumped_zombies": zombies,
+                     "written_epoch": drumsd_linux::now_epoch()});
+    std::fs::write(dir.join("dumped-reference.json"), serde_json::to_vec_pretty(&rec).unwrap()).map_err(|e| e.to_string())?;
+    Ok(r.len())
 }
 
 pub fn required_gates() -> Vec<Gate> {
@@ -339,7 +368,12 @@ impl Manager {
                 created_epoch: drumsd_linux::now_epoch(),
                 server_ready_s: round3(srv.ready_s),
                 task: None,
+                quiescence: None,
             };
+            // the alive gate's reference set comes from the dump itself (CRIU's log of what it seized)
+            if let Err(e) = write_dumped_reference(&sp.dir) {
+                me.event(json!({"checkpoint": c.id, "dumped_reference": format!("not written: {e}")}));
+            }
             me.put_ckpt(&c);
             me.event(json!({"checkpoint": c.id, "adopted_slot": slot, "server_pid": srv.pid, "ready_s": c.server_ready_s}));
             me.metrics.set("drumsd_template_servers", &[("state", "up")], me.ckpts.read().unwrap().len() as f64);
@@ -1030,17 +1064,28 @@ impl Manager {
             return; // a newer episode started; this one's verdict no longer matters to anyone but the metrics
         }
         let t0 = Instant::now();
-        let reference: BTreeMap<String, String> = std::fs::read(hook_dir.join("procs-pre-resume.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .and_then(|v| serde_json::from_value(v["procs"].clone()).ok())
-            .unwrap_or_default();
+        let read_procs = |p: PathBuf| -> Option<BTreeMap<String, String>> {
+            std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| serde_json::from_value(v["procs"].clone()).ok())
+        };
+        let pre = read_procs(hook_dir.join("procs-pre-resume.json")).unwrap_or_default();
+        // the reference is what the checkpoint holds (CRIU's dump), so a process that exited before the capture is
+        // not in it, and one the restore failed to bring back is missing from the restored tree
+        let ck_dir = self.ckpt(&slot.view.read().unwrap().checkpoint).ok().map(|c| slotfs::paths(&self.cfg.state_dir, c.slot).dir);
+        let dumped = ck_dir.and_then(|d| read_procs(d.join("dumped-reference.json"))).filter(|d| !d.is_empty());
+        let (reference, source) = match dumped {
+            Some(d) => (d, "dump"),
+            None => (pre.clone(), "pre_resume_census"),
+        };
         let result = if reference.is_empty() {
-            GateResult::fail(Gate::AliveAfterResume, 0.0, json!({"error": "no pre-resume process reference"}))
+            GateResult::fail(Gate::AliveAfterResume, 0.0, json!({"error": "no process reference (neither the dump's nor the pre-resume census)"}))
         } else {
             let now = pid.map(procfs::ns_procs).unwrap_or_default();
             let v = alive::judge(&reference, &now, &self.natural, ready_at.elapsed().as_secs_f64());
-            let d = serde_json::to_value(&v).unwrap();
+            let lost: Vec<(String, String)> = reference.iter().filter(|(p, c)| pre.get(*p) != Some(*c)).map(|(p, c)| (p.clone(), c.clone())).collect();
+            let mut d = serde_json::to_value(&v).unwrap();
+            d["reference_source"] = json!(source);
+            d["pre_resume_n"] = json!(pre.len());
+            d["not_restored"] = json!(lost);
             if v.ok {
                 GateResult::pass(Gate::AliveAfterResume, t0.elapsed().as_secs_f64(), d)
             } else {
@@ -1099,62 +1144,220 @@ impl Manager {
         tokio::task::spawn_blocking(move || Guest::new(port, Duration::from_secs(30)).screenshot()).await.map_err(e500)?.map_err(|e| ApiError::new(502, e.to_string()))
     }
 
+    /// The cgroup that holds the slot's running tree (its current leaf, or the slot cgroup itself).
+    fn tree_cg(&self, slot: &Slot) -> PathBuf {
+        let (num, leaf) = {
+            let v = slot.view.read().unwrap();
+            (v.num, v.leaf)
+        };
+        let marker = slotfs::marker_for(&self.cfg.state_dir, num);
+        if leaf == 0 {
+            cgroup::slot_cg(&marker)
+        } else {
+            cgroup::slot_leaf(&marker, leaf)
+        }
+    }
+
+    fn quiesce_params(&self, o: &QuiesceOpts) -> q::Params {
+        q::Params {
+            window_s: o.window_s.unwrap_or(self.cfg.quiesce.window_s).clamp(0.0, 60.0),
+            timeout_s: o.timeout_s.unwrap_or(self.cfg.quiesce.timeout_s).clamp(0.0, 600.0),
+            poll_ms: self.cfg.quiesce.poll_ms,
+        }
+    }
+
+    fn not_quiescent(&self, slot: &Slot, id: &str, report: &Value, why: &str) -> ApiError {
+        self.account(Some(slot), |l| l.failure("capture:not_quiescent"));
+        self.metrics.inc("drumsd_ops_total", &[("op", "capture"), ("outcome", "not_quiescent")], 1.0);
+        self.event(json!({"slot": id, "not_quiescent": report}));
+        let unstable = report["unstable"].clone();
+        ApiError::new(409, format!("env {id} is not quiescent, nothing was captured: {why}; unstable: {}", unstable.to_string().chars().take(600).collect::<String>()))
+            .with(json!({"code": "not_quiescent", "unstable": unstable, "quiescence": report}))
+    }
+
+    /// Wait until the slot's tree is quiescent (no task leaving, no process or thread starting or exiting for the
+    /// window). Holds the slot's operation lock, so no action runs meanwhile. 409 `not_quiescent` on a timeout.
+    pub async fn wait_quiescent(self: &Arc<Self>, id: &str, o: QuiesceOpts) -> R<Value> {
+        let slot = self.slot(id)?;
+        let _g = slot.op.lock().await;
+        slot.view.read().unwrap().state.begin(Op::Step).map_err(|e| ApiError::new(409, e.to_string()))?;
+        let p = self.quiesce_params(&o);
+        let cg = self.tree_cg(&slot);
+        let (rep, s) = tokio::task::spawn_blocking(move || quiesce::wait(&cg, &p)).await.map_err(e500)?.map_err(e500)?;
+        let rv = serde_json::to_value(&rep).unwrap();
+        self.account(Some(&slot), |l| l.op("wait_quiescent", rep.waited_s, s.is_some()));
+        if s.is_none() {
+            return Err(self.not_quiescent(&slot, id, &rv, &format!("no quiescent window of {} s within {} s", rep.window_s, rep.timeout_s)));
+        }
+        Ok(rv)
+    }
+
     /// Checkpoint the running slot with the existing capture verb (`--leave-running --no-continue`: CRIU dumps the
     /// frozen tree, its post-dump action copies the upper layer, the tree continues), then adopt the result.
-    pub async fn capture(self: &Arc<Self>, id: &str, ckpt_id: Option<String>) -> R<CheckpointRecord> {
+    /// Safe to call right after an action: the dump happens only once the tree is quiescent, the dump
+    /// must be the tree that was judged quiescent (CRIU's seized tasks and threads), and every dumped process must
+    /// still run in the source right after the dump. A dump that fails either check is discarded (its records kept)
+    /// and the capture waits and dumps again; when no good dump is possible in time it fails with `not_quiescent`
+    /// and the env stays ready. Nothing is captured silently: every attempt is in the checkpoint's `quiescence`.
+    pub async fn capture_with(self: &Arc<Self>, id: &str, ckpt_id: Option<String>, o: QuiesceOpts) -> R<CheckpointRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         let st = slot.view.read().unwrap().state.begin(Op::Capture).map_err(|e| ApiError::new(409, e.to_string()))?;
-        let into = self.alloc_num()?;
         self.put_slot(&slot, |r| r.state = st);
-        // reserve the number while the verb runs (its directory appears only inside the verb)
         let num = slot.view.read().unwrap().num;
-        let me = self.clone();
         let t0 = Instant::now();
-        let res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into)).await.map_err(e500)?;
-        match res {
-            Ok(out) => {
-                let cid = ckpt_id.unwrap_or_else(|| format!("{}-c{}", id, into));
-                // the parent's desktop right now is the checkpoint's desktop (the tree was frozen for the dump and
-                // no action ran since): its hash is the children's reference
-                let port = slot.view.read().unwrap().port;
-                let h = tokio::task::spawn_blocking(move || state_hash(&Guest::new(port, Duration::from_secs(30)))).await.map_err(e500)?.ok();
-                let c = self.adopt_checkpoint(cid, into, h, Some(id.to_string())).await.map(|mut c| {
-                    // slots made from this checkpoint inherit the task, whose setup is already in the captured state
-                    c.task = slot.view.read().unwrap().task.clone().map(|mut t| {
-                        if t.get("setup").is_some() {
-                            t["setup"] = json!([]);
-                        }
-                        t
+        let params = self.quiesce_params(&o);
+        let deadline = t0 + Duration::from_secs_f64(params.timeout_s);
+        let cg = self.tree_cg(&slot);
+        let mut attempts: Vec<Value> = vec![];
+        let max_attempts = self.cfg.quiesce.max_attempts.max(1);
+        let back_to_ready = |me: &Self| {
+            me.put_slot(&slot, |r| r.state = SlotState::finish(Op::Capture, &Outcome::Ok));
+        };
+        for n in 1..=max_attempts {
+            // 1. wait for a quiescent window
+            let mut p = params.clone();
+            p.timeout_s = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+            let cg2 = cg.clone();
+            let tq = Instant::now();
+            let waited = tokio::task::spawn_blocking(move || quiesce::wait(&cg2, &p)).await.map_err(e500)?;
+            let (rep, sample) = match waited {
+                Ok(x) => x,
+                Err(e) => {
+                    back_to_ready(self);
+                    return Err(ApiError::new(500, format!("reading the tree of {id}: {e}")));
+                }
+            };
+            let wait_s = tq.elapsed().as_secs_f64();
+            let mut att = json!({"n": n, "wait": rep, "wait_s": round3(wait_s)});
+            let Some(sample) = sample else {
+                attempts.push(att);
+                back_to_ready(self);
+                let rep = json!({"attempts": attempts, "unstable": rep.unstable, "seconds": round3(t0.elapsed().as_secs_f64())});
+                return Err(self.not_quiescent(&slot, id, &rep, &format!("no quiescent window of {} s within {} s", params.window_s, params.timeout_s)));
+            };
+            // 2. dump (the tree keeps running)
+            let into = match self.alloc_num() {
+                Ok(x) => x,
+                Err(e) => {
+                    back_to_ready(self);
+                    return Err(e);
+                }
+            };
+            let me = self.clone();
+            let td = Instant::now();
+            let res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into)).await.map_err(e500)?;
+            let out = match res {
+                Ok(out) => out,
+                Err(e) => {
+                    let secs = t0.elapsed().as_secs_f64();
+                    self.account(Some(&slot), |l| {
+                        l.op("capture", secs, false);
+                        l.failure("capture");
                     });
-                    self.put_ckpt(&c);
-                    c
+                    self.put_slot(&slot, |r| {
+                        r.state = SlotState::finish(Op::Capture, &Outcome::Failed { error: e.clone() });
+                        r.last_error = Some(e.clone());
+                    });
+                    self.metrics.inc("drumsd_ops_total", &[("op", "capture"), ("outcome", "failed")], 1.0);
+                    return Err(ApiError::new(500, e));
+                }
+            };
+            att["dump_s"] = json!(round3(td.elapsed().as_secs_f64()));
+            att["into"] = json!(into);
+            // 3. the dump must be the quiescent tree
+            let qdir = slotfs::paths(&self.cfg.state_dir, into).dir;
+            let tc = Instant::now();
+            let dumped = std::fs::read(qdir.join("dump.log")).map_err(|e| e.to_string()).and_then(|b| q::parse_dump_log(&String::from_utf8_lossy(&b)));
+            let mismatch = match &dumped {
+                Ok(d) => q::compare_dump(&sample, d),
+                Err(e) => vec![q::Unstable { kind: "dump_log_unreadable".into(), pid: 0, tid: None, comm: e.clone() }],
+            };
+            att["dump_check_s"] = json!(round3(tc.elapsed().as_secs_f64()));
+            att["dumped_processes"] = json!(dumped.as_ref().map(|d| d.len()).unwrap_or(0));
+            if !mismatch.is_empty() {
+                att["rejected"] = json!({"why": "the dump differs from the quiescent sample", "unstable": mismatch});
+                self.event(json!({"slot": id, "capture_attempt_rejected": att}));
+                self.account(Some(&slot), |l| l.retry("capture:dump_mismatch"));
+                let me = self.clone();
+                att["discarded_to"] = json!(tokio::task::spawn_blocking(move || me.discard_dump(into)).await.map_err(e500)?);
+                attempts.push(att);
+                continue;
+            }
+            let dumped = dumped.unwrap();
+            // 4. adopt (template server, the children's state-hash reference from the parent's desktop now)
+            let cid = ckpt_id.clone().unwrap_or_else(|| format!("{}-c{}", id, into));
+            let port = slot.view.read().unwrap().port;
+            let h = tokio::task::spawn_blocking(move || state_hash(&Guest::new(port, Duration::from_secs(30)))).await.map_err(e500)?.ok();
+            let c = self.adopt_checkpoint(cid.clone(), into, h, Some(id.to_string())).await;
+            // 5. every dumped process still runs in the source (no action was applied to it since the dump)
+            let cg2 = cg.clone();
+            let after = tokio::task::spawn_blocking(move || quiesce::sample(&cg2)).await.map_err(e500)?.map_err(e500)?;
+            let gone = q::source_after_dump(&sample, &dumped, &after);
+            att["source_check_after_s"] = json!(round3(td.elapsed().as_secs_f64()));
+            if !gone.is_empty() {
+                att["rejected"] = json!({"why": "a dumped process exited in the source right after the dump", "unstable": gone});
+                self.event(json!({"slot": id, "capture_attempt_rejected": att}));
+                self.account(Some(&slot), |l| l.retry("capture:exited_after_dump"));
+                if c.is_ok() {
+                    let _ = self.delete_checkpoint(&cid).await;
+                    att["discarded_to"] = json!("forgotten/ (delete_checkpoint)");
+                } else {
+                    let me = self.clone();
+                    att["discarded_to"] = json!(tokio::task::spawn_blocking(move || me.discard_dump(into)).await.map_err(e500)?);
+                }
+                attempts.push(att);
+                continue;
+            }
+            attempts.push(att);
+            let quiescence = json!({"attempts": attempts, "params": params, "seconds": round3(t0.elapsed().as_secs_f64()),
+                                    "wait_s_total": round3(attempts.iter().filter_map(|a| a["wait_s"].as_f64()).sum::<f64>())});
+            let c = c.map(|mut c| {
+                // slots made from this checkpoint inherit the task, whose setup is already in the captured state
+                c.task = slot.view.read().unwrap().task.clone().map(|mut t| {
+                    if t.get("setup").is_some() {
+                        t["setup"] = json!([]);
+                    }
+                    t
                 });
-                let ok = c.is_ok();
-                let secs = t0.elapsed().as_secs_f64();
-                self.account(Some(&slot), |l| l.op("capture", secs, ok));
-                let outcome = if ok { Outcome::Ok } else { Outcome::Failed { error: "adopt after capture failed".into() } };
-                self.put_slot(&slot, |r| {
-                    r.state = SlotState::finish(Op::Capture, &outcome);
-                    r.timings.insert("capture".into(), round3(t0.elapsed().as_secs_f64()));
-                });
-                self.event(json!({"slot": id, "captured_into": into, "verb": out}));
-                self.metrics.inc("drumsd_ops_total", &[("op", "capture"), ("outcome", if ok { "ok" } else { "failed" })], 1.0);
+                c.quiescence = Some(quiescence.clone());
+                self.put_ckpt(&c);
                 c
+            });
+            let ok = c.is_ok();
+            let secs = t0.elapsed().as_secs_f64();
+            self.account(Some(&slot), |l| l.op("capture", secs, ok));
+            let outcome = if ok { Outcome::Ok } else { Outcome::Failed { error: "adopt after capture failed".into() } };
+            self.put_slot(&slot, |r| {
+                r.state = SlotState::finish(Op::Capture, &outcome);
+                r.timings.insert("capture".into(), round3(secs));
+                r.timings.insert("capture_quiesce_wait".into(), quiescence["wait_s_total"].as_f64().unwrap_or(0.0));
+            });
+            self.event(json!({"slot": id, "captured_into": into, "verb": out, "quiescence": quiescence}));
+            self.metrics.inc("drumsd_ops_total", &[("op", "capture"), ("outcome", if ok { "ok" } else { "failed" })], 1.0);
+            return c;
+        }
+        back_to_ready(self);
+        let rep = json!({"attempts": attempts, "unstable": attempts.last().map(|a| a["rejected"]["unstable"].clone()).unwrap_or(Value::Null),
+                         "seconds": round3(t0.elapsed().as_secs_f64())});
+        Err(self.not_quiescent(&slot, id, &rep, &format!("{max_attempts} dumps rejected")))
+    }
+
+    /// A rejected dump that was never adopted: its images and disk copy are removed, its records and logs move to
+    /// state_dir/forgotten (kept). Returns where.
+    fn discard_dump(&self, into: u32) -> String {
+        let sp = slotfs::paths(&self.cfg.state_dir, into);
+        for d in ["images", "upper.snap", "upper", "work"] {
+            let p = sp.dir.join(d);
+            if p.symlink_metadata().is_ok() {
+                let _ = std::fs::remove_dir_all(&p);
             }
-            Err(e) => {
-                let secs = t0.elapsed().as_secs_f64();
-                self.account(Some(&slot), |l| {
-                    l.op("capture", secs, false);
-                    l.failure("capture");
-                });
-                self.put_slot(&slot, |r| {
-                    r.state = SlotState::finish(Op::Capture, &Outcome::Failed { error: e.clone() });
-                    r.last_error = Some(e.clone());
-                });
-                self.metrics.inc("drumsd_ops_total", &[("op", "capture"), ("outcome", "failed")], 1.0);
-                Err(ApiError::new(500, e))
-            }
+        }
+        let keep = self.cfg.state_dir.join("forgotten").join(format!("slot{into}-rejected-{}", (drumsd_linux::now_epoch() * 1000.0) as u64));
+        let _ = std::fs::create_dir_all(keep.parent().unwrap());
+        match std::fs::rename(&sp.dir, &keep) {
+            Ok(()) => keep.display().to_string(),
+            Err(e) => format!("not moved: {e}"),
         }
     }
 
@@ -1178,13 +1381,13 @@ impl Manager {
     }
 
     /// Capture the slot's current state and start `n` children from it, concurrently.
-    pub async fn branch(self: &Arc<Self>, id: &str, n: usize) -> R<Value> {
+    pub async fn branch_with(self: &Arc<Self>, id: &str, n: usize, o: QuiesceOpts) -> R<Value> {
         if n == 0 || n > 64 {
             return Err(ApiError::new(400, "n must be 1..64"));
         }
         let t0 = Instant::now();
         let parent = self.slot(id)?;
-        let c = match self.capture(id, None).await {
+        let c = match self.capture_with(id, None, o).await {
             Ok(c) => c,
             Err(e) => {
                 let secs = t0.elapsed().as_secs_f64();

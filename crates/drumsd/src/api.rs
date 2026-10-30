@@ -1,6 +1,6 @@
 //! HTTP/JSON API (spec: api/openapi.json, served at GET /openapi.json).
 
-use crate::manager::{view, ApiError, Manager};
+use crate::manager::{view, ApiError, Manager, QuiesceOpts};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
@@ -26,7 +26,15 @@ pub const OPENAPI: &str = include_str!("../../../api/openapi.json");
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let code = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (code, Json(json!({"error": self.message}))).into_response()
+        let mut body = json!({"error": self.message});
+        if let Some(Value::Object(m)) = self.detail {
+            for (k, v) in m {
+                if k != "error" {
+                    body[k] = v;
+                }
+            }
+        }
+        (code, Json(body)).into_response()
     }
 }
 
@@ -65,10 +73,20 @@ pub struct StepReq {
 #[derive(Deserialize, Default)]
 pub struct CaptureReq {
     pub id: Option<String>,
+    /// Capture readiness overrides (seconds): how long to wait for a quiescent tree, and the quiet window.
+    pub quiesce_timeout_s: Option<f64>,
+    pub quiesce_window_s: Option<f64>,
 }
 #[derive(Deserialize)]
 pub struct BranchReq {
     pub n: usize,
+    pub quiesce_timeout_s: Option<f64>,
+    pub quiesce_window_s: Option<f64>,
+}
+#[derive(Deserialize, Default)]
+pub struct QuiescentReq {
+    pub timeout_s: Option<f64>,
+    pub window_s: Option<f64>,
 }
 #[derive(Deserialize, Default)]
 pub struct QuarantineReq {
@@ -168,10 +186,16 @@ async fn screenshot(State(m): S, Path(id): Path<String>) -> Result<Response, Api
 }
 async fn capture(State(m): S, Path(id): Path<String>, body: Option<Json<CaptureReq>>) -> J {
     let r = body.map(|b| b.0).unwrap_or_default();
-    Ok(Json(json!(m.capture(&id, r.id).await?)))
+    let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
+    Ok(Json(json!(m.capture_with(&id, r.id, o).await?)))
 }
 async fn branch(State(m): S, Path(id): Path<String>, Json(r): Json<BranchReq>) -> J {
-    Ok(Json(m.branch(&id, r.n).await?))
+    let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
+    Ok(Json(m.branch_with(&id, r.n, o).await?))
+}
+async fn quiescent(State(m): S, Path(id): Path<String>, body: Option<Json<QuiescentReq>>) -> J {
+    let r = body.map(|b| b.0).unwrap_or_default();
+    Ok(Json(m.wait_quiescent(&id, QuiesceOpts { timeout_s: r.timeout_s, window_s: r.window_s }).await?))
 }
 async fn quarantine(State(m): S, Path(id): Path<String>, body: Option<Json<QuarantineReq>>) -> J {
     let reason = body.and_then(|b| b.0.reason).unwrap_or_else(|| "operator".into());
@@ -207,6 +231,7 @@ pub fn router(m: Arc<Manager>) -> Router {
         .route("/v1/slots/:id/screenshot", get(screenshot))
         .route("/v1/slots/:id/capture", post(capture))
         .route("/v1/slots/:id/branch", post(branch))
+        .route("/v1/slots/:id/quiescent", post(quiescent))
         .route("/v1/slots/:id/quarantine", post(quarantine))
         .route("/v1/slots/:id/release", post(release))
         .layer(middleware::from_fn_with_state(m.clone(), auth))
