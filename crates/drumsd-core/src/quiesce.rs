@@ -370,7 +370,8 @@ pub fn source_after_dump(before: &Sample, dumped: &BTreeMap<i32, DumpedTask>, af
         let comm = d.comm.clone().unwrap_or_default();
         let start = before.tasks.get(pid).map(|t| t.start);
         match (after.tasks.get(pid), start) {
-            (Some(t), Some(s0)) if t.start == s0 && !leaving.contains(pid) => {}
+            // a zombie (in the cgroup as Z, or a reaped-later child) has exited: that exit is in the captured state
+            (Some(t), Some(s0)) if t.start == s0 && t.state != 'Z' && !leaving.contains(pid) && !after.zombies.contains_key(pid) => {}
             _ => v.push(u("exited_after_dump", *pid, None, &comm)),
         }
     }
@@ -521,5 +522,12 @@ mod tests {
         let mut leaving = before.clone();
         leaving.tasks.get_mut(&13493).unwrap().flags |= PF_EXITING;
         assert_eq!(source_after_dump(&before, &d, &leaving), vec![u("exited_after_dump", 13493, None, "chrome")]);
+        // exited but not reaped (its parent never waits): still an exit after the dump
+        let mut zombie = before.clone();
+        zombie.tasks.get_mut(&13493).unwrap().state = 'Z';
+        assert_eq!(source_after_dump(&before, &d, &zombie), vec![u("exited_after_dump", 13493, None, "chrome")]);
+        let mut gone = after.clone();
+        gone.zombies.insert(13493, (12804, "chrome".into()));
+        assert_eq!(source_after_dump(&before, &d, &gone), vec![u("exited_after_dump", 13493, None, "chrome")]);
     }
 }
