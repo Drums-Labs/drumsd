@@ -77,9 +77,11 @@ phase apt $t
 # ------------------------------------------------------------------------------------------------ 2. kernel settings
 t=$(date +%s)
 cat > /etc/sysctl.d/60-drums-slots.conf <<'EOF'
-# Drums slots share host uids, so per-uid inotify limits are shared by every slot on the host.
-fs.inotify.max_user_instances = 8192
-fs.inotify.max_user_watches = 1048576
+# CRIU creates every restored inotify instance as uid 0, so every slot on the host shares one per-user count.
+# 8192 stopped a host at about 300 GNOME slots. An instance costs ~1 KiB, a watch ~0.1 KiB, both charged to the
+# creating task's memory cgroup (the slot's), so memory.max still bounds them (drums-info oom-inotify 20261030T0344Z).
+fs.inotify.max_user_instances = 131072
+fs.inotify.max_user_watches = 4194304
 EOF
 sysctl -q --system
 printf 'nbd\noverlay\n' > /etc/modules-load.d/drums.conf
