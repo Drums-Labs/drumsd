@@ -14,6 +14,64 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod tests {
+    use super::{page_ids, SlotsQ, DEFAULT_PAGE, MAX_PAGE};
+
+    fn ids(n: usize) -> Vec<(String, bool)> {
+        // s100..: every third one destroyed
+        let mut v: Vec<(String, bool)> = (0..n).map(|i| (format!("s{}", 100 + i), i % 3 == 0)).collect();
+        v.sort();
+        v
+    }
+    fn q(incl: Option<bool>, limit: Option<usize>, after: Option<&str>) -> SlotsQ {
+        SlotsQ { include_destroyed: incl, limit, after: after.map(|s| s.to_string()) }
+    }
+
+    #[test]
+    fn slots_default_is_live_only_unpaged() {
+        let all = ids(30);
+        let (out, next, paged) = page_ids(all.iter().map(|(i, d)| (i.as_str(), *d)), &q(None, None, None)).unwrap();
+        assert!(!paged && next.is_none());
+        assert_eq!(out.len(), 20);
+        assert!(out.iter().all(|i| !all.iter().any(|(j, d)| j == i && *d)));
+    }
+
+    #[test]
+    fn slots_pages_cover_everything_once() {
+        let all = ids(1234);
+        for incl in [false, true] {
+            let mut seen = vec![];
+            let mut after: Option<String> = None;
+            loop {
+                let (out, next, paged) = page_ids(all.iter().map(|(i, d)| (i.as_str(), *d)), &q(Some(incl), Some(100), after.as_deref())).unwrap();
+                assert!(paged && out.len() <= 100);
+                seen.extend(out);
+                match next {
+                    Some(n) => after = Some(n),
+                    None => break,
+                }
+            }
+            let want: Vec<String> = all.iter().filter(|(_, d)| incl || !d).map(|(i, _)| i.clone()).collect();
+            assert_eq!(seen, want);
+        }
+    }
+
+    #[test]
+    fn slots_include_destroyed_has_a_default_page_and_limits() {
+        let all = ids(DEFAULT_PAGE + 7);
+        let (out, next, _) = page_ids(all.iter().map(|(i, d)| (i.as_str(), *d)), &q(Some(true), None, None)).unwrap();
+        assert_eq!(out.len(), DEFAULT_PAGE);
+        assert_eq!(next.as_deref(), out.last().map(|s| s.as_str()));
+        // the last page ends with no cursor
+        let (out2, next2, _) = page_ids(all.iter().map(|(i, d)| (i.as_str(), *d)), &q(Some(true), None, next.as_deref())).unwrap();
+        assert_eq!(out2.len(), 7);
+        assert!(next2.is_none());
+        assert!(page_ids(std::iter::empty(), &q(None, Some(0), None)).is_err());
+        assert!(page_ids(std::iter::empty(), &q(None, Some(MAX_PAGE + 1), None)).is_err());
+        // a page that ends exactly at the end has no cursor
+        let (_, n3, _) = page_ids(all.iter().map(|(i, d)| (i.as_str(), *d)), &q(Some(true), Some(all.len()), None)).unwrap();
+        assert!(n3.is_none());
+    }
+
     #[test]
     fn token_compare() {
         assert!(super::token_eq(b"abc", b"abc"));
@@ -164,9 +222,54 @@ pub struct DeleteCkptQ {
 async fn delete_ckpt(State(m): S, Path(id): Path<String>, Query(q): Query<DeleteCkptQ>) -> J {
     Ok(Json(m.delete_checkpoint(&id, q.installed.unwrap_or(false)).await?))
 }
-async fn list_slots(State(m): S) -> Json<Value> {
-    let v: Vec<Value> = m.slots.read().unwrap().values().map(|s| view(&s.view.read().unwrap())).collect();
-    Json(json!(v))
+#[derive(Deserialize, Default)]
+pub struct SlotsQ {
+    /// Also list destroyed envs (their records are kept). Default: live envs only.
+    pub include_destroyed: Option<bool>,
+    /// Page size (1..=MAX_PAGE). With destroyed envs included and no limit, DEFAULT_PAGE.
+    pub limit: Option<usize>,
+    /// Cursor: list ids strictly after this one (ids in byte order; `next_after` of the previous page).
+    pub after: Option<String>,
+}
+
+pub const DEFAULT_PAGE: usize = 500;
+pub const MAX_PAGE: usize = 5000;
+
+/// Which ids a `GET /v1/slots` page holds, from (id, destroyed) in id order, and the cursor of the next page.
+/// `paged` is false for the plain call (no query): every live env, no cursor (the 0.2 SDK's shape).
+pub fn page_ids<'a>(all: impl Iterator<Item = (&'a str, bool)>, q: &SlotsQ) -> Result<(Vec<String>, Option<String>, bool), String> {
+    let paged = q.include_destroyed.is_some() || q.limit.is_some() || q.after.is_some();
+    let incl = q.include_destroyed.unwrap_or(false);
+    let limit = match q.limit {
+        Some(0) => return Err("limit must be at least 1".into()),
+        Some(n) if n > MAX_PAGE => return Err(format!("limit must be at most {MAX_PAGE}")),
+        Some(n) => Some(n),
+        None if incl => Some(DEFAULT_PAGE),
+        None => None,
+    };
+    let mut out = vec![];
+    let mut next = None;
+    for (id, destroyed) in all {
+        if q.after.as_deref().is_some_and(|a| id <= a) || (destroyed && !incl) {
+            continue;
+        }
+        if limit.is_some_and(|l| out.len() >= l) {
+            next = out.last().cloned();
+            break;
+        }
+        out.push(id.to_string());
+    }
+    Ok((out, next, paged))
+}
+
+/// Live envs by default (destroyed ones are kept as records and grew this list without bound: 22 MB at 256 envs).
+/// Any query parameter selects the paged form `{"items": [...], "next_after": id or null}`.
+async fn list_slots(State(m): S, Query(q): Query<SlotsQ>) -> J {
+    let map = m.slots.read().unwrap();
+    let flags: Vec<(&str, bool)> = map.iter().map(|(id, s)| (id.as_str(), s.view.read().unwrap().state.is_terminal())).collect();
+    let (ids, next, paged) = page_ids(flags.into_iter(), &q).map_err(|e| ApiError::new(400, e))?;
+    let items: Vec<Value> = ids.iter().filter_map(|i| map.get(i)).map(|s| view(&s.view.read().unwrap())).collect();
+    Ok(Json(if paged { json!({"items": items, "next_after": next}) } else { json!(items) }))
 }
 async fn create(State(m): S, Json(r): Json<CreateReq>) -> Result<(StatusCode, Json<Value>), ApiError> {
     let _admitted = m.admit("create", Need { envs: 1, captures: 0 })?;
