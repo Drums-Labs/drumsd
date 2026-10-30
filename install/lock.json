@@ -81,16 +81,18 @@
   "sources": {
     "drums-criu": {
       "repo": "sahiljagtap08/drums-criu",
-      "branch": "fix/zombie-hang",
-      "commit": "358380f66df2b647a1ba875728cd8a98df09ead3",
+      "branch": "fix/ip6tables",
+      "commit": "fbbd7c20ad817086bf5d5ca935297c742d0fb1aa",
       "tag": null,
-      "note": "e10195158 (runtime-c 7a2f7f138: ade3f3da8 restore-hang fix, ee9118f93 oom_score_adj of a template restore, capture-latency fix, creds-helper SIGCHLD fix; plus the parasite log pipe, no SIGXFSZ for RLIMIT_FSIZE 0 tasks) plus the nested-pidns restore hang fixes (restorer EACCES race on <init>/ns/pid, pidns_cursord cleanup deadlock). Provisional until its app gate verdict",
-      "reference_binary_sha256": "unknown (not built yet at this pin)"
+      "note": "358380f66 (drums-main, tag runtime-20261030b) plus fbbd7c20a: a dump's cleanup unlocks only the network lock it took (no stray 'Bad rule' iptables/ip6tables errors after a dump that failed before the lock). Gate: runbooks/runtime-v04",
+      "reference_binary_sha256": "2135aee1f25cc04059a5ad235249b7dbfa3dab63e1464c7041043de740592fd1",
+      "reference_binary_note": "make criu on the drums-v04 host's dev root (Ubuntu 24.04, apt not snapshot-pinned), 2026-10-30; informational: the installer prints its own build's sha256"
     },
     "drums-lab": {
       "repo": "sahiljagtap08/drums-lab",
-      "branch": "app-compat",
-      "commit": "0f6b2b608d524d0da43c3c8bca12b84d6580fc2a"
+      "branch": "fix/session-fidelity",
+      "commit": "15e29e4376b4323d1bf1e35f092b23d1ed68f5ea",
+      "note": "app-compat 0f6b2b6 plus the image's own login in the slot (pam_env/locale, keyring, environment generators, Xsession, gnome-session variables and components); the inspection gains `login` facts, so an origin made before is re-provisioned"
     },
     "osworld": {
       "repo": "https://github.com/xlang-ai/OSWorld.git",
