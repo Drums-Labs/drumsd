@@ -105,7 +105,10 @@ pub fn main(args: &[String]) -> i32 {
             Ok(g) => (Some(g), "attached".to_string()),
             Err(e) => {
                 eprintln!("drumsd procview: sysinfo program not attached, sysinfo(2) in envs reports the host: {e}");
-                (None, format!("unavailable: {e}"))
+                // a verifier refusal carries its whole log: keep the start and the reason at the end
+                let why = e.lines().find(|l| l.contains("cannot use helper") || l.contains("unknown func") || l.contains("not allowed") || l.contains("not supported") || l.contains("invalid")).unwrap_or("");
+                let short = if e.len() > 600 { format!("{} ... {why}", &e[..e.char_indices().nth(160).map(|x| x.0).unwrap_or(0)]) } else { e.clone() };
+                (None, format!("unavailable: {short}"))
             }
         }
     };
