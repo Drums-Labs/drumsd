@@ -1278,11 +1278,9 @@ impl Manager {
             .uid(o.uid).gid(o.gid);
         unsafe {
             // its own process group, so a timeout kills the helper and anything it started
+            // (std drops supplementary groups itself when a uid is set; this runs after the uid change)
             cmd.pre_exec(|| {
                 libc::setpgid(0, 0);
-                if libc::setgroups(0, std::ptr::null()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
                 Ok(())
             });
         }
