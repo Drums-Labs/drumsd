@@ -13,7 +13,13 @@ final-comparison harness (iarun/osw.py). Differences from DesktopEnv.reset(): no
 and setup runs once (no retry loop): a failed setup is reported as a failure, never retried silently.
 
 Downloads (setup `download` steps and `cloud_file` expected files) are staged into the shared cache first, under a
-per-task lock with atomic renames, so concurrent slots of one task never read a half-written file.
+per-task lock with atomic renames, so concurrent slots of one task never read a half-written file. Staged files are
+made read-only.
+
+Each run then works in its own private cache directory (`<cache>/.runs/<task8>-XXXX`, removed at the end) holding
+hard links to the staged files only. OSWorld's getters write what they fetch from the desktop (`vm_file`, ...) into
+the task's cache directory under a fixed name; with one directory shared by every slot of a task, two slots
+verifying at once overwrote each other's file, and a slot could be scored on another slot's desktop.
 """
 from __future__ import annotations
 
@@ -22,7 +28,9 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 import urllib.request
@@ -64,6 +72,7 @@ def stage(task: dict, cache_dir: str) -> list:
                                 if not b:
                                     break
                                 f.write(b)
+                        os.chmod(dst + ".part", 0o444)      # shared by every run: never written again
                         os.rename(dst + ".part", dst)
                         err = None
                         break
@@ -75,6 +84,22 @@ def stage(task: dict, cache_dir: str) -> list:
             h = hashlib.sha256(open(dst, "rb").read()).hexdigest()
             out.append({"name": name, "url": url, "bytes": os.path.getsize(dst), "sha256": h})
     return out
+
+
+def private_cache(cache_dir: str, task_id: str, staged: list) -> str:
+    """A fresh directory for one run of one slot: hard links to the task's staged files and nothing else (no file
+    another run fetched from its desktop). Getters write their fetched files here, so concurrent runs never share one."""
+    runs = os.path.join(cache_dir, ".runs")
+    os.makedirs(runs, exist_ok=True)
+    d = tempfile.mkdtemp(prefix=f"{task_id[:8]}-", dir=runs)
+    tdir = os.path.join(cache_dir, task_id)
+    for it in staged:
+        src, dst = os.path.join(tdir, it["name"]), os.path.join(d, it["name"])
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+    return d
 
 
 class OswEnv:
@@ -129,6 +154,15 @@ def main(argv) -> dict:
     env = OswEnv(req["osworld_dir"], req["host"], req["server_port"], req.get("chromium_port"), req.get("vlc_port"),
                  req["cache_dir"], req.get("client_password", "password"))
     env.load(task)
+    env.cache_dir = private_cache(req["cache_dir"], task["id"], staged)
+    env.setup_controller.reset_cache_dir(env.cache_dir)
+    try:
+        return run_verb(verb, env, task, staged, t0)
+    finally:
+        shutil.rmtree(env.cache_dir, ignore_errors=True)
+
+
+def run_verb(verb, env, task, staged, t0) -> dict:
     if verb == "setup":
         ok = env.setup_controller.setup(env.config, False)
         r = {"ok": bool(ok), "seconds": round(time.monotonic() - t0, 3), "n_steps": len(env.config), "staged": len(staged)}
