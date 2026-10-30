@@ -18,6 +18,7 @@
 //! | `state_hash` | the desktop state hash (Desktop listing + file hashes + home listing) equals the checkpoint's | after ready |
 //! | `isolation` | pid/mnt/net/ipc/uts namespaces distinct from the host and every other live slot; no foreign process in the cgroup | after ready |
 //! | `alive_after_resume` | every process restored (seen at pre-resume) is still there >= 5 s after the slot answered, natural exits excluded | ready + 5 s |
+//! | `no_oom_kill` | added as **failed** when the OOM killer took a task of the slot during the episode (its cgroup's memory.events oom_kill grew since ready); never added as passed, so it is not in [`Gate::ALL`] | each step and the episode's end |
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,7 @@ pub enum Gate {
     StateHash,
     Isolation,
     AliveAfterResume,
+    NoOomKill,
 }
 
 impl Gate {
@@ -61,6 +63,7 @@ impl Gate {
             Gate::StateHash => "state_hash",
             Gate::Isolation => "isolation",
             Gate::AliveAfterResume => "alive_after_resume",
+            Gate::NoOomKill => "no_oom_kill",
         }
     }
 }
@@ -190,6 +193,18 @@ mod tests {
         r.push(GateResult::pass(Gate::AliveAfterResume, 5.0, json!({})));
         assert_eq!(r.gates.len(), 1);
         assert_eq!(r.gates[0].status, GateStatus::Pass);
+    }
+
+    #[test]
+    fn an_oom_kill_in_the_episode_invalidates_a_fully_passed_report() {
+        let mut r = GateReport::default();
+        for g in Gate::ALL {
+            r.push(GateResult::pass(g, 0.01, json!({})));
+        }
+        assert_eq!(r.validity(&Gate::ALL), Validity::Valid);
+        r.push(GateResult::fail(Gate::NoOomKill, 0.0, json!({"oom_kills": 1})));
+        assert_eq!(r.validity(&Gate::ALL), Validity::Invalid { gates: vec![Gate::NoOomKill] });
+        assert_eq!(serde_json::to_value(Gate::NoOomKill).unwrap(), json!("no_oom_kill"));
     }
 
     #[test]
