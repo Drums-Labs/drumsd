@@ -40,10 +40,31 @@ fn main() {
     }
 }
 
+/// Raise the soft open-files limit to the hard one. Each env holds listeners, guest connections, pidfds and journal
+/// writes; at 64 envs drumsd ran past the default soft limit of 1024 and failed restores, gates, checker spawns and
+/// journal writes with EMFILE. Returns (soft, hard) after the change.
+pub fn raise_nofile() -> (u64, u64) {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) == 0 && r.rlim_cur < r.rlim_max {
+            let want = libc::rlimit { rlim_cur: r.rlim_max, rlim_max: r.rlim_max };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+                r = want;
+            }
+        }
+    }
+    (r.rlim_cur as u64, r.rlim_max as u64)
+}
+
 async fn serve(cfg: config::Config) {
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("drumsd: must run as root (cgroups, mount namespaces, CRIU)");
         std::process::exit(2);
+    }
+    let (soft, hard) = raise_nofile();
+    tracing::info!("open files limit {soft} (hard {hard})");
+    if soft < 65536 {
+        tracing::warn!("open files limit {soft} is low for many envs; set LimitNOFILE in the service unit");
     }
     let listen = cfg.listen.clone();
     let m: Arc<manager::Manager> = match manager::Manager::new(cfg) {
@@ -67,4 +88,18 @@ async fn serve(cfg: config::Config) {
     let l = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     tracing::info!("drumsd listening on {listen}");
     axum::serve(l, api::router(m)).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn nofile_soft_limit_is_raised_to_the_hard_limit() {
+        let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) };
+        let low = libc::rlimit { rlim_cur: r.rlim_cur.min(256), rlim_max: r.rlim_max };
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &low) };
+        let (soft, hard) = super::raise_nofile();
+        assert_eq!(soft, hard);
+        assert_eq!(hard, r.rlim_max as u64);
+    }
 }

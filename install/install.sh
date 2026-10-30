@@ -225,6 +225,8 @@ Restart=always
 RestartSec=1
 # slots, template servers and restores live in their own cgroups; a restart of drumsd must never kill them
 KillMode=process
+# each env holds listeners, guest connections and pidfds: the default soft limit (1024) ran out at 64 envs
+LimitNOFILE=1048576
 Environment=RUST_LOG=info
 [Install]
 WantedBy=multi-user.target
@@ -245,6 +247,7 @@ Environment=HOME=$D/osw-cache PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OSWOR
 ExecStart=$O/osw-venv/bin/python -I $O/osw/drums_osw.py serve --osworld-dir $O/src/OSWorld --sock /run/drums-osw/osw.sock
 Restart=always
 RestartSec=1
+LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
