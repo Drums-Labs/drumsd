@@ -1498,18 +1498,7 @@ impl Manager {
                 let _ = std::fs::remove_dir(cgroup::slot_leaf(&marker, l));
             }
             let _ = std::fs::remove_dir(cgroup::slot_cg(&marker));
-            let sp = slotfs::paths(&me.cfg.state_dir, num);
-            for d in ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root"] {
-                let p = sp.dir.join(d);
-                if p.symlink_metadata().is_ok() {
-                    std::fs::remove_dir_all(&p)?;
-                }
-            }
-            // records and logs are kept; the directory moves aside so the number can be reused
-            let keep = me.cfg.state_dir.join("forgotten").join(format!("slot{num}-{}", (drumsd_linux::now_epoch() * 1000.0) as u64));
-            std::fs::create_dir_all(keep.parent().unwrap())?;
-            std::fs::rename(&sp.dir, &keep)?;
-            Ok::<_, std::io::Error>(keep)
+            retire_slot_dir(&me.cfg.state_dir, num, (drumsd_linux::now_epoch() * 1000.0) as u64)
         })
         .await
         .map_err(e500)?;
@@ -1889,6 +1878,27 @@ impl Manager {
     }
 }
 
+/// The filesystem half of a destroy: remove the slot's disk state, keep its records and logs under forgotten/ (the
+/// directory moves aside so the number can be reused). Idempotent: a destroy interrupted by a daemon kill after the
+/// move left no directory, and the retry used to fail with ENOENT, leaving an env that could never be closed (and
+/// its saved state never deleted).
+pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64) -> std::io::Result<PathBuf> {
+    let sp = slotfs::paths(state_dir, num);
+    let keep = state_dir.join("forgotten").join(format!("slot{num}-{now_ms}"));
+    if sp.dir.symlink_metadata().is_err() {
+        return Ok(state_dir.join("forgotten").join(format!("slot{num}-*(moved by an earlier, interrupted destroy)")));
+    }
+    for d in ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root"] {
+        let p = sp.dir.join(d);
+        if p.symlink_metadata().is_ok() {
+            std::fs::remove_dir_all(&p)?;
+        }
+    }
+    std::fs::create_dir_all(keep.parent().unwrap())?;
+    std::fs::rename(&sp.dir, &keep)?;
+    Ok(keep)
+}
+
 /// The first number at or after `from` (wrapping around `range`) not held, not reserved and with nothing on disk.
 /// Searching from just after the last number handed out spreads reuse over the whole range, so a freed number (its
 /// ports, its cgroup) is taken again only after every other free number was.
@@ -2046,6 +2056,19 @@ mod tests {
         assert_eq!(pick_num((100, 110), 105, &none, &none, |_| false), Some(105));
         assert_eq!(pick_num((100, 110), 110, &none, &none, |_| false), Some(100));
         assert_eq!(pick_num((100, 110), 108, &none, &none, |n| n >= 108), Some(100));
+    }
+
+    #[test]
+    fn destroy_retried_after_an_interrupted_one_succeeds() {
+        // L32b: drumsd SIGKILLed 1 s into a destroy; after the restart every DELETE of that env failed with ENOENT
+        let d = std::env::temp_dir().join(format!("drumsd-retire-{}", std::process::id()));
+        let sp = slotfs::paths(&d, 887);
+        std::fs::create_dir_all(sp.dir.join("upper")).unwrap();
+        std::fs::write(sp.dir.join("slot.json"), "{}").unwrap();
+        let k = retire_slot_dir(&d, 887, 1).unwrap();
+        assert!(k.join("slot.json").exists() && !k.join("upper").exists() && !sp.dir.exists());
+        assert!(retire_slot_dir(&d, 887, 2).is_ok(), "the retry must not fail");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
