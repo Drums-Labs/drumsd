@@ -14,8 +14,108 @@ pub const POOL_UNIT: &str = "drumsbench-pool.scope";
 pub fn pool() -> PathBuf {
     Path::new(CG_ROOT).join("system.slice").join(POOL_UNIT)
 }
+/// Where template servers ran before fix/template-oom (one unprotected cgroup in the pool, oom_score_adj 0): kept for
+/// reading old hosts only. New servers run in [`server_cg`].
 pub fn template_cg() -> PathBuf {
     pool().join("template")
+}
+
+/// Template servers live outside the slots' pool, in a delegated scope of their own top-level slice, one cgroup per
+/// server, so their memory protection holds from the root down (drums-lab tmplsrv.py uses the same layout).
+pub const TEMPLATE_SLICE: &str = "drums.slice";
+pub const TEMPLATE_UNIT: &str = "drums-template.scope";
+/// The server is the last thing the OOM killer should take: one server serves every restore of its checkpoint.
+pub const TEMPLATE_OOM_SCORE_ADJ: i32 = -900;
+/// Every slot's restore (and so every restored task whose image holds 0) runs at this value: slot processes are the
+/// preferred OOM victims. Restored tasks can raise it (Chrome's renderers do), not lower it.
+pub const SLOT_OOM_SCORE_ADJ: i32 = 300;
+const HEADROOM: u64 = 64 << 20;
+
+pub fn template_root() -> PathBuf {
+    Path::new(CG_ROOT).join(TEMPLATE_SLICE).join(TEMPLATE_UNIT)
+}
+
+/// One cgroup per server, named after its socket path (unique per state dir).
+pub fn server_cg(sock: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let base = sock.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let base = base.strip_suffix(".sock").unwrap_or(&base).to_string();
+    let h = hex::encode(Sha256::digest(sock.as_os_str().as_encoded_bytes()));
+    template_root().join(format!("{base}-{}", &h[..10]))
+}
+
+/// The delegated template scope with a keeper (same as tmplsrv.init_root); idempotent.
+pub fn template_init() -> io::Result<()> {
+    let r = template_root();
+    if !r.is_dir() {
+        let st = Command::new("systemd-run")
+            .args(["--scope", "--quiet", "--unit", TEMPLATE_UNIT, "--slice", TEMPLATE_SLICE, "-p", "Delegate=yes", "--", "setsid", "-f", "sleep", "infinity"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !st.success() {
+            return Err(io::Error::other("systemd-run for the template scope failed"));
+        }
+        let t0 = Instant::now();
+        while !r.is_dir() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let keeper = r.join("keeper");
+    fs::create_dir_all(&keeper)?;
+    for pid in read(&r.join("cgroup.procs"))?.split_whitespace() {
+        write(&keeper.join("cgroup.procs"), pid)?;
+    }
+    let sc = read(&r.join("cgroup.subtree_control"))?;
+    if !(sc.contains("memory") && sc.contains("pids")) {
+        write(&r.join("cgroup.subtree_control"), "+memory +pids")?;
+    }
+    Ok(())
+}
+
+fn mem_total() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| m.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()))
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+/// Protect a just-built server: memory.min = its memory now + headroom, memory.low = + 2 x headroom.
+pub fn protect_server(cg: &Path) -> io::Result<u64> {
+    let cur: u64 = read(&cg.join("memory.current"))?.parse().map_err(io::Error::other)?;
+    write(&cg.join("memory.min"), &(cur + HEADROOM).to_string())?;
+    write(&cg.join("memory.low"), &(cur + 2 * HEADROOM).to_string())?;
+    Ok(cur)
+}
+
+/// Grant the sum of the servers' protection on the scope and the slice (capped at half the host's memory), so it is
+/// effective: cgroup v2 protection only holds as far as every ancestor grants it.
+pub fn protect_all() -> io::Result<serde_json::Value> {
+    let r = template_root();
+    let (mut tmin, mut tlow) = (0u64, 0u64);
+    for e in fs::read_dir(&r)?.flatten() {
+        if !e.path().is_dir() || e.file_name() == "keeper" {
+            continue;
+        }
+        tmin += read(&e.path().join("memory.min")).ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        tlow += read(&e.path().join("memory.low")).ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    }
+    let cap = mem_total() / 2;
+    let (pmin, plow) = (tmin.min(cap), tlow.min(cap));
+    for unit in [TEMPLATE_SLICE, TEMPLATE_UNIT] {
+        let o = Command::new("systemctl").args(["set-property", "--runtime", unit, &format!("MemoryMin={pmin}"), &format!("MemoryLow={plow}")]).output()?;
+        if !o.status.success() {
+            return Err(io::Error::other(format!("systemctl set-property {unit}: {}", String::from_utf8_lossy(&o.stderr).trim())));
+        }
+    }
+    Ok(serde_json::json!({"servers_min": tmin, "servers_low": tlow, "cap": cap, "capped": tlow > cap}))
+}
+
+/// The cgroup's oom_kill counter (hierarchical memory.events: global and cgroup OOM kills of its tasks).
+pub fn oom_kills(d: &Path) -> Option<u64> {
+    read(&d.join("memory.events")).ok()?.lines().find_map(|l| l.strip_prefix("oom_kill ").and_then(|v| v.trim().parse().ok()))
 }
 pub fn slot_cg(marker: &str) -> PathBuf {
     pool().join(format!("drumsbench-{marker}-pool.scope"))
@@ -210,5 +310,15 @@ mod tests {
             Limits { cpu_max: "400000 100000".into(), memory_max: "4294967296".into(), swap_max: "0".into() }
         );
         assert!(slot_cg("rootfs-0734af49-2").ends_with("drumsbench-pool.scope/drumsbench-rootfs-0734af49-2-pool.scope"));
+    }
+
+    #[test]
+    fn one_server_cgroup_per_socket_outside_the_pool() {
+        let a = server_cg(Path::new("/s1/ps-0.sock"));
+        let b = server_cg(Path::new("/s2/ps-0.sock"));
+        assert_ne!(a, b);
+        assert!(a.starts_with("/sys/fs/cgroup/drums.slice/drums-template.scope"));
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with("ps-0-"));
+        assert!(!a.starts_with(pool()));
     }
 }
