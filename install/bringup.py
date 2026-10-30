@@ -93,7 +93,8 @@ def main():
             print(f"bringup: checkpoint {a.image_id} already adopted", flush=True)
             return 0
         if c is not None:
-            # made by other runtime sources or another image inspection (an upgrade whose login facts changed): the
+            # made by other runtime sources or another image inspection (an upgrade whose login facts changed), or its
+            # state is gone (`state_lost`: the host was restarted, the state tmpfs and the image mount with it): the
             # origin is provisioned again from the image; refused by drumsd while an env made from it still exists
             t0 = time.monotonic()
             print(f"bringup: checkpoint {a.image_id} is stale ({c.get('stale_reason')}): re-provisioning the origin", flush=True)

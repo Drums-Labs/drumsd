@@ -139,10 +139,20 @@ IMG_PID=$!; BG=$IMG_PID
 
 # ------------------------------------------------------------------------------------------------ 5. CRIU build
 t=$(date +%s)
-make -C "$O/src/drums-criu" -j"$(nproc)" criu > "$D/criu-build.log" 2>&1 || { tail -30 "$D/criu-build.log"; die "criu build"; }
-install -D -m 0755 "$O/src/drums-criu/criu/criu" "$O/criu/bin/criu"
-"$O/criu/bin/criu" check > "$D/criu-check.log" 2>&1 || { cat "$D/criu-check.log"; die "criu check"; }
+# CRIU builds are not byte-reproducible: a binary built from the pinned commit is kept. Reused when criu.commit (written at
+# build time next to the binary) equals the pinned commit, the binary exists and still has the sha256 recorded with it.
+CRIU_PIN=$(lk sources.drums-criu.commit); CB="$O/criu/bin"
+if [ -x "$CB/criu" ] && [ "$(cat "$CB/criu.commit" 2>/dev/null)" = "$CRIU_PIN" ] && [ "$(sha256sum "$CB/criu" | cut -d' ' -f1)" = "$(cat "$CB/criu.sha256" 2>/dev/null)" ]; then
+  CRIU_REUSED=1
+else
+  CRIU_REUSED=0
+  make -C "$O/src/drums-criu" -j"$(nproc)" criu > "$D/criu-build.log" 2>&1 || { tail -30 "$D/criu-build.log"; die "criu build"; }
+  install -D -m 0755 "$O/src/drums-criu/criu/criu" "$CB/criu"
+  sha256sum "$CB/criu" | cut -d' ' -f1 > "$CB/criu.sha256"; echo "$CRIU_PIN" > "$CB/criu.commit"
+fi
+"$CB/criu" check > "$D/criu-check.log" 2>&1 || { cat "$D/criu-check.log"; die "criu check"; }
 CRIU_SHA=$(sha256sum "$O/criu/bin/criu" | cut -d' ' -f1)
+[ "$CRIU_REUSED" = 1 ] && say "criu REUSED: already built from drums-criu $CRIU_PIN, not rebuilt"
 say "criu $("$O/criu/bin/criu" --version | head -1 | tr '\n' ' ') sha256 $CRIU_SHA (reference build $(lk sources.drums-criu.reference_binary_sha256 | cut -c1-12)...)"
 phase criu $t
 
@@ -181,11 +191,8 @@ phase image_download_verify $t_img
 t=$(date +%s)
 LAB="$O/src/drums-lab/benchmark"
 export PYTHONPATH="$LAB" PYTHONDONTWRITEBYTECODE=1
-mkdir -p /mnt/osworld
-if ! findmnt /mnt/osworld >/dev/null; then
-  python3 -m sharedos_rootfs.image attach --image "$IMG/Ubuntu.qcow2" --expected-sha256 "$(lk files.osworld_image_qcow2.sha256)" \
-    --mountpoint /mnt/osworld --state "$D/image-mount.json" > "$D/image-attach.log" 2>&1 || { cat "$D/image-attach.log"; die "image attach"; }
-fi
+. "$REL/install/boot.sh"      # drums_attach_image: also cleans a mount record and nbd attachment left by a reboot
+drums_attach_image "$IMG/Ubuntu.qcow2" "$(lk files.osworld_image_qcow2.sha256)" /mnt/osworld "$D/image-mount.json" "$LAB"
 rm -f "$E/inspection.new.json"
 python3 -m sharedos_rootfs.rootfs_inspect /mnt/osworld --out "$E/inspection.new.json" --mount-state "$D/image-mount.json" > "$D/inspect.log" 2>&1 || { tail -20 "$D/inspect.log"; die "rootfs inspection"; }
 mv "$E/inspection.new.json" "$E/inspection.json"
@@ -197,9 +204,7 @@ phase image_attach $t
 # ------------------------------------------------------------------------------------------------ 9. state, configs, token, service
 t=$(date +%s)
 [ -n "$TMPFS_GIB" ] || TMPFS_GIB=$(( MEM_GIB / 2 ))
-mkdir -p "$D/state" "$D/journal"
-findmnt "$D/state" >/dev/null || mount -t tmpfs -o size=${TMPFS_GIB}G,mode=0700 tmpfs "$D/state"
-chmod 0700 "$D/state"
+drums_mount_state "$TMPFS_GIB"
 if [ -z "$PRICE" ]; then
   ITYPE=$(TOK=$(curl -sf -m 2 -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token) && curl -sf -m 2 -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/instance-type || true)
   PRICE=$(python3 -c "import json; print(json.load(open('$LOCK'))['prices_usd_per_hour'].get('$ITYPE', 0))")
@@ -290,7 +295,42 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+# After a reboot the state tmpfs and the image mount are gone (the journal and the qcow2 are on disk): these two units put them
+# back before drumsd starts and provision the origin again, so the host serves without anyone running this installer.
+cat > "$E/boot.env" <<EOF
+TMPFS_GIB=$TMPFS_GIB
+IMAGE_SHA256=$IMGSHA
+IMAGE_ID=$(lk runtime.image_id)
+EOF
+install -m 0755 "$REL/install/boot.sh" "$O/boot.sh"
+cat > /etc/systemd/system/drums-boot.service <<EOF
+[Unit]
+Description=Drums boot: state tmpfs, nbd/overlay modules, read-only image mount (before drumsd)
+After=network-online.target local-fs.target drums-procview.service
+Wants=network-online.target
+Before=drumsd.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$O/boot.sh prepare
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/drums-origin.service <<EOF
+[Unit]
+Description=Drums boot: re-provision the clean checkpoint when a restart removed its state
+Requires=drums-boot.service
+After=drums-boot.service drums-procview.service drums-osw.service network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$O/boot.sh origin
+TimeoutStartSec=1800
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
+systemctl enable -q drums-boot.service drums-origin.service
 systemctl enable -q drums-osw.service
 systemctl restart drums-osw.service
 if [ "$PROCVIEW" = 1 ]; then
