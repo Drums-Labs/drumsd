@@ -79,8 +79,9 @@
   },
   "rust_toolchain": "1.96.1",
   "sources": {
-    "drums-criu": {"repo": "sahiljagtap08/drums-criu", "branch": "app-compat", "commit": "72dd49a549199a4dc6d4517b998ce0b2d438bcc7",
-                   "reference_binary_sha256": "10d6d91c7af6d25e5487bf258d29f4fd5b03e864624e88c6cb1a48e98dd48328"},
+    "drums-criu": {"repo": "sahiljagtap08/drums-criu", "branch": "drums-main", "commit": "ade3f3da89cea8377c5f4d97ae3edce19e382c34",
+                   "tag": "runtime-20261030a", "note": "app-compat 72dd49a5 plus the restore-hang fix (4 commits); builds are not bit-reproducible, so the pin is the source commit",
+                   "reference_binary_sha256": "unknown (not built yet at this pin)"},
     "drums-lab": {"repo": "sahiljagtap08/drums-lab", "branch": "app-compat", "commit": "0f6b2b608d524d0da43c3c8bca12b84d6580fc2a"},
     "osworld": {"repo": "https://github.com/xlang-ai/OSWorld.git", "commit": "044bc33901cb893808e3f91ebc9a17ed8e54b44c",
                 "python_lock": "osw-requirements.lock", "extra_index": "https://download.pytorch.org/whl/cpu"}
