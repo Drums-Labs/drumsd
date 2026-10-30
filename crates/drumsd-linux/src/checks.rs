@@ -164,6 +164,17 @@ pub fn netns_gate(pid: i32, slot_dir: &Path) -> GateResult {
     }
 }
 
+/// The processes of the slot cgroup outside its pid namespace that still count, and whether to look again.
+/// A pid that has left /proc exited between the cgroup listing and the namespace check: it is in no namespace now
+/// and is dropped (before, it was reported as foreign with comm None, failing a good reset under load). A process
+/// still there whose comm cannot be read is exiting (or unreadable), like the template server's forked `criu` that
+/// reports and exits: look again for up to 200 ms; if it is still there, it fails the gate.
+pub fn foreign_now(foreign: Vec<(i32, Option<String>)>, exists: impl Fn(i32) -> bool) -> (Vec<(i32, Option<String>)>, bool) {
+    let still: Vec<(i32, Option<String>)> = foreign.into_iter().filter(|(p, _)| exists(*p)).collect();
+    let wait = !still.is_empty() && still.iter().all(|(_, c)| c.is_none() || c.as_deref() == Some("criu"));
+    (still, wait)
+}
+
 pub const NS_KINDS: [&str; 5] = ["pid", "mnt", "net", "ipc", "uts"];
 
 /// Namespaces distinct from the host and from every other live slot's init; no process of another slot or of the
@@ -194,8 +205,8 @@ pub fn isolation_gate(pid: i32, others: &[i32], slot_cg: &Path) -> GateResult {
         };
         let foreign: Vec<(i32, Option<String>)> =
             ps.into_iter().filter(|p| !pidns.as_deref().map(|ns| procfs::pidns_within(*p, ns)).unwrap_or(false)).map(|p| (p, procfs::comm(p))).collect();
-        let only_exiting_criu = !foreign.is_empty() && foreign.iter().all(|(_, c)| c.as_deref() == Some("criu"));
-        if only_exiting_criu && tries < 40 {
+        let (foreign, wait) = foreign_now(foreign, |p| std::path::Path::new(&format!("/proc/{p}")).exists());
+        if wait && tries < 40 {
             tries += 1;
             std::thread::sleep(std::time::Duration::from_millis(5));
             continue;
@@ -210,5 +221,30 @@ pub fn isolation_gate(pid: i32, others: &[i32], slot_cg: &Path) -> GateResult {
         GateResult::pass(Gate::Isolation, secs(t0), d)
     } else {
         GateResult::fail(Gate::Isolation, secs(t0), d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_that_exited_mid_check_is_not_foreign() {
+        // L32a: "process 731070 (None) in the slot cgroup is outside the slot's pid namespace" on a good reset; the
+        // pid had exited between the cgroup listing and the namespace read
+        let (f, wait) = foreign_now(vec![(731070, None)], |_| false);
+        assert!(f.is_empty() && !wait);
+    }
+
+    #[test]
+    fn a_live_foreign_process_still_fails_and_an_exiting_one_is_looked_at_again() {
+        let (f, wait) = foreign_now(vec![(10, Some("bash".into())), (11, None)], |_| true);
+        assert_eq!(f.len(), 2);
+        assert!(!wait, "a named foreign process fails at once");
+        let (f, wait) = foreign_now(vec![(11, None), (12, Some("criu".into()))], |_| true);
+        assert_eq!(f.len(), 2);
+        assert!(wait, "unreadable or criu: look again (bounded by the caller), then fail");
+        let (f, _) = foreign_now(vec![(10, Some("bash".into())), (11, None)], |p| p == 10);
+        assert_eq!(f, vec![(10, Some("bash".to_string()))]);
     }
 }
