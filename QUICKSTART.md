@@ -10,7 +10,7 @@ Host: a fresh Ubuntu 24.04 x86_64 machine, 16 vCPU / 32 GiB / 120 GiB disk teste
 
 ```
 tar xzf drums-release-<commit>.tar.gz
-sudo ./drums-release-<commit>/install.sh            # about 15 minutes; add --remote to listen on all interfaces
+sudo ./drums-release-<commit>/install.sh            # about 6-7 minutes on c8i.4xlarge; add --remote to listen on all interfaces
 ```
 
 It prints the URL and the API token. The token is also in `/etc/drums/token` (root only). The API listens on
@@ -39,7 +39,7 @@ with c.create(image="osworld-ubuntu", task="035f41ba") as env:   # OSWorld task 
         r = k.verify()                                     # raises InvalidEpisode if a gate failed
         print(k.id, r.score, r.valid)
         k.close()
-    state = env.save()                                     # later: c.create(from_state=state)
+    state = env.save()                                     # later: c.create(from_state=state); c.delete_state(state) frees it
     print(c.metrics()["cost"])                             # USD per valid episode / per verified reward
 ```
 
