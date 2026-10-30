@@ -15,6 +15,7 @@ use drumsd_core::metrics::{Registry, LATENCY_BUCKETS};
 use drumsd_core::recovery::{self, Action, Attempt, CostRecord, FailureClass, Policy};
 use drumsd_core::state::{Op, Outcome, SlotState};
 use drumsd_core::statehash;
+use drumsd_core::usage::{self, Ledger, Usage};
 use drumsd_linux::{cgroup, checks, guest::Guest, hook, procfs, proxy, restore, slotfs, template};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -68,6 +69,18 @@ pub struct SlotRecord {
     pub ready_epoch: Option<f64>,
     pub created_epoch: f64,
     pub updated_epoch: f64,
+    /// OSWorld task setup runs after every restore of this slot (a slot made from a clean image with a task). False for
+    /// fork children and from_state slots: their checkpoint already holds the task's start state.
+    #[serde(default)]
+    pub task_setup_on_restore: bool,
+    /// This slot's own ledger (op latency, episodes, failures/retries by cause, rewards).
+    #[serde(default)]
+    pub usage: Ledger,
+    /// The last verify result of the current episode.
+    #[serde(default)]
+    pub verified: Option<Value>,
+    #[serde(default)]
+    pub closed_epoch: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +96,9 @@ pub struct CheckpointRecord {
     pub captured_from: Option<String>,
     pub created_epoch: f64,
     pub server_ready_s: f64,
+    /// The task of the slot this checkpoint was captured from (its setup already ran): slots made from it inherit it.
+    #[serde(default)]
+    pub task: Option<Value>,
 }
 
 pub struct Slot {
@@ -106,6 +122,10 @@ pub struct Manager {
     limits: cgroup::Limits,
     natural: BTreeSet<String>,
     policy: Policy,
+    pub usage: StdMutex<Usage>,
+    pub token: String,
+    pub started_epoch: f64,
+    pub criu_sha256: String,
 }
 
 pub fn required_gates() -> Vec<Gate> {
@@ -158,7 +178,18 @@ impl Manager {
         let limits = cgroup::expected_limits(cfg.vcpus, cfg.memory_mib);
         let natural = cfg.natural_exits.iter().cloned().collect();
         let policy = Policy { max_attempts: cfg.max_attempts };
+        let token = cfg.load_token()?;
+        cfg.check_listen()?;
+        let mut u: Usage = journal.get("meta", "usage").map_err(|e| format!("usage ledger: {e}"))?.unwrap_or_default();
+        if u.window_start_epoch == 0.0 {
+            u.window_start_epoch = drumsd_linux::now_epoch();
+        }
+        let criu_sha256 = std::fs::read(&cfg.criu).map(|b| hex_sha256(&b)).unwrap_or_else(|e| format!("unreadable: {e}"));
         let m = Manager {
+            usage: StdMutex::new(u),
+            token,
+            started_epoch: drumsd_linux::now_epoch(),
+            criu_sha256,
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
             exe,
@@ -219,6 +250,24 @@ impl Manager {
             tracing::error!("journal put checkpoint {}: {e}", c.id);
         }
         self.ckpts.write().unwrap().insert(c.id.clone(), c.clone());
+    }
+
+    /// Apply `f` to the daemon ledger and (if given) the slot's ledger; both are journaled.
+    fn account(&self, slot: Option<&Slot>, f: impl Fn(&mut Ledger)) {
+        {
+            let mut u = self.usage.lock().unwrap();
+            f(&mut u.ledger);
+            if let Err(e) = self.journal.put("meta", "usage", &*u) {
+                tracing::error!("journal put usage: {e}");
+            }
+        }
+        if let Some(s) = slot {
+            let mut v = s.view.write().unwrap();
+            f(&mut v.usage);
+            if let Err(e) = self.journal.put("slots", &v.id, &*v) {
+                tracing::error!("journal put {}: {e}", v.id);
+            }
+        }
     }
 
     pub fn slot(&self, id: &str) -> R<Arc<Slot>> {
@@ -289,6 +338,7 @@ impl Manager {
                 captured_from,
                 created_epoch: drumsd_linux::now_epoch(),
                 server_ready_s: round3(srv.ready_s),
+                task: None,
             };
             me.put_ckpt(&c);
             me.event(json!({"checkpoint": c.id, "adopted_slot": slot, "server_pid": srv.pid, "ready_s": c.server_ready_s}));
@@ -341,8 +391,25 @@ impl Manager {
         Ok((targets, handles))
     }
 
-    pub async fn create(self: &Arc<Self>, checkpoint: String, task: Option<Value>) -> R<SlotRecord> {
+    /// `setup`: run the task's OSWorld setup after every restore. Default: yes for a task given here, no for a task
+    /// inherited from the checkpoint (it was captured after the setup ran).
+    pub async fn create_with(self: &Arc<Self>, checkpoint: String, task: Option<Value>, setup: Option<bool>) -> R<SlotRecord> {
         let c = self.ckpt(&checkpoint)?;
+        if let Some(t) = &task {
+            if (t.get("config").is_some() || t.get("evaluator").is_some()) && osworld_task_id(t).is_none() {
+                return Err(ApiError::new(400, "task: not an OSWorld task (needs an id of [A-Za-z0-9_-], a config list and an evaluator object)"));
+            }
+            if osworld_task_id(t).is_some() && self.cfg.osw.is_none() {
+                return Err(ApiError::new(400, "task: this drumsd has no OSWorld helper configured (osw)"));
+            }
+        }
+        let (task, setup_on_restore) = match task {
+            Some(t) => {
+                let osw = osworld_task_id(&t).is_some();
+                (Some(t), osw && setup.unwrap_or(true))
+            }
+            None => (c.task.clone(), false),
+        };
         let num = self.alloc_num()?;
         let id = format!("s{num}");
         let (targets, handles) = self.bind_proxies(num).await?;
@@ -369,6 +436,10 @@ impl Manager {
             ready_epoch: None,
             created_epoch: now,
             updated_epoch: now,
+            task_setup_on_restore: setup_on_restore,
+            usage: Ledger::default(),
+            verified: None,
+            closed_epoch: None,
         };
         let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec), targets, proxies: StdMutex::new(handles) });
         self.slots.write().unwrap().insert(id.clone(), slot.clone());
@@ -431,6 +502,12 @@ impl Manager {
             Validity::Invalid { .. } => "invalid",
         };
         self.metrics.inc("drumsd_episodes_total", &[("validity", name)], 1.0);
+        let pending = matches!(v.validity, Validity::Pending { .. });
+        drop(v);
+        // valid/invalid episodes are counted when the verdict resolves; one ended before that is counted here
+        if pending {
+            self.account(Some(slot), |l| l.episode("ended_pending"));
+        }
     }
 
     /// Restore (with the recovery policy) into the slot, which is already in its transient state.
@@ -473,6 +550,12 @@ impl Manager {
                         action: Some(action.clone()),
                     });
                     self.event(json!({"slot": slot.id, "attempt": attempt, "failure": f.class, "error": f.error.chars().take(400).collect::<String>(), "action": action}));
+                    let cause = usage::cause_of(&f.class, f.gates.first_failure().map(|g| g.gate.as_str()));
+                    if action == Action::GiveUp {
+                        self.account(Some(slot), |l| l.failure(&cause));
+                    } else {
+                        self.account(Some(slot), |l| l.retry(&cause));
+                    }
                     match action {
                         Action::Retry => continue,
                         Action::RetryPrivate => {
@@ -490,9 +573,53 @@ impl Manager {
                 }
             }
         };
-        let total = t0.elapsed().as_secs_f64();
         let rec = match outcome {
             Ok(ok) => {
+                // OSWorld task setup: after the restore permit is released, before the slot is handed out
+                let (task, on_restore, num) = {
+                    let v = slot.view.read().unwrap();
+                    (v.task.clone(), v.task_setup_on_restore, v.num)
+                };
+                let mut setup_s = None;
+                if let (Some(t), true) = (task, on_restore) {
+                    if osworld_task_id(&t).is_some() {
+                        let ts = Instant::now();
+                        let me = self.clone();
+                        let r = tokio::task::spawn_blocking(move || me.osw("setup", num, &t, None)).await.map_err(e500)?;
+                        let secs = ts.elapsed().as_secs_f64();
+                        setup_s = Some(round3(secs));
+                        self.account(Some(slot), |l| l.op("task_setup", secs, r.is_ok()));
+                        if let Err(e) = r {
+                            let marker = slotfs::marker_for(&self.cfg.state_dir, num);
+                            for tg in &slot.targets {
+                                tg.clear();
+                            }
+                            let _ = tokio::task::spawn_blocking(move || kill_slot(&marker)).await;
+                            self.account(Some(slot), |l| {
+                                l.failure("task_setup");
+                                l.episode("invalid");
+                                l.op(op.as_str(), t0.elapsed().as_secs_f64(), false);
+                            });
+                            self.metrics.inc("drumsd_ops_total", &[("op", op.as_str()), ("outcome", "task_setup_failed")], 1.0);
+                            let err = format!("task setup failed: {e}");
+                            let mut timings = ok.timings.clone();
+                            timings.insert("task_setup".into(), round3(secs));
+                            timings.insert("total".into(), round3(t0.elapsed().as_secs_f64()));
+                            return Ok(self.put_slot(slot, |r| {
+                                r.state = SlotState::Down { reason: err.chars().take(300).collect() };
+                                r.episode += 1;
+                                r.gates = ok.gates.clone();
+                                r.validity = Validity::Invalid { gates: vec![] };
+                                r.cost = cost.clone();
+                                r.timings = timings.clone();
+                                r.last_error = Some(err.clone());
+                                r.init_pid = None;
+                                r.verified = None;
+                            }));
+                        }
+                    }
+                }
+                let total = t0.elapsed().as_secs_f64();
                 if cost.recovered() {
                     self.metrics.inc("drumsd_recoveries_total", &[], 1.0);
                 }
@@ -509,8 +636,13 @@ impl Manager {
                 }
                 let validity = ok.gates.validity(&required_gates());
                 let mut timings = ok.timings.clone();
+                if let Some(x) = setup_s {
+                    timings.insert("task_setup".into(), x);
+                }
                 timings.insert("total".into(), round3(total));
+                self.account(Some(slot), |l| l.op(op.as_str(), total, true));
                 let r = self.put_slot(slot, |r| {
+                    r.verified = None;
                     r.state = SlotState::finish(op, &Outcome::Ok);
                     r.episode += 1;
                     r.init_pid = Some(ok.pid);
@@ -529,6 +661,11 @@ impl Manager {
                 r
             }
             Err(f) => {
+                let total = t0.elapsed().as_secs_f64();
+                self.account(Some(slot), |l| {
+                    l.op(op.as_str(), total, false);
+                    l.episode("invalid");
+                });
                 let outcome = if f.class == FailureClass::GateFailed {
                     let ff = f.gates.first_failure();
                     let g = ff.map(|g| g.gate.as_str()).unwrap_or("?");
@@ -557,6 +694,7 @@ impl Manager {
                     r.timings = timings;
                     r.last_error = Some(f.error.clone());
                     r.init_pid = None;
+                    r.verified = None;
                 })
             }
         };
@@ -651,6 +789,7 @@ impl Manager {
             criu_bin: self.cfg.criu.clone(),
             out: sp.dir.join(format!("restore-drumsd-{gen}-{stamp}.out")),
             empty_net: self.cfg.netns_fast,
+            nested_pidns: self.cfg.nested_pidns,
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
 
@@ -862,7 +1001,7 @@ impl Manager {
         };
         let failed = result.status == GateStatus::Fail;
         self.metrics.inc("drumsd_gate_results_total", &[("gate", "alive_after_resume"), ("status", status_str(&result.status))], 1.0);
-        self.put_slot(slot, |r| {
+        let rec = self.put_slot(slot, |r| {
             if r.episode != episode {
                 return;
             }
@@ -872,6 +1011,15 @@ impl Manager {
                 r.state = SlotState::Quarantined { reason: format!("gate alive_after_resume failed: {}", result.detail["counted"]) };
             }
         });
+        if rec.episode == episode && !matches!(rec.validity, Validity::Pending { .. }) {
+            let v = verdict_str(&rec.validity);
+            self.account(Some(slot), |l| {
+                l.episode(v);
+                if failed {
+                    l.failure("gate:alive_after_resume");
+                }
+            });
+        }
     }
 
     pub async fn step(self: &Arc<Self>, id: &str, action: Value, screenshot: bool) -> R<Value> {
@@ -888,8 +1036,10 @@ impl Manager {
             Ok::<_, std::io::Error>((r, png))
         })
         .await
-        .map_err(e500)?
-        .map_err(|e| ApiError::new(502, e.to_string()))?;
+        .map_err(e500)?;
+        let secs = t0.elapsed().as_secs_f64();
+        self.account(Some(&slot), |l| l.op("step", secs, out.is_ok()));
+        let out = out.map_err(|e| ApiError::new(502, e.to_string()))?;
         let cur = slot.view.read().unwrap().clone();
         Ok(json!({"result": out.0, "screenshot_png_b64": out.1.map(|p| b64(&p)), "episode": cur.episode, "validity": cur.validity,
                   "seconds": round3(t0.elapsed().as_secs_f64())}))
@@ -907,8 +1057,8 @@ impl Manager {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         let st = slot.view.read().unwrap().state.begin(Op::Capture).map_err(|e| ApiError::new(409, e.to_string()))?;
-        self.put_slot(&slot, |r| r.state = st);
         let into = self.alloc_num()?;
+        self.put_slot(&slot, |r| r.state = st);
         // reserve the number while the verb runs (its directory appears only inside the verb)
         let num = slot.view.read().unwrap().num;
         let me = self.clone();
@@ -921,8 +1071,20 @@ impl Manager {
                 // no action ran since): its hash is the children's reference
                 let port = slot.view.read().unwrap().port;
                 let h = tokio::task::spawn_blocking(move || state_hash(&Guest::new(port, Duration::from_secs(30)))).await.map_err(e500)?.ok();
-                let c = self.adopt_checkpoint(cid, into, h, Some(id.to_string())).await;
+                let c = self.adopt_checkpoint(cid, into, h, Some(id.to_string())).await.map(|mut c| {
+                    // slots made from this checkpoint inherit the task, whose setup is already in the captured state
+                    c.task = slot.view.read().unwrap().task.clone().map(|mut t| {
+                        if t.get("setup").is_some() {
+                            t["setup"] = json!([]);
+                        }
+                        t
+                    });
+                    self.put_ckpt(&c);
+                    c
+                });
                 let ok = c.is_ok();
+                let secs = t0.elapsed().as_secs_f64();
+                self.account(Some(&slot), |l| l.op("capture", secs, ok));
                 let outcome = if ok { Outcome::Ok } else { Outcome::Failed { error: "adopt after capture failed".into() } };
                 self.put_slot(&slot, |r| {
                     r.state = SlotState::finish(Op::Capture, &outcome);
@@ -933,6 +1095,11 @@ impl Manager {
                 c
             }
             Err(e) => {
+                let secs = t0.elapsed().as_secs_f64();
+                self.account(Some(&slot), |l| {
+                    l.op("capture", secs, false);
+                    l.failure("capture");
+                });
                 self.put_slot(&slot, |r| {
                     r.state = SlotState::finish(Op::Capture, &Outcome::Failed { error: e.clone() });
                     r.last_error = Some(e.clone());
@@ -968,15 +1135,22 @@ impl Manager {
             return Err(ApiError::new(400, "n must be 1..64"));
         }
         let t0 = Instant::now();
-        let c = self.capture(id, None).await?;
+        let parent = self.slot(id)?;
+        let c = match self.capture(id, None).await {
+            Ok(c) => c,
+            Err(e) => {
+                let secs = t0.elapsed().as_secs_f64();
+                self.account(Some(&parent), |l| l.op("fork", secs, false));
+                return Err(e);
+            }
+        };
         let t_cap = t0.elapsed().as_secs_f64();
-        let task = self.slot(id)?.view.read().unwrap().task.clone();
         let futs: Vec<_> = (0..n)
             .map(|_| {
                 let me = self.clone();
                 let cid = c.id.clone();
-                let task = task.clone();
-                tokio::spawn(async move { me.create(cid, task.map(|mut t| { t["setup"] = json!([]); t })).await })
+                // children inherit the checkpoint's task (setup already in the state)
+                tokio::spawn(async move { me.create_with(cid, None, Some(false)).await })
             })
             .collect();
         let mut children = vec![];
@@ -986,7 +1160,10 @@ impl Manager {
                 Err(e) => children.push(json!({"error": e.message})),
             }
         }
-        Ok(json!({"checkpoint": c, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(t0.elapsed().as_secs_f64() - t_cap)}))
+        let secs = t0.elapsed().as_secs_f64();
+        let all_up = children.iter().all(|c| c["state"] == "ready");
+        self.account(Some(&parent), |l| l.op("fork", secs, all_up));
+        Ok(json!({"checkpoint": c, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(secs - t_cap), "seconds": round3(secs)}))
     }
 
     pub async fn quarantine(self: &Arc<Self>, id: &str, reason: String) -> R<SlotRecord> {
@@ -1059,14 +1236,298 @@ impl Manager {
             Err(e) => Outcome::Failed { error: e.to_string() },
         };
         self.metrics.inc("drumsd_ops_total", &[("op", "destroy"), ("outcome", if res.is_ok() { "ok" } else { "failed" })], 1.0);
+        {
+            let now = drumsd_linux::now_epoch();
+            let created = slot.view.read().unwrap().created_epoch;
+            let mut u = self.usage.lock().unwrap();
+            u.closed_slot_seconds += (now - created.max(u.window_start_epoch)).max(0.0);
+            let _ = self.journal.put("meta", "usage", &*u);
+        }
         Ok(self.put_slot(&slot, |r| {
             r.state = SlotState::finish(Op::Destroy, &outcome);
             r.init_pid = None;
+            r.closed_epoch = Some(drumsd_linux::now_epoch());
             if let Ok(k) = &res {
                 r.timings.insert("destroyed_records_at_epoch".into(), drumsd_linux::now_epoch());
                 r.last_error = Some(format!("records kept at {}", k.display()));
             }
         }))
+    }
+
+    // ------------------------------------------------------------------------------------------------ OSWorld tasks
+    /// Ports of slot `num` as OSWorld sees them: guest server, Chrome DevTools (guest 9222), VLC (guest 8080).
+    fn osw_ports(&self, num: u32) -> (u16, Option<u16>, Option<u16>) {
+        let find = |g: u16| self.cfg.extra_ports.iter().find(|(_, gp)| *gp == g).map(|(b, _)| b + num as u16);
+        (self.cfg.port_base + num as u16, find(9222), find(8080))
+    }
+
+    /// Run the OSWorld helper (`drums_osw.py VERB`) as the unprivileged user, request on stdin, JSON reply on the last
+    /// stdout line. Blocking.
+    pub fn osw(&self, verb: &str, num: u32, task: &Value, extra: Option<Value>) -> Result<Value, String> {
+        use std::io::Write as _;
+        use std::os::unix::process::CommandExt;
+        let o = self.cfg.osw.as_ref().ok_or("no OSWorld helper configured (osw)")?;
+        let (server, chromium, vlc) = self.osw_ports(num);
+        let req = json!({"task": task, "host": "127.0.0.1", "server_port": server, "chromium_port": chromium, "vlc_port": vlc,
+                         "cache_dir": o.cache_dir, "osworld_dir": o.osworld_dir, "client_password": o.client_password, "extra": extra});
+        let timeout = Duration::from_secs(if verb == "evaluate" { o.eval_timeout_s } else { o.setup_timeout_s });
+        let mut cmd = std::process::Command::new(&o.python);
+        cmd.arg("-I").arg(&o.helper).arg(verb).current_dir(&o.osworld_dir).env_clear()
+            .env("PATH", "/usr/bin:/bin").env("HOME", &o.cache_dir).env("PYTHONDONTWRITEBYTECODE", "1").env("OSWORLD_DIR", &o.osworld_dir)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .uid(o.uid).gid(o.gid);
+        unsafe {
+            // its own process group, so a timeout kills the helper and anything it started
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                if libc::setgroups(0, std::ptr::null()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("osw helper: {e}"))?;
+        child.stdin.take().unwrap().write_all(&serde_json::to_vec(&req).unwrap()).map_err(|e| e.to_string())?;
+        let pid = child.id() as i32;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+        let out = match rx.recv_timeout(timeout) {
+            Ok(r) => r.map_err(|e| e.to_string())?,
+            Err(_) => {
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                return Err(format!("osw {verb} timed out after {}s", timeout.as_secs()));
+            }
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reply: Option<Value> = stdout.lines().rev().find(|l| l.starts_with('{')).and_then(|l| serde_json::from_str(l).ok());
+        match reply {
+            Some(v) if v["ok"] == true => Ok(v),
+            Some(v) => Err(v["error"].as_str().unwrap_or("helper reported failure").chars().take(1500).collect()),
+            None => Err(format!("osw {verb} exit {:?}, no reply; stderr: {}", out.status.code(), stderr.chars().rev().take(1200).collect::<String>().chars().rev().collect::<String>())),
+        }
+    }
+
+    /// Load an OSWorld task into a ready slot: its setup runs now, and again after every reset of this slot.
+    pub async fn load_task(self: &Arc<Self>, id: &str, task: Value) -> R<SlotRecord> {
+        if osworld_task_id(&task).is_none() {
+            return Err(ApiError::new(400, "task: not an OSWorld task (needs an id of [A-Za-z0-9_-], a config list and an evaluator object)"));
+        }
+        let slot = self.slot(id)?;
+        let _g = slot.op.lock().await;
+        slot.view.read().unwrap().state.begin(Op::Step).map_err(|e| ApiError::new(409, e.to_string()))?;
+        let num = slot.view.read().unwrap().num;
+        let me = self.clone();
+        let t = task.clone();
+        let ts = Instant::now();
+        let r = tokio::task::spawn_blocking(move || me.osw("setup", num, &t, None)).await.map_err(e500)?;
+        let secs = ts.elapsed().as_secs_f64();
+        self.account(Some(&slot), |l| {
+            l.op("task_setup", secs, r.is_ok());
+            if r.is_err() {
+                l.failure("task_setup");
+            }
+        });
+        match r {
+            Ok(_) => Ok(self.put_slot(&slot, |r| {
+                r.task = Some(task.clone());
+                r.task_setup_on_restore = true;
+                r.verified = None;
+                r.timings.insert("task_setup".into(), round3(secs));
+            })),
+            Err(e) => {
+                // the desktop is in an unknown part-set-up state: the episode is not the task's start state
+                let r = self.put_slot(&slot, |r| {
+                    r.state = SlotState::Quarantined { reason: format!("task setup failed: {}", e.chars().take(300).collect::<String>()) };
+                    r.last_error = Some(e.clone());
+                });
+                Err(ApiError::new(422, format!("task setup failed on {}: {e}; slot quarantined ({})", r.id, r.state.name())))
+            }
+        }
+    }
+
+    /// Run the task's checker on the slot's current state. The reward always carries the episode's gate verdict; a
+    /// reward from an episode that is not valid is returned with `valid: false`, never as a plain score.
+    pub async fn verify(self: &Arc<Self>, id: &str) -> R<Value> {
+        let slot = self.slot(id)?;
+        let _g = slot.op.lock().await;
+        let t0 = Instant::now();
+        let (task, state, pid) = {
+            let v = slot.view.read().unwrap();
+            (v.task.clone(), v.state.clone(), v.init_pid)
+        };
+        let task = task.ok_or_else(|| ApiError::new(400, format!("slot {id} has no task: create it with a task, or POST /v1/slots/{id}/task")))?;
+        let tid = osworld_task_id(&task).ok_or_else(|| ApiError::new(400, "slot's task is not an OSWorld task (no evaluator)"))?;
+        if !matches!(state, SlotState::Ready | SlotState::Quarantined { .. }) || pid.is_none() {
+            return Err(ApiError::new(409, format!("slot {id} is {}: nothing running to verify", state.name())));
+        }
+        // the alive gate resolves alive_after_s after the slot answered: wait for it, the reward needs the verdict
+        let deadline = Instant::now() + Duration::from_secs_f64(self.cfg.alive_after_s + 30.0);
+        while matches!(slot.view.read().unwrap().validity, Validity::Pending { .. }) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let num = slot.view.read().unwrap().num;
+        let me = self.clone();
+        let t = task.clone();
+        let r = tokio::task::spawn_blocking(move || me.osw("evaluate", num, &t, None)).await.map_err(e500)?;
+        let v = slot.view.read().unwrap().clone();
+        let valid = v.validity == Validity::Valid && matches!(v.state, SlotState::Ready);
+        let (score, err, detail) = match &r {
+            Ok(x) => (x["score"].as_f64(), x["checker_error"].as_str().map(|s| s.to_string()), x.clone()),
+            Err(e) => (None, Some(e.clone()), Value::Null),
+        };
+        let secs = t0.elapsed().as_secs_f64();
+        self.account(Some(&slot), |l| {
+            l.op("verify", secs, score.is_some());
+            l.verified(score, valid);
+            if score.is_none() {
+                l.failure("checker_error");
+            }
+        });
+        let out = json!({
+            "slot": v.id, "episode": v.episode, "task_id": tid, "score": score, "valid": valid,
+            "validity": v.validity, "state": v.state.name(), "gates": v.gates, "checker_error": err,
+            "checker": {"func": task["evaluator"]["func"], "osworld_commit": detail["osworld_commit"], "seconds": detail["seconds"],
+                        "postconfig_ran": detail["postconfig_ran"]},
+            "seconds": round3(secs),
+        });
+        self.event(json!({"slot": v.id, "verify": {"episode": v.episode, "task": tid, "score": score, "valid": valid, "error": err}}));
+        self.metrics.inc("drumsd_verify_total", &[("valid", if valid { "true" } else { "false" }), ("scored", if score.is_some() { "true" } else { "false" })], 1.0);
+        self.put_slot(&slot, |r| r.verified = Some(out.clone()));
+        Ok(out)
+    }
+
+    /// The OSWorld tasks in the pinned checkout: id, domain, instruction.
+    pub fn tasks(&self, domain: Option<&str>) -> R<Vec<Value>> {
+        let o = self.cfg.osw.as_ref().ok_or_else(|| ApiError::new(404, "no OSWorld checkout configured"))?;
+        let ex = o.osworld_dir.join("evaluation_examples").join("examples");
+        let mut out = vec![];
+        for d in std::fs::read_dir(&ex).map_err(e500)? {
+            let d = d.map_err(e500)?.path();
+            let dom = d.file_name().unwrap().to_string_lossy().to_string();
+            if domain.map(|x| x != dom).unwrap_or(false) || !d.is_dir() {
+                continue;
+            }
+            for f in std::fs::read_dir(&d).map_err(e500)? {
+                let f = f.map_err(e500)?.path();
+                if f.extension().map(|x| x == "json").unwrap_or(false) {
+                    if let Ok(t) = serde_json::from_slice::<Value>(&std::fs::read(&f).unwrap_or_default()) {
+                        out.push(json!({"id": t["id"], "domain": dom, "instruction": t["instruction"]}));
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        Ok(out)
+    }
+
+    /// One task by id or unique id prefix (>= 8 characters).
+    pub fn task(&self, id: &str) -> R<Value> {
+        if id.len() < 8 || !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Err(ApiError::new(400, "task id: at least 8 characters of the OSWorld id"));
+        }
+        let o = self.cfg.osw.as_ref().ok_or_else(|| ApiError::new(404, "no OSWorld checkout configured"))?;
+        let ex = o.osworld_dir.join("evaluation_examples").join("examples");
+        let mut hits = vec![];
+        for d in std::fs::read_dir(&ex).map_err(e500)? {
+            let d = d.map_err(e500)?.path();
+            for f in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let n = f.file_name().to_string_lossy().to_string();
+                if n.starts_with(id) && n.ends_with(".json") {
+                    hits.push((d.file_name().unwrap().to_string_lossy().to_string(), f.path()));
+                }
+            }
+        }
+        match hits.as_slice() {
+            [(dom, p)] => {
+                let raw = std::fs::read(p).map_err(e500)?;
+                let mut t: Value = serde_json::from_slice(&raw).map_err(e500)?;
+                t["_domain"] = json!(dom);
+                t["_sha256"] = json!(hex_sha256(&raw));
+                Ok(t)
+            }
+            [] => Err(ApiError::new(404, format!("no OSWorld task {id}"))),
+            _ => Err(ApiError::new(400, format!("task id {id} is ambiguous ({} matches)", hits.len()))),
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------ metrics
+    fn slot_seconds_now(&self, window_start: f64) -> f64 {
+        let now = drumsd_linux::now_epoch();
+        self.slots.read().unwrap().values().map(|s| {
+            let v = s.view.read().unwrap();
+            if v.closed_epoch.is_some() || v.state.is_terminal() { 0.0 } else { (now - v.created_epoch.max(window_start)).max(0.0) }
+        }).sum()
+    }
+
+    /// Aggregate metrics for the current window (see drumsd_core::usage for every definition).
+    pub fn metrics_summary(&self) -> Value {
+        let u = self.usage.lock().unwrap().clone();
+        let now = drumsd_linux::now_epoch();
+        let wall = now - u.window_start_epoch;
+        let slot_s = u.closed_slot_seconds + self.slot_seconds_now(u.window_start_epoch);
+        let c = usage::cost(self.cfg.host_usd_per_hour, wall, slot_s, &u.ledger);
+        let mut states: BTreeMap<&'static str, u64> = BTreeMap::new();
+        for s in self.slots.read().unwrap().values() {
+            *states.entry(s.view.read().unwrap().state.name()).or_default() += 1;
+        }
+        json!({"window": {"start_epoch": u.window_start_epoch, "now_epoch": now, "wall_s": round3(wall)},
+               "slots_by_state": states, "cost": c, "usage": u.ledger.summary(),
+               "definitions": "seconds = wall time inside drumsd per op, failed attempts included; episodes counted once when the verdict resolves; cost = host_usd_per_hour x wall hours of the window, divided by valid episodes / verified rewards from valid episodes; price is the operator's configured number"})
+    }
+
+    pub fn slot_metrics(&self, id: &str) -> R<Value> {
+        let s = self.slot(id)?;
+        let v = s.view.read().unwrap().clone();
+        let u = self.usage.lock().unwrap().clone();
+        let now = drumsd_linux::now_epoch();
+        let end = v.closed_epoch.unwrap_or(now);
+        let life = (end - v.created_epoch).max(0.0);
+        let in_window = (end - v.created_epoch.max(u.window_start_epoch)).max(0.0);
+        let all = u.closed_slot_seconds + self.slot_seconds_now(u.window_start_epoch);
+        let host_usd = self.cfg.host_usd_per_hour * (now - u.window_start_epoch) / 3600.0;
+        Ok(json!({"slot": v.id, "episode": v.episode, "state": v.state.name(), "validity": v.validity, "lifetime_s": round3(life),
+                  "last_op_timings": v.timings, "last_cost": {"attempts": v.cost.attempts, "wasted_s": round3(v.cost.wasted_seconds())},
+                  "usage": v.usage.summary(),
+                  "cost": {"host_usd_per_hour": self.cfg.host_usd_per_hour, "slot_seconds_in_window": round3(in_window),
+                           "usd_share_by_slot_seconds": usage::share(host_usd, in_window, all),
+                           "usd_if_alone_on_host": round3(self.cfg.host_usd_per_hour * life / 3600.0 * 1000.0) / 1000.0}}))
+    }
+
+    /// Start a new metrics window (the old ledger goes to the event log).
+    pub fn reset_metrics(&self) -> Value {
+        let mut u = self.usage.lock().unwrap();
+        let old = u.clone();
+        *u = Usage { window_start_epoch: drumsd_linux::now_epoch(), ..Default::default() };
+        let _ = self.journal.put("meta", "usage", &*u);
+        drop(u);
+        self.event(json!({"metrics_window_closed": old}));
+        json!({"closed": old.ledger.summary(), "new_window_start_epoch": self.usage.lock().unwrap().window_start_epoch})
+    }
+
+    pub fn health(&self) -> Value {
+        let ck: Vec<Value> = self.ckpts.read().unwrap().values().map(|c| {
+            let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
+            json!({"id": c.id, "template_server": template::adopt(&c.socket, &sp.images), "task": c.task.as_ref().map(|t| t["id"].clone())})
+        }).collect();
+        let mut states: BTreeMap<&'static str, u64> = BTreeMap::new();
+        for s in self.slots.read().unwrap().values() {
+            *states.entry(s.view.read().unwrap().state.name()).or_default() += 1;
+        }
+        let free = |p: &Path| -> Option<u64> {
+            let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()?;
+            let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+            (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
+        };
+        let ok = ck.iter().all(|c| !c["template_server"].is_null());
+        json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"), "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
+               "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
+               "image_sha256": self.cfg.image_sha256, "checkpoints": ck, "slots_by_state": states,
+               "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
+               "state_dir_free_bytes": free(&self.cfg.state_dir), "host_usd_per_hour": self.cfg.host_usd_per_hour,
+               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores}})
     }
 
     // ------------------------------------------------------------------------------------------------ restart
@@ -1153,6 +1614,31 @@ pub fn kill_slot(marker: &str) -> std::io::Result<()> {
     cgroup::kill_and_wait(&cgroup::slot_cg(marker), Duration::from_secs(20)).map(|_| ())
 }
 
+pub fn hex_sha256(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(b))
+}
+
+/// An OSWorld task: an `id` usable as a directory name, a `config` list and an `evaluator` object.
+pub fn osworld_task_id(t: &Value) -> Option<String> {
+    let id = t["id"].as_str()?;
+    if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return None;
+    }
+    if !t["evaluator"].is_object() || !(t["config"].is_array() || t["config"].is_null()) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+fn verdict_str(v: &Validity) -> &'static str {
+    match v {
+        Validity::Valid => "valid",
+        Validity::Pending { .. } => "pending",
+        Validity::Invalid { .. } => "invalid",
+    }
+}
+
 pub fn status_str(s: &GateStatus) -> &'static str {
     match s {
         GateStatus::Pass => "pass",
@@ -1174,13 +1660,21 @@ pub fn state_hash(g: &Guest) -> Result<String, String> {
     Ok(statehash::state_hash(&o))
 }
 
-/// Actions: {"type": "execute", "command": [..] | "..", "shell": bool} or {"type": "pyautogui", "code": "..."}.
+/// Actions: {"type": "execute", "command": [..] | "..", "shell": bool}, {"type": "pyautogui", "code": "..."},
+/// {"type": "launch", "command": .., "shell": bool} (detached, OSWorld /setup/launch), {"type": "sleep", "seconds": s}.
 pub fn run_action(g: &Guest, a: &Value) -> std::io::Result<Value> {
     match a["type"].as_str().unwrap_or("execute") {
         "execute" => g.execute(a["command"].clone(), a["shell"].as_bool().unwrap_or(false)),
         "pyautogui" => {
             let code = a["code"].as_str().unwrap_or("");
             g.execute(json!(["python3", "-c", format!("import pyautogui; pyautogui.FAILSAFE = False; {code}")]), false)
+        }
+        "launch" => {
+            let r = g.request("POST", "/setup/launch", Some(&json!({"command": a["command"], "shell": a["shell"].as_bool().unwrap_or(false)})))?;
+            if r.status != 200 {
+                return Err(std::io::Error::other(format!("/setup/launch HTTP {}: {}", r.status, String::from_utf8_lossy(&r.body).chars().take(300).collect::<String>())));
+            }
+            Ok(json!({"status": "success"}))
         }
         "sleep" => {
             std::thread::sleep(Duration::from_secs_f64(a["seconds"].as_f64().unwrap_or(0.0).min(60.0)));
