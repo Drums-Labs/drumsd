@@ -284,7 +284,7 @@ install -m 0755 "$REL/install/boot.sh" "$O/boot.sh"
 cat > /etc/systemd/system/drums-boot.service <<EOF
 [Unit]
 Description=Drums boot: state tmpfs, nbd/overlay modules, read-only image mount (before drumsd)
-After=network-online.target local-fs.target drums-procview.service
+After=network-online.target local-fs.target
 Wants=network-online.target
 Before=drumsd.service
 [Service]
@@ -298,7 +298,7 @@ cat > /etc/systemd/system/drums-origin.service <<EOF
 [Unit]
 Description=Drums boot: re-provision the clean checkpoint when a restart removed its state
 Requires=drums-boot.service
-After=drums-boot.service drums-procview.service drums-osw.service network-online.target
+After=drums-boot.service drums-osw.service network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
