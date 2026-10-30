@@ -654,7 +654,7 @@ impl Manager {
         let lost = state_lost(&c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower)).is_some();
         let users: Vec<String> = self.slots.read().unwrap().values().filter_map(|s| {
             let v = s.view.read().unwrap();
-            (v.checkpoint == id && !v.state.is_terminal() && !(lost && matches!(v.state, SlotState::Down { .. }))).then(|| v.id.clone())
+            (v.checkpoint == id && blocks_checkpoint_delete(&v.state, lost)).then(|| v.id.clone())
         }).collect();
         if !users.is_empty() {
             return Err(ApiError::new(409, format!("checkpoint {id} is used by envs {users:?}: close them first")));
@@ -2685,6 +2685,13 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
     }
 }
 
+/// Whether an env in `state` keeps its checkpoint from being deleted. Once the checkpoint's state is lost (a host
+/// restart), an env that is down or quarantined holds nothing of it: no tree runs (drums-scale, 2026-10-30: 115 down
+/// and quarantined envs from before a reboot blocked the boot unit's re-provisioning with 409 "used by envs").
+pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
+    !state.is_terminal() && !(lost && matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
+}
+
 /// The filesystem half of a destroy: remove the slot's disk state, keep its records and logs under forgotten/ (the
 /// directory moves aside so the number can be reused). Idempotent: a destroy interrupted by a daemon kill after the
 /// move left no directory, and the retry used to fail with ENOENT, leaving an env that could never be closed (and
@@ -2888,6 +2895,20 @@ pub fn b64(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_lost_checkpoint_is_not_held_by_down_or_quarantined_envs() {
+        let down = SlotState::Down { reason: "state_lost".into() };
+        let quar = SlotState::Quarantined { reason: "gate".into() };
+        assert!(!blocks_checkpoint_delete(&down, true));
+        assert!(!blocks_checkpoint_delete(&quar, true));
+        assert!(blocks_checkpoint_delete(&SlotState::Ready, true));
+        assert!(blocks_checkpoint_delete(&SlotState::Creating, true));
+        // not lost: every live env holds it, as before
+        assert!(blocks_checkpoint_delete(&down, false));
+        assert!(blocks_checkpoint_delete(&quar, false));
+        assert!(!blocks_checkpoint_delete(&SlotState::Destroyed, false));
+    }
     use super::*;
 
     fn qrec(state: SlotState) -> SlotRecord {
