@@ -90,8 +90,8 @@
     },
     "drums-lab": {
       "repo": "sahiljagtap08/drums-lab",
-      "branch": "fix/session-fidelity",
-      "commit": "15e29e4376b4323d1bf1e35f092b23d1ed68f5ea",
+      "branch": "runtime-v0.5",
+      "commit": "a75d1d72c053ede472b78eabb4c441374a1abc11",
       "note": "app-compat 0f6b2b6 plus the image's own login in the slot (pam_env/locale, keyring, environment generators, Xsession, gnome-session variables and components); the inspection gains `login` facts, so an origin made before is re-provisioned"
     },
     "osworld": {

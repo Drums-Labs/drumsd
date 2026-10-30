@@ -2,7 +2,7 @@
 # Drums one-command install: a fresh Ubuntu 24.04 x86_64 host -> a running drumsd with the drums-criu build, the OSWorld
 # image as a clean checkpoint, OSWorld's checkers, and an API token.
 #
-#   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N]
+#   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N]
 #
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
@@ -13,13 +13,14 @@ set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$REL/install/lock.json"
-REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""
+REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=1; shift;;
     --port) PORT="${2:?}"; shift 2;;
     --host-usd-per-hour) PRICE="${2:?}"; shift 2;;
     --state-tmpfs-gib) TMPFS_GIB="${2:?}"; shift 2;;
+    --swap-mib) SWAP_MIB="${2:?}"; shift 2;;   # swap per env (needs host swap, e.g. zram); default 0
     -h|--help) sed -n 2,12p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
@@ -207,7 +208,8 @@ IMGSHA=$(lk files.osworld_image_qcow2.sha256)
 cat > "$E/rootfs-config.json" <<EOF
 {"state_dir": "$D/state", "lower": "/mnt/osworld", "inspection": "$E/inspection.json", "image_sha256": "$IMGSHA",
  "vcpus": $(lk runtime.vcpus), "memory_mib": $(lk runtime.memory_mib), "screen": "$(lk runtime.screen)", "profile": "gnome_x11",
- "service_base_port": 25000, "guest_service_port": 5000, "display_stage_deb": "$D/packages/dummy.deb"}
+ "service_base_port": 25000, "guest_service_port": 5000, "display_stage_deb": "$D/packages/dummy.deb",
+ "procview_dir": "/run/drums/procview"}
 EOF
 [ -s "$E/token" ] || (umask 077; python3 -c "import secrets; print(secrets.token_urlsafe(32))" > "$E/token")
 chmod 0600 "$E/token"
@@ -221,17 +223,36 @@ cat > "$E/drumsd.json" <<EOF
 {"listen": "$LISTEN", "allow_remote": $ALLOW, "token_file": "$E/token",
  "state_dir": "$D/state", "journal_dir": "$D/journal", "lower": "/mnt/osworld", "image_sha256": "$IMGSHA",
  "py_src": "$LAB", "py_config": "$E/rootfs-config.json", "criu": "$O/criu/bin/criu", "nested_pidns": true,
- "vcpus": $(lk runtime.vcpus), "memory_mib": $(lk runtime.memory_mib), "port_base": 25000, "guest_port": 5000,
+ "vcpus": $(lk runtime.vcpus), "memory_mib": $(lk runtime.memory_mib), "swap_mib": $SWAP_MIB, "procview_dir": "/run/drums/procview", "port_base": 25000, "guest_port": 5000,
  "extra_ports": [[27500, 9222], [30000, 8080]], "slot_range": [100, 2000], "max_concurrent_restores": $RESTORES,
  "natural_exits": $(lk runtime.natural_exits), "alive_after_s": 5.0, "max_attempts": 3, "warm_upper": true,
  "host_usd_per_hour": $PRICE,
  "osw": {"python": "$O/osw-venv/bin/python", "helper": "$O/osw/drums_osw.py", "osworld_dir": "$O/src/OSWorld",
          "cache_dir": "$D/osw-cache", "uid": $OSW_UID, "gid": $OSW_GID}}
 EOF
+# Per-env memory/CPU view: apps in an env see the env's own memory, swap and CPU count (/proc/meminfo, cpuinfo, stat,
+# swaps, /sys/devices/system/cpu/{online,possible,present} and sysinfo(2)), not the host's. Its FUSE connection is kept
+# in systemd's fd store, so a restart of this service does not break the binds of running envs.
+cat > /etc/systemd/system/drums-procview.service <<EOF
+[Unit]
+Description=Drums per-env memory/CPU view (FUSE + sysinfo program)
+Before=drumsd.service
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=$O/bin/drumsd procview --mount /run/drums/procview
+FileDescriptorStoreMax=4
+FileDescriptorStorePreserve=restart
+Restart=always
+RestartSec=0
+[Install]
+WantedBy=multi-user.target
+EOF
 cat > /etc/systemd/system/drumsd.service <<EOF
 [Unit]
 Description=drumsd (Drums desktop-slot control plane)
-After=network-online.target
+After=network-online.target drums-procview.service
+Wants=drums-procview.service
 [Service]
 ExecStart=$O/bin/drumsd serve --config $E/drumsd.json
 Restart=always
@@ -269,8 +290,11 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable -q drums-osw.service
+systemctl enable -q drums-osw.service drums-procview.service
 systemctl restart drums-osw.service
+# a running view keeps serving across this restart (the fd store carries its connection to the new binary)
+systemctl restart drums-procview.service || { journalctl -u drums-procview --no-pager | tail -20; die "drums-procview did not start"; }
+grep -q ' /run/drums/procview .* - fuse.drums-procview ' /proc/self/mountinfo || die "the per-env view is not mounted at /run/drums/procview"
 for i in $(seq 1 60); do [ -S /run/drums-osw/osw.sock ] && break; sleep 0.5; done
 [ -S /run/drums-osw/osw.sock ] || { journalctl -u drums-osw --no-pager | tail -20; die "OSWorld checker server did not start"; }
 phase config $t
