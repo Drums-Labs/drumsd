@@ -155,6 +155,10 @@ fi
 (cd "$O/src/drumsd" && "$O/rust/bin/cargo" build -q --release --locked) > "$D/drumsd-build.log" 2>&1 || { tail -30 "$D/drumsd-build.log"; die "drumsd build"; }
 install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
+# the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
+rm -rf "$O/sdk"; install -d -m 0755 "$O/sdk"
+for w in "$REL"/sdk/drums-*-py3-none-any.whl; do [ -f "$w" ] && install -m 0644 "$w" "$O/sdk/"; done
+ls "$O"/sdk/drums-*.whl > /dev/null 2>&1 || die "the release has no SDK wheel (sdk/drums-*.whl)"
 phase drumsd $t
 
 # ------------------------------------------------------------------------------------------------ 7. OSWorld checkers (hashed Python lock, unprivileged user)
@@ -296,6 +300,7 @@ cat <<EOF
    token:  $(cat "$E/token")         (also in $E/token, root only)
    image:  $(lk runtime.image_id)
  From another machine:  ssh -L $PORT:127.0.0.1:$PORT <this host>   then use http://127.0.0.1:$PORT
+   SDK (any user):  python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install $(ls "$O"/sdk/drums-*.whl)
    import drums; c = drums.connect("$URL", "<token>"); env = c.create(image="$(lk runtime.image_id)")
 ================================================================================================
 EOF

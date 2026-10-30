@@ -2,7 +2,7 @@
 # make-release.sh OUT_DIR  -- on a machine with the three repos: a self-contained release for install.sh.
 #   DRUMS_CRIU=path/to/drums-criu (branch app-compat)  DRUMS_LAB=path/to/drums-lab
 # The release holds install.sh, install/ (lock, hashed Python lock, bring-up), git bundles of drumsd (this commit),
-# drums-criu and drums-lab (the commits pinned in install/lock.json), RELEASE_COMMIT and SHA256SUMS.
+# drums-criu and drums-lab (the commits pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$(mkdir -p "${1:?out dir}" && cd "$1" && pwd)"
@@ -25,6 +25,7 @@ bundle() { # bundle REPO NAME COMMIT
 bundle "$HERE" drumsd "$C"
 bundle "$CRIU" drums-criu "$(lk drums-criu)"
 bundle "$LAB" drums-lab "$(lk drums-lab)"
+python3 "$HERE/install/build_wheel.py" "$R/sdk" > /dev/null
 (cd "$R" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
 sha256sum "$R.tar.gz"
