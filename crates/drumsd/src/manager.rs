@@ -125,7 +125,7 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
     match &c.provenance {
         None => Some("made before provenance was recorded (drumsd < 0.4): re-provision the origin".into()),
         Some(p) if p != current => {
-            let diff: Vec<&str> = ["source_sha256", "inspection_sha256"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
+            let diff: Vec<&str> = ["source_sha256", "inspection_sha256", "procview_dir"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
             Some(format!("made by other {} than this drumsd runs with: re-provision the origin", diff.join(" and ")))
         }
         _ => None,
@@ -135,12 +135,17 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
 /// The provenance of an origin provisioned now: the digest of the runtime sources drumsd restores with and of the
 /// inspection file named by the Python config (`inspection`), whose facts (user, session, login) the origin was made from.
 pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
-    let insp = std::fs::read(py_config).ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    let cfg = std::fs::read(py_config).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let insp = cfg.as_ref()
         .and_then(|v| v.get("inspection").and_then(|x| x.as_str()).map(PathBuf::from))
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| hex_sha256(&b));
-    json!({"source_sha256": source_sha, "inspection_sha256": insp})
+    let mut v = json!({"source_sha256": source_sha, "inspection_sha256": insp});
+    // whether the origin's tree binds the per-env view: an origin made with the other setting is stale (re-provisioned)
+    if let Some(pv) = cfg.as_ref().and_then(|c| c.get("procview_dir")).filter(|x| !x.is_null()) {
+        v["procview_dir"] = pv.clone();
+    }
+    v
 }
 
 /// What the API returns for a checkpoint: its record plus `stale` (and why).
@@ -2631,6 +2636,13 @@ mod tests {
         std::fs::write(&insp, b"{\"login\": {\"locale\": {}}}").unwrap();
         assert_ne!(provenance("src", &cfgp), p);
         assert_eq!(provenance("src", &t.path().join("missing.json"))["inspection_sha256"], Value::Null);
+        // the view setting is part of it; a config without one keeps the 0.4 shape
+        assert!(p.get("procview_dir").is_none());
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "procview_dir": "/run/drums/procview"})).unwrap()).unwrap();
+        let q = provenance("src", &cfgp);
+        assert_eq!(q["procview_dir"], json!("/run/drums/procview"));
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "procview_dir": null})).unwrap()).unwrap();
+        assert_ne!(provenance("src", &cfgp), q);
     }
     #[test]
     fn numbers_of_destroyed_slots_are_reused_and_reservations_end() {
