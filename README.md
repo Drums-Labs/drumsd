@@ -51,25 +51,23 @@ so `sharedos_rootfs.capture` runs on it unchanged (drumsd uses it for `capture`/
 
 ## API
 
-`api/openapi.json` (also `GET /openapi.json`). Main routes: `POST /v1/checkpoints` (adopt), `POST /v1/slots`,
-`POST /v1/slots/{id}/reset|step|capture|branch|quarantine|release`, `GET /v1/slots/{id}/gates|screenshot`,
-`DELETE /v1/slots/{id}`, `GET /metrics`.
+`api/openapi.json` (also `GET /openapi.json`). Every route except `GET /healthz` needs `Authorization: Bearer <token>`;
+the API binds to 127.0.0.1 unless `allow_remote` is set. Main routes: `POST /v1/checkpoints` (adopt), `POST /v1/slots`
+(from an image or saved state, optional OSWorld task), `POST /v1/slots/{id}/reset|step|capture|branch|verify|task|
+quarantine|release`, `GET /v1/slots/{id}/gates|screenshot|metrics`, `DELETE /v1/slots/{id}`, `GET /v1/health`,
+`GET /v1/metrics`, `GET /v1/tasks[/{id}]`, `GET /metrics` (Prometheus).
 
-```python
-import drums
-env = drums.env(task)            # from the clean checkpoint
-env.reset(); env.step("pyautogui.click(100, 200)")
-kids = env.branch(8); state = env.save(); env2 = drums.env(from_state=state)
-assert env.valid()
-```
+The Python SDK (`python/drums`, 0.2) and the one-command install are in QUICKSTART.md.
 
 ## Build and test
 
 ```
 cargo build --release
-sudo cargo test --release          # 46 unit tests; the forwarder test needs root (setns)
+sudo cargo test --release          # 56 unit tests; the forwarder and nested-pidns tests need root
 python3 -m unittest python/tests/test_client.py
 sudo python3 python/tests/integration_host.py OUT    # against a running daemon on a host with an adopted checkpoint
+sudo python3 python/tests/recovery_host.py OUT       # installed host: drumsd killed idle/mid-reset, crashed restore, template server killed
 ```
 
-Run: `sudo drumsd serve --config drumsd.json` (fields in `crates/drumsd/src/config.rs`).
+Run: `sudo drumsd serve --config drumsd.json` (fields in `crates/drumsd/src/config.rs`). An installed host runs it as
+the `drumsd` systemd service (install/install.sh).
