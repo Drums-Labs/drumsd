@@ -1,6 +1,6 @@
 //! HTTP/JSON API (spec: api/openapi.json, served at GET /openapi.json).
 
-use crate::manager::{ckpt_view, view, ApiError, Manager, QuiesceOpts};
+use crate::manager::{view, ApiError, Manager, QuiesceOpts};
 use drumsd_core::admission::Need;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -206,13 +206,13 @@ async fn openapi() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/json")], OPENAPI)
 }
 async fn list_ckpts(State(m): S) -> Json<Value> {
-    Json(json!(m.ckpts.read().unwrap().values().map(|c| ckpt_view(c, &m.provenance)).collect::<Vec<_>>()))
+    Json(json!(m.ckpts.read().unwrap().values().map(|c| m.ckpt_view(c)).collect::<Vec<_>>()))
 }
 async fn adopt(State(m): S, Json(r): Json<AdoptReq>) -> J {
-    Ok(Json(ckpt_view(&m.adopt_checkpoint(r.id, r.slot, r.expected_state_hash, None).await?, &m.provenance)))
+    Ok(Json(m.ckpt_view(&m.adopt_checkpoint(r.id, r.slot, r.expected_state_hash, None).await?)))
 }
 async fn get_ckpt(State(m): S, Path(id): Path<String>) -> J {
-    Ok(Json(ckpt_view(&m.ckpt(&id)?, &m.provenance)))
+    Ok(Json(m.ckpt_view(&m.ckpt(&id)?)))
 }
 #[derive(Deserialize, Default)]
 pub struct DeleteCkptQ {
