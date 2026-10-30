@@ -81,10 +81,10 @@
   "sources": {
     "drums-criu": {
       "repo": "sahiljagtap08/drums-criu",
-      "branch": "fix/dump-fsize",
-      "commit": "e10195158b5b1289497609d36efdd0eb5d728733",
+      "branch": "fix/zombie-hang",
+      "commit": "358380f66df2b647a1ba875728cd8a98df09ead3",
       "tag": null,
-      "note": "integration/runtime-c 7a2f7f138 (ade3f3da8 restore-hang fix, ee9118f93 restore takes the client's oom_score_adj, capture-latency fix, creds-helper SIGCHLD fix) plus e10195158: the compel parasite logs through a pipe, so a task with RLIMIT_FSIZE 0 (rtkit-daemon) no longer gets SIGXFSZ from a --leave-running dump",
+      "note": "e10195158 (runtime-c 7a2f7f138: ade3f3da8 restore-hang fix, ee9118f93 oom_score_adj of a template restore, capture-latency fix, creds-helper SIGCHLD fix; plus the parasite log pipe, no SIGXFSZ for RLIMIT_FSIZE 0 tasks) plus the nested-pidns restore hang fixes (restorer EACCES race on <init>/ns/pid, pidns_cursord cleanup deadlock). Provisional until its app gate verdict",
       "reference_binary_sha256": "unknown (not built yet at this pin)"
     },
     "drums-lab": {
