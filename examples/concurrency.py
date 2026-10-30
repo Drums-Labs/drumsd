@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
@@ -57,9 +58,23 @@ def main():
     c = drums.connect(a.url, a.token)
     c.reset_metrics()
     tasks = [c.task(t) for t in a.tasks.split(",")]
+    samples, stop = [], threading.Event()
+
+    def sampler():                        # host memory and load while the envs run (from /v1/health)
+        while not stop.is_set():
+            try:
+                h = c.health()
+                samples.append({"t": round(time.monotonic() - t0, 1), "mem_available_gib": round((h.get("host_mem_available_bytes") or 0) / 2**30, 2),
+                                "loadavg": h.get("loadavg"), "slots": h.get("slots_by_state")})
+            except drums.DrumsError:
+                pass
+            stop.wait(2)
     t0 = time.monotonic()
+    th = threading.Thread(target=sampler, daemon=True)
+    th.start()
     res = drums.Client.map(lambda i: episode(c, i, tasks[i % len(tasks)], a.steps), range(a.n), workers=a.n)
     wall = time.monotonic() - t0
+    stop.set(); th.join()
     rows, fails = [], {}
     for i, r in enumerate(res):
         if isinstance(r, Exception):
@@ -79,7 +94,10 @@ def main():
         print(f"  {k:<11} n={v['n']:<4} failed={v['failed']:<3} p50={v['p50_s']}s p95={v['p95_s']}s")
     print(f"  episodes {m['usage']['episodes']} failures {m['usage']['failures_by_cause']} retries {m['usage']['retries_by_cause']}")
     print(f"  cost {m['cost']}")
-    json.dump({"n": a.n, "ok": ok, "failures": fails, "wall_s": wall, "rows": rows, "metrics": m}, open(a.out, "w"), indent=1, default=str)
+    if samples:
+        lo = min(samples, key=lambda x: x["mem_available_gib"])
+        print(f"  host: lowest MemAvailable {lo['mem_available_gib']} GiB at t={lo['t']} s (load {lo['loadavg']}); {len(samples)} samples")
+    json.dump({"n": a.n, "ok": ok, "failures": fails, "wall_s": wall, "rows": rows, "metrics": m, "host_samples": samples}, open(a.out, "w"), indent=1, default=str)
 
 
 if __name__ == "__main__":
