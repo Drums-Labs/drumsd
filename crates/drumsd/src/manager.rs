@@ -185,6 +185,8 @@ pub struct Manager {
     pub criu_sha256: String,
     /// Records pruned by retention since start, by class: (files, bytes).
     forget_pruned: StdMutex<BTreeMap<&'static str, (u64, u64)>>,
+    /// Held while a template server is being started (see ensure_server).
+    server_start: StdMutex<()>,
 }
 
 /// Per-request overrides of the capture-readiness wait (the daemon's `quiesce` config gives the defaults).
@@ -281,6 +283,7 @@ impl Manager {
             started_epoch: drumsd_linux::now_epoch(),
             criu_sha256,
             forget_pruned: StdMutex::new(BTreeMap::new()),
+            server_start: StdMutex::new(()),
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
             exe,
@@ -586,6 +589,14 @@ impl Manager {
 
     fn ensure_server(&self, c: &CheckpointRecord) -> Result<i32, String> {
         let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
+        if let Some(pid) = template::adopt(&c.socket, &sp.images) {
+            return Ok(pid);
+        }
+        // One start at a time: concurrent creates of a checkpoint whose server is down (after a reinstall, every one)
+        // all missed `adopt` while the first start was still building the template, then found its process in the
+        // server cgroup and failed with "template server cgroup ... still holds processes" (dev host, 9 of 12 creates).
+        // The winner starts it; the others wait here and adopt it.
+        let _one = self.server_start.lock().unwrap();
         if let Some(pid) = template::adopt(&c.socket, &sp.images) {
             return Ok(pid);
         }
