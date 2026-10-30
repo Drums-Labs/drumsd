@@ -7,8 +7,11 @@
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
 # hashed Python lock) and checked before use; the first mismatch stops the install.
-# The API is bound to 127.0.0.1 unless --remote is given. Prints the URL and the token at the end.
+# The API is bound to 127.0.0.1 unless --remote is given (--remote serves plain HTTP with a bearer token on every
+# interface: prefer the ssh tunnel the banner shows). Takes 7-15 min on a 16-vCPU host; a progress line every 30 s.
+# The API token is written to /etc/drums/token (root only, 0600) and never printed; the banner prints its path.
 # Log: /var/log/drums-install.log. Receipt (versions, hashes, phase times): /var/lib/drums/install-receipt.json.
+# Docs: README.md, QUICKSTART.md and docs/ next to this script.
 set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +23,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="${2:?}"; shift 2;;
     --host-usd-per-hour) PRICE="${2:?}"; shift 2;;
     --state-tmpfs-gib) TMPFS_GIB="${2:?}"; shift 2;;
-    -h|--help) sed -n 2,12p "$0"; exit 0;;
+    -h|--help) sed -n 2,15p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
@@ -30,8 +33,9 @@ D=/var/lib/drums; O=/opt/drums; E=/etc/drums
 mkdir -p "$D" "$O" "$E"
 exec 9> "$D/install.lock"
 flock -n 9 || { echo "another install.sh is running (lock $D/install.lock)" >&2; exit 1; }
-touch "$LOG"; chmod 0600 "$LOG"      # the log ends with the API token
+touch "$LOG"; chmod 0600 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
+exec 8>&1      # the terminal (and the log): progress lines of steps whose own output goes to a log file
 BG=""
 trap '[ -n "$BG" ] && kill $BG 2>/dev/null; true' EXIT
 T0=$(date +%s)
@@ -41,6 +45,19 @@ say() { echo "$(ts) [drums-install] $*"; }
 die() { echo "$(ts) [drums-install] FAILED: $*" >&2; exit 1; }
 phase() { # phase NAME START_EPOCH
   local now; now=$(date +%s); echo "{\"phase\":\"$1\",\"seconds\":$((now - $2)),\"end_utc\":\"$(ts)\"}" >> "$PH"; say "phase $1 done in $((now - $2)) s"; }
+# heartbeat LABEL PID [FILE...]: while PID runs, one line every 30 s with the elapsed time (and the size of FILEs that exist)
+heartbeat() {
+  local what=$1 pid=$2 t0 n=0 f sz; shift 2; t0=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1; n=$((n + 1))
+    if [ $((n % ${DRUMS_HEARTBEAT_S:-30})) = 0 ]; then
+      sz=""; for f in "$@"; do [ -e "$f" ] && sz="$sz, $(basename "$f") $(du -sh --apparent-size "$f" 2>/dev/null | cut -f1)"; done
+      say "  ... $what: $(( $(date +%s) - t0 )) s$sz"
+    fi
+  done
+}
+# with_progress LABEL CMD...: run CMD with a heartbeat on the terminal (fd 8, even when CMD's output goes to a log)
+with_progress() { local what=$1; shift; "$@" & local p=$!; heartbeat "$what" $p >&8; wait $p; }
 lk() { python3 -c "import json,sys; d=json.load(open('$LOCK')); v=d
 for k in sys.argv[1].split('.'): v=v[k]
 print(v if not isinstance(v,(dict,list)) else json.dumps(v))" "$1"; }
@@ -58,6 +75,7 @@ MEM_GIB=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1048576 ))
 [ "$MEM_GIB" -ge "$(lk host.min_mem_gib)" ] || die "need $(lk host.min_mem_gib) GiB RAM, have $MEM_GIB"
 (cd "$REL" && sha256sum -c --quiet SHA256SUMS) || die "release files do not match SHA256SUMS"
 say "host $(hostname) kernel $(uname -r) (tested: $(lk host.tested_kernel)), ${MEM_GIB} GiB RAM, ${FREE_GIB} GiB free"
+say "installing Drums $(cut -c1-12 "$REL/RELEASE_COMMIT"): 7-15 min. Phases: apt, kernel, sources, image (in the background), criu, drumsd, osworld, image attach, config, bring-up"
 phase preflight $t
 
 # ------------------------------------------------------------------------------------------------ 1. apt (snapshot-pinned)
@@ -69,8 +87,9 @@ mapfile -t PKGS < <(python3 -c "import json; d=json.load(open('$LOCK'))['apt']['
 # every failed attempt logged and its output kept; the snapshot pin and the version check below are unchanged
 . "$REL/install/retry.sh"
 RETRY_LOG_DIR="$D"; mkdir -p "$D"
-retry "apt update (snapshot $SNAP)" apt-get update -qq --snapshot "$SNAP" || die "apt update (snapshot $SNAP), ${DRUMS_RETRY_ATTEMPTS:-5} attempts"
-retry "apt install" apt-get install -y -qq --no-install-recommends --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
+say "apt: ${#PKGS[@]} pinned packages from snapshot.ubuntu.com ($SNAP); 1-10 min depending on the snapshot service"
+with_progress "apt update" retry "apt update (snapshot $SNAP)" apt-get update -qq --snapshot "$SNAP" || die "apt update (snapshot $SNAP), ${DRUMS_RETRY_ATTEMPTS:-5} attempts"
+with_progress "apt install" retry "apt install" apt-get install -y -qq --no-install-recommends --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
 for pv in "${PKGS[@]}"; do
   p=${pv%%=*}; want=${pv#*=}; got=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || true)
   [ "$got" = "$want" ] || die "package $p is $got, pinned $want"
@@ -117,6 +136,7 @@ phase sources $t
 # ------------------------------------------------------------------------------------------------ 4. image (download, verify, extract) - in the background
 t_img=$(date +%s)
 IMG="$D/image"; mkdir -p "$IMG"
+say "image: downloading and verifying the OSWorld image in the background (11.4 GB zip, 24 GB qcow2; 4-8 min)"
 (
   set -e
   Q="$IMG/Ubuntu.qcow2"; QSHA=$(lk files.osworld_image_qcow2.sha256)
@@ -144,7 +164,8 @@ if [ -x "$CB/criu" ] && [ "$(cat "$CB/criu.commit" 2>/dev/null)" = "$CRIU_PIN" ]
   CRIU_REUSED=1
 else
   CRIU_REUSED=0
-  make -C "$O/src/drums-criu" -j"$(nproc)" criu > "$D/criu-build.log" 2>&1 || { tail -30 "$D/criu-build.log"; die "criu build"; }
+  say "criu: building drums-criu $CRIU_PIN"
+  with_progress "criu build" make -C "$O/src/drums-criu" -j"$(nproc)" criu > "$D/criu-build.log" 2>&1 || { tail -30 "$D/criu-build.log"; die "criu build"; }
   install -D -m 0755 "$O/src/drums-criu/criu/criu" "$CB/criu"
   sha256sum "$CB/criu" | cut -d' ' -f1 > "$CB/criu.sha256"; echo "$CRIU_PIN" > "$CB/criu.commit"
 fi
@@ -152,6 +173,8 @@ fi
 CRIU_SHA=$(sha256sum "$O/criu/bin/criu" | cut -d' ' -f1)
 [ "$CRIU_REUSED" = 1 ] && say "criu REUSED: already built from drums-criu $CRIU_PIN, not rebuilt"
 say "criu $("$O/criu/bin/criu" --version | head -1 | tr '\n' ' ') sha256 $CRIU_SHA (reference build $(lk sources.drums-criu.reference_binary_sha256 | cut -c1-12)...)"
+say "  note: CRIU builds are not byte-reproducible, so this sha256 differs from the reference build's (and between installs)."
+say "  That is expected: the source commit ($CRIU_PIN) is what is pinned and checked; the reference hash is informational."
 phase criu $t
 
 # ------------------------------------------------------------------------------------------------ 6. drumsd build (pinned toolchain, --locked)
@@ -162,7 +185,8 @@ if [ ! -x "$O/rust/bin/cargo" ]; then
   echo "$(lk files.rustup_init.sha256)  /tmp/rustup-init" | sha256sum -c --quiet - || die "rustup-init sha256 mismatch"
   chmod +x /tmp/rustup-init && /tmp/rustup-init -y -q --no-modify-path --profile minimal --default-toolchain "$(lk rust_toolchain)" > "$D/rustup.log" 2>&1 || die "rustup"
 fi
-(cd "$O/src/drumsd" && "$O/rust/bin/cargo" build -q --release --locked) > "$D/drumsd-build.log" 2>&1 || { tail -30 "$D/drumsd-build.log"; die "drumsd build"; }
+say "drumsd: building with Rust $(lk rust_toolchain) (--locked)"
+(cd "$O/src/drumsd" && with_progress "drumsd build" "$O/rust/bin/cargo" build -q --release --locked) > "$D/drumsd-build.log" 2>&1 || { tail -30 "$D/drumsd-build.log"; die "drumsd build"; }
 install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
 # the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
@@ -176,13 +200,16 @@ t=$(date +%s)
 id drums-osw >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$D/osw-cache" --shell /usr/sbin/nologin drums-osw
 mkdir -p "$D/osw-cache" && chown drums-osw:drums-osw "$D/osw-cache" && chmod 0750 "$D/osw-cache"
 [ -x "$O/osw-venv/bin/python" ] || python3 -m venv "$O/osw-venv"
-"$O/osw-venv/bin/pip" install -q --no-deps --require-hashes -r "$O/src/drumsd/install/osw-requirements.lock" \
+say "osworld: installing OSWorld's checkers from the hashed Python lock"
+with_progress "pip install" "$O/osw-venv/bin/pip" install -q --no-deps --require-hashes -r "$O/src/drumsd/install/osw-requirements.lock" \
   --extra-index-url "$(lk sources.osworld.extra_index)" > "$D/pip.log" 2>&1 || { tail -30 "$D/pip.log"; die "pip install (hashed lock)"; }
 "$O/osw-venv/bin/pip" freeze > "$D/osw-venv-freeze.txt"
 (cd "$O/src/OSWorld" && runuser -u drums-osw -- env HOME="$D/osw-cache" "$O/osw-venv/bin/python" -c "import desktop_env.desktop_env, desktop_env.evaluators.metrics, desktop_env.evaluators.getters; print('osworld import ok')") > "$D/osw-import.log" 2>&1 || { tail -20 "$D/osw-import.log"; die "OSWorld checkers do not import"; }
 phase osworld $t
 
 # ------------------------------------------------------------------------------------------------ 8. wait for the image, attach it read-only, inspect the root
+say "image: waiting for the download and verification"
+heartbeat "image download/verify" $IMG_PID "$IMG/Ubuntu.qcow2.zip" "$IMG/Ubuntu.qcow2.part"
 wait $IMG_PID || { cat "$D/image.log"; die "image download/verify"; }
 BG=""
 phase image_download_verify $t_img
@@ -318,7 +345,8 @@ phase config $t
 # ------------------------------------------------------------------------------------------------ 10. clean checkpoint of the image, then drumsd
 t=$(date +%s)
 systemctl stop drumsd 2>/dev/null || true
-python3 "$O/src/drumsd/install/bringup.py" --criu-dir "$O/criu/bin" --lab "$LAB" --rootfs-config "$E/rootfs-config.json" \
+say "bring-up: booting the image's desktop once and checkpointing it as $(lk runtime.image_id) (about 1 min)"
+with_progress "bring-up" python3 "$O/src/drumsd/install/bringup.py" --criu-dir "$O/criu/bin" --lab "$LAB" --rootfs-config "$E/rootfs-config.json" \
   --drumsd-config "$E/drumsd.json" --image-id "$(lk runtime.image_id)" --record "$D/bringup.json" || die "bring-up of the clean checkpoint"
 phase bringup $t
 
@@ -337,10 +365,14 @@ cat <<EOF
 ================================================================================================
  Drums is running.  ($((T1 - T0)) s)
    URL:    $URL
-   token:  $(cat "$E/token")         (also in $E/token, root only)
+   token:  in $E/token (root only, mode 0600; not printed). Read it with:  sudo cat $E/token
    image:  $(lk runtime.image_id)
  From another machine:  ssh -L $PORT:127.0.0.1:$PORT <this host>   then use http://127.0.0.1:$PORT
    SDK (any user):  python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install $(ls "$O"/sdk/drums-*.whl)
-   import drums; c = drums.connect("$URL", "<token>"); env = c.create(image="$(lk runtime.image_id)")
+   export DRUMS_URL=$URL DRUMS_TOKEN=\$(sudo cat $E/token)
+   import drums; c = drums.connect(); env = c.create(image="$(lk runtime.image_id)")
+ Leases: an env or saved state unused for 30 min is reaped (create/fork/save take idle_timeout=, ttl=).
+ Metrics: the cost counts idle time since drumsd started; call c.reset_metrics() at the start of a run.
+ Docs: $REL/README.md, QUICKSTART.md, docs/
 ================================================================================================
 EOF
