@@ -2264,10 +2264,7 @@ pub fn state_hash(g: &Guest) -> Result<String, String> {
 pub fn run_action(g: &Guest, a: &Value) -> std::io::Result<Value> {
     match a["type"].as_str().unwrap_or("execute") {
         "execute" => g.execute(a["command"].clone(), a["shell"].as_bool().unwrap_or(false)),
-        "pyautogui" => {
-            let code = a["code"].as_str().unwrap_or("");
-            g.execute(json!(["python3", "-c", format!("import pyautogui; pyautogui.FAILSAFE = False; {code}")]), false)
-        }
+        "pyautogui" => g.execute(json!(["python3", "-c", pyautogui_command(a["code"].as_str().unwrap_or(""))]), false),
         "launch" => {
             let r = g.request("POST", "/setup/launch", Some(&json!({"command": a["command"], "shell": a["shell"].as_bool().unwrap_or(false)})))?;
             if r.status != 200 {
@@ -2281,6 +2278,23 @@ pub fn run_action(g: &Guest, a: &Value) -> std::io::Result<Value> {
         }
         t => Err(std::io::Error::other(format!("unknown action type {t:?}"))),
     }
+}
+
+/// OSWorld's PYAUTOGUI_PKGS_PREFIX (desktop_env/controllers/python.py at the pinned 044bc339), so an action runs as
+/// it runs under OSWorld: `time` imported (agents' actions use time.sleep), FAILSAFE off, and OSWorld's Linux table of
+/// shifted characters. drumsd's own prefix lacked `import time`: an action stopped with NameError at its first
+/// time.sleep (SDK < 0.2.2 returned that exit status without raising).
+pub const PYAUTOGUI_PREFIX: &str = concat!(
+    "import pyautogui; import time; import platform; ",
+    "pyautogui.FAILSAFE = False; ",
+    "_osworld_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\"<>?'; ",
+    "_osworld_linux_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\">?'; ",
+    "pyautogui.isShiftCharacter = lambda character: character.isupper() or ",
+    "character in (_osworld_linux_shift_chars if platform.system() == 'Linux' else _osworld_shift_chars); ",
+);
+
+pub fn pyautogui_command(code: &str) -> String {
+    format!("{PYAUTOGUI_PREFIX}{code}")
 }
 
 /// What the API returns for a slot.
@@ -2337,6 +2351,23 @@ mod tests {
         old.as_object_mut().unwrap().remove("provenance");
         let back: CheckpointRecord = serde_json::from_value(old).unwrap();
         assert!(back.provenance.is_none());
+    }
+
+    #[test]
+    fn pyautogui_actions_run_with_osworlds_prefix() {
+        // the text of OSWorld 044bc339 PYAUTOGUI_PKGS_PREFIX with {command} at its end
+        let osw = concat!("import pyautogui; import time; import platform; pyautogui.FAILSAFE = False; ",
+                          "_osworld_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\"<>?'; ",
+                          "_osworld_linux_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\">?'; ",
+                          "pyautogui.isShiftCharacter = lambda character: character.isupper() or ",
+                          "character in (_osworld_linux_shift_chars if platform.system() == 'Linux' else _osworld_shift_chars); {command}");
+        assert_eq!(pyautogui_command("{command}"), osw);
+        let c = pyautogui_command("pyautogui.hotkey('ctrl', 't'); time.sleep(1)");
+        assert!(c.contains("import time;") && c.ends_with("time.sleep(1)"));
+        // the action is code appended verbatim: python must parse the whole line (checked when python3 is present)
+        if let Ok(o) = std::process::Command::new("python3").args(["-c", &format!("import ast; ast.parse({:?})", c)]).output() {
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        }
     }
 
     #[test]
