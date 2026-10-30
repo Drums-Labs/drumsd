@@ -15,6 +15,7 @@ pub mod quiesce;
 pub mod restore;
 pub mod slotfs;
 pub mod checks;
+pub mod forget;
 pub mod template;
 
 pub fn now_epoch() -> f64 {
