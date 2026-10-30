@@ -28,8 +28,9 @@ impl Journal {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(dir.join("slots"))?;
         fs::create_dir_all(dir.join("checkpoints"))?;
+        fs::create_dir_all(dir.join("meta"))?;
         // a leftover tmp file is a write that never completed; the previous record is authoritative
-        for sub in ["slots", "checkpoints"] {
+        for sub in ["slots", "checkpoints", "meta"] {
             for e in fs::read_dir(dir.join(sub))? {
                 let p = e?.path();
                 if p.extension().map(|x| x == "tmp").unwrap_or(false) {
