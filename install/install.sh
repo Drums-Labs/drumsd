@@ -173,7 +173,9 @@ if ! findmnt /mnt/osworld >/dev/null; then
   python3 -m sharedos_rootfs.image attach --image "$IMG/Ubuntu.qcow2" --expected-sha256 "$(lk files.osworld_image_qcow2.sha256)" \
     --mountpoint /mnt/osworld --state "$D/image-mount.json" > "$D/image-attach.log" 2>&1 || { cat "$D/image-attach.log"; die "image attach"; }
 fi
-python3 -m sharedos_rootfs.rootfs_inspect /mnt/osworld --out "$E/inspection.json" --mount-state "$D/image-mount.json" > "$D/inspect.log" 2>&1 || { tail -20 "$D/inspect.log"; die "rootfs inspection"; }
+rm -f "$E/inspection.new.json"
+python3 -m sharedos_rootfs.rootfs_inspect /mnt/osworld --out "$E/inspection.new.json" --mount-state "$D/image-mount.json" > "$D/inspect.log" 2>&1 || { tail -20 "$D/inspect.log"; die "rootfs inspection"; }
+mv "$E/inspection.new.json" "$E/inspection.json"
 mkdir -p "$D/packages"
 curl -sSfL -o "$D/packages/dummy.deb" "$(lk files.xorg_dummy_deb.url)"
 echo "$(lk files.xorg_dummy_deb.sha256)  $D/packages/dummy.deb" | sha256sum -c --quiet - || die "dummy deb sha256 mismatch"
