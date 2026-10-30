@@ -65,8 +65,12 @@ t=$(date +%s)
 export DEBIAN_FRONTEND=noninteractive
 SNAP=$(lk apt.snapshot)
 mapfile -t PKGS < <(python3 -c "import json; d=json.load(open('$LOCK'))['apt']['packages']; [print(f'{k}={v}') for k,v in d.items()]")
-apt-get update -qq --snapshot "$SNAP" || die "apt update (snapshot $SNAP)"
-apt-get install -y -qq --no-install-recommends --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
+# the snapshot service and the mirrors fail transiently (503, "mirror sync in progress"): bounded retry with backoff,
+# every failed attempt logged and its output kept; the snapshot pin and the version check below are unchanged
+. "$REL/install/retry.sh"
+RETRY_LOG_DIR="$D"; mkdir -p "$D"
+retry "apt update (snapshot $SNAP)" apt-get update -qq --snapshot "$SNAP" || die "apt update (snapshot $SNAP), ${DRUMS_RETRY_ATTEMPTS:-5} attempts"
+retry "apt install" apt-get install -y -qq --no-install-recommends --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
 for pv in "${PKGS[@]}"; do
   p=${pv%%=*}; want=${pv#*=}; got=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || true)
   [ "$got" = "$want" ] || die "package $p is $got, pinned $want"
