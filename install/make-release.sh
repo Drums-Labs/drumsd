@@ -2,7 +2,8 @@
 # make-release.sh OUT_DIR  -- on a machine with the three repos: a self-contained release for install.sh.
 #   DRUMS_CRIU=path/to/drums-criu (branch app-compat)  DRUMS_LAB=path/to/drums-lab
 # The release holds install.sh, install/ (lock, hashed Python lock, bring-up), git bundles of drumsd (this commit),
-# drums-criu and drums-lab (the commits pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl), RELEASE_COMMIT and SHA256SUMS.
+# drums-criu and drums-lab (the commits pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl), the user docs
+# (README.md, QUICKSTART.md, CHANGELOG.md, docs/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$(mkdir -p "${1:?out dir}" && cd "$1" && pwd)"
@@ -17,6 +18,12 @@ R="$OUT/drums-release-${C:0:12}"
 rm -rf "$R"; mkdir -p "$R/sources"
 # only the committed files of install/ (an untracked file such as a __pycache__ of a test run must not ship)
 git -C "$HERE" archive --format=tar HEAD install | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
+# the user docs, from the same commit: a customer reads these, not the wheel's source
+git -C "$HERE" archive --format=tar HEAD QUICKSTART.md CHANGELOG.md docs examples api/openapi.json | tar -x -C "$R"
+mv "$R/docs/README.md" "$R/README.md"
+for f in README.md QUICKSTART.md CHANGELOG.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md api/openapi.json; do
+  [ -s "$R/$f" ] || { echo "release is missing $f" >&2; exit 1; }
+done
 echo "$C" > "$R/RELEASE_COMMIT"
 bundle() { # bundle REPO NAME COMMIT
   git -C "$1" branch -f "release-$2" "$3" >/dev/null
