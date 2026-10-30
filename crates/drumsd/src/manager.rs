@@ -247,6 +247,7 @@ impl Manager {
         metrics.counter("drumsd_recoveries_total", "Restores that succeeded after a retry");
         metrics.gauge("drumsd_slots", "Slots by state");
         metrics.gauge("drumsd_state_dir_free_bytes", "Free bytes on the state dir (tmpfs)");
+        metrics.gauge("drumsd_procview_live", "1 when the per-env memory/CPU view mount answers");
         metrics.gauge("drumsd_forgotten_bytes", "Bytes of kept records of destroyed envs, by where they are");
         metrics.counter("drumsd_forget_total", "Slot directories moved off the state dir, by whether they were packed");
         metrics.counter("drumsd_forget_tmpfs_bytes_freed_total", "Bytes of kept records moved off the state dir");
@@ -255,7 +256,7 @@ impl Manager {
         metrics.histogram("drumsd_create_seconds", "Create latency, branch dir to all synchronous gates passed", LATENCY_BUCKETS);
         metrics.histogram("drumsd_phase_seconds", "Restore pipeline phase latency", LATENCY_BUCKETS);
         metrics.histogram("drumsd_criu_restore_seconds", "CRIU's own restore clock (Restore finished successfully)", LATENCY_BUCKETS);
-        let limits = cgroup::expected_limits(cfg.vcpus, cfg.memory_mib);
+        let limits = cgroup::expected_limits(cfg.vcpus, cfg.memory_mib, cfg.swap_mib);
         let natural = cfg.natural_exits.iter().cloned().collect();
         let policy = Policy { max_attempts: cfg.max_attempts };
         let token = cfg.load_token()?;
@@ -1070,6 +1071,7 @@ impl Manager {
             out: sp.dir.join(format!("restore-drumsd-{gen}-{stamp}.out")),
             empty_net: self.cfg.netns_fast,
             nested_pidns: self.cfg.nested_pidns,
+            externals: view_externals(&sp.dir, &self.cfg.procview_dir),
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
 
@@ -2046,7 +2048,14 @@ impl Manager {
                 warnings.push(format!("forgotten_dir {} is on the same filesystem as the state dir", fd.display()));
             }
         }
-        json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"), "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
+        let pv_live = drumsd_linux::procview::fuse::is_live(&self.cfg.procview_dir);
+        let pv_needed = self.ckpts.read().unwrap().values().any(|c| !view_externals(&slotfs::paths(&self.cfg.state_dir, c.slot).dir, &self.cfg.procview_dir).is_empty());
+        self.metrics.set("drumsd_procview_live", &[], if pv_live { 1.0 } else { 0.0 });
+        if pv_needed && !pv_live {
+            warnings.push(format!("the per-env memory/CPU view at {} is not live (drums-procview.service): restores of checkpoints that bind it fail closed", self.cfg.procview_dir.display()));
+        }
+        json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"),
+               "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
                "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
@@ -2055,7 +2064,7 @@ impl Manager {
                "host_mem_available_bytes": std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:"))
                    .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
                "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
-               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores},
+               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "swap_mib": self.cfg.swap_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores},
                "admission": self.admission_view()})
     }
 
@@ -2154,6 +2163,13 @@ impl Manager {
 /// directory moves aside so the number can be reused). Idempotent: a destroy interrupted by a daemon kill after the
 /// move left no directory, and the retry used to fail with ENOENT, leaving an env that could never be closed (and
 /// its saved state never deleted).
+/// The per-env view binds of a checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments re-binding them
+/// from the live view mount. A checkpoint made without the view gets none and restores as before.
+pub fn view_externals(slot_dir: &Path, dir: &Path) -> Vec<String> {
+    let rows: Vec<[String; 3]> = std::fs::read(slot_dir.join("mounts-pre-dump.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    drumsd_linux::procview::restore_externals(&rows, dir)
+}
+
 pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64, forget: impl FnOnce(&Path, &str) -> std::io::Result<PathBuf>) -> std::io::Result<PathBuf> {
     let sp = slotfs::paths(state_dir, num);
     if sp.dir.symlink_metadata().is_err() {

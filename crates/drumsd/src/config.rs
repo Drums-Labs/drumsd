@@ -42,6 +42,13 @@ pub struct Config {
     pub criu: PathBuf,
     pub vcpus: u32,
     pub memory_mib: u64,
+    /// Swap per env (memory.swap.max), MiB. 0 (default) = none. Needs host swap to have any effect.
+    #[serde(default)]
+    pub swap_mib: u64,
+    /// The per-env memory/CPU view mount (`drumsd procview`). Checkpoints whose mount table binds its files are
+    /// restored with those binds re-made from here; health warns when it is not live.
+    #[serde(default = "d_procview")]
+    pub procview_dir: PathBuf,
     /// Guest-server port of slot N = port_base + N (as the Python runtime and the final-comparison harness).
     pub port_base: u16,
     #[serde(default = "d_guest_port")]
@@ -114,6 +121,9 @@ pub struct Config {
     pub state_warn_free_pct: f64,
 }
 
+fn d_procview() -> PathBuf {
+    drumsd_linux::procview::MOUNTPOINT.into()
+}
 fn d_forgotten_warn() -> f64 {
     50.0
 }

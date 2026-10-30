@@ -42,6 +42,8 @@ pub struct RestoreSpec {
     /// `--nested-pidns` (drums-criu app-compat): restore the pid/user/net namespaces sandboxed apps nest below the
     /// slot's, as launch.py's CRIU_COMMON does on that branch.
     pub nested_pidns: bool,
+    /// `--external mnt[KEY]:PATH` pairs (the per-env view binds the checkpoint holds; see procview::restore_externals).
+    pub externals: Vec<String>,
 }
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
@@ -58,6 +60,7 @@ pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
         v.push("--action-script".into());
         v.push(h.display().to_string());
     }
+    v.extend(s.externals.iter().cloned());
     for x in CRIU_COMMON {
         // launch.py (app-compat): ("--shell-job", "--tcp-close", "--manage-cgroups=ignore", "--nested-pidns", "-v4")
         if x == "-v4" && s.nested_pidns {
@@ -304,6 +307,7 @@ mod tests {
             out: "/s/slot5/restore-drumsd-3.out".into(),
             empty_net: false,
             nested_pidns: false,
+            externals: vec![],
         }
     }
 
@@ -318,6 +322,14 @@ mod tests {
         assert!(!criu_argv(&s).contains(&"--file-locks".to_string()));
         s.empty_net = true;
         assert!(criu_argv(&s).windows(2).any(|w| w[0] == "--empty-ns" && w[1] == "net"));
+    }
+
+    #[test]
+    fn view_externals_go_after_the_action_script_as_criu_root_puts_them() {
+        let mut s = spec(None);
+        s.externals = vec!["--external".into(), "mnt[drums-pv-meminfo]:/run/drums/procview/meminfo".into()];
+        let j = criu_argv(&s).join(" ");
+        assert!(j.contains("--action-script /s/slot5/lock-hook-3/hook.sh --external mnt[drums-pv-meminfo]:/run/drums/procview/meminfo --shell-job"), "{j}");
     }
 
     #[test]
