@@ -79,8 +79,10 @@ def main():
 
     # already brought up (re-run of the installer): drumsd has the checkpoint
     subprocess.run(["systemctl", "start", "drumsd"], check=False)
-    for _ in range(50):
-        if drumsd_up():
+    # drumsd answers once it has reconciled its journal; with thousands of env records (a host that ran 256 envs for
+    # hours) that took more than the 10 s this used to wait, and the re-run then tried to provision slot 0 again
+    for _ in range(600):
+        if drumsd_up() or subprocess.run(["systemctl", "is-active", "--quiet", "drumsd"]).returncode != 0:
             break
         time.sleep(0.2)
     if drumsd_up():
