@@ -128,6 +128,7 @@ pub struct Manager {
     pub ckpts: RwLock<BTreeMap<String, CheckpointRecord>>,
     restore_sem: Arc<Semaphore>,
     alloc: StdMutex<BTreeSet<u32>>,
+    alloc_cursor: std::sync::atomic::AtomicU32,
     source_sha: String,
     limits: cgroup::Limits,
     natural: BTreeSet<String>,
@@ -227,6 +228,7 @@ impl Manager {
             slots: RwLock::new(BTreeMap::new()),
             ckpts: RwLock::new(BTreeMap::new()),
             alloc: StdMutex::new(BTreeSet::new()),
+            alloc_cursor: std::sync::atomic::AtomicU32::new(0),
             source_sha,
             limits,
             natural,
@@ -446,17 +448,37 @@ impl Manager {
 
     // ------------------------------------------------------------------------------------------------ slots
     fn alloc_num(&self) -> R<u32> {
-        // numbers handed out are reserved for the daemon's life (a capture's target dir appears only inside the verb)
+        // A number is held by a live slot (a destroyed one has moved its directory aside and no longer holds it), a
+        // checkpoint, anything still on disk under it (its directory or its cgroup), or a reservation in flight: a
+        // create between alloc and its slot record, a capture until its verb has made (or failed to make) the dir.
         let mut reserved = self.alloc.lock().unwrap();
-        let used: BTreeSet<u32> = self.slots.read().unwrap().values().map(|s| s.view.read().unwrap().num).collect();
-        let ck: BTreeSet<u32> = self.ckpts.read().unwrap().values().map(|c| c.slot).collect();
-        for n in self.cfg.slot_range.0..self.cfg.slot_range.1 {
-            if !used.contains(&n) && !ck.contains(&n) && !reserved.contains(&n) && slotfs::paths(&self.cfg.state_dir, n).dir.symlink_metadata().is_err() {
+        let mut held: BTreeSet<u32> = self.slots.read().unwrap().values().filter_map(|s| {
+            let v = s.view.read().unwrap();
+            (!v.state.is_terminal()).then_some(v.num)
+        }).collect();
+        held.extend(self.ckpts.read().unwrap().values().map(|c| c.slot));
+        let sd = self.cfg.state_dir.clone();
+        let on_disk = |n: u32| slotfs::paths(&sd, n).dir.symlink_metadata().is_ok() || cgroup::slot_cg(&slotfs::marker_for(&sd, n)).exists();
+        let from = self.alloc_cursor.load(std::sync::atomic::Ordering::Relaxed);
+        match pick_num(self.cfg.slot_range, from, &held, &reserved, on_disk) {
+            Some(n) => {
+                self.alloc_cursor.store(n + 1, std::sync::atomic::Ordering::Relaxed);
                 reserved.insert(n);
-                return Ok(n);
+                Ok(n)
             }
+            None => Err(ApiError::new(503, "no free slot number")),
         }
-        Err(ApiError::new(503, "no free slot number"))
+    }
+
+    /// End the in-flight reservation of `n` (its slot record, checkpoint or directory now holds it, or nothing does).
+    fn release_num(&self, n: u32) {
+        self.alloc.lock().unwrap().remove(&n);
+    }
+
+    /// A slot id never used before on this host (journal included), so a stale handle can never reach a newer env
+    /// that got the same number: `s<num>`, then `s<num>-2`, `s<num>-3`, ...
+    fn fresh_id(&self, num: u32) -> String {
+        slot_id_for(num, |id| self.slots.read().unwrap().contains_key(id) || self.journal.get::<Value>("slots", id).ok().flatten().is_some())
     }
 
     async fn bind_proxies(&self, num: u32) -> R<(Vec<proxy::Target>, Vec<tokio::task::JoinHandle<()>>)> {
@@ -493,8 +515,14 @@ impl Manager {
             None => (c.task.clone(), false),
         };
         let num = self.alloc_num()?;
-        let id = format!("s{num}");
-        let (targets, handles) = self.bind_proxies(num).await?;
+        let id = self.fresh_id(num);
+        let (targets, handles) = match self.bind_proxies(num).await {
+            Ok(x) => x,
+            Err(e) => {
+                self.release_num(num);
+                return Err(e);
+            }
+        };
         let now = drumsd_linux::now_epoch();
         let rec = SlotRecord {
             id: id.clone(),
@@ -525,6 +553,7 @@ impl Manager {
         };
         let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec), targets, proxies: StdMutex::new(handles) });
         self.slots.write().unwrap().insert(id.clone(), slot.clone());
+        self.release_num(num); // the live slot record holds the number now
         let _g = slot.op.lock().await;
         let st = slot.view.read().unwrap().state.begin(Op::Create).map_err(|e| ApiError::new(409, e.to_string()))?;
         self.put_slot(&slot, |r| r.state = st);
@@ -1246,7 +1275,9 @@ impl Manager {
             };
             let me = self.clone();
             let td = Instant::now();
-            let res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into)).await.map_err(e500)?;
+            let res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into)).await;
+            self.release_num(into); // its directory (or nothing, if the verb made none) holds the number now
+            let res = res.map_err(e500)?;
             let out = match res {
                 Ok(out) => out,
                 Err(e) => {
@@ -1858,6 +1889,23 @@ impl Manager {
     }
 }
 
+/// The first number at or after `from` (wrapping around `range`) not held, not reserved and with nothing on disk.
+/// Searching from just after the last number handed out spreads reuse over the whole range, so a freed number (its
+/// ports, its cgroup) is taken again only after every other free number was.
+pub fn pick_num(range: (u32, u32), from: u32, held: &BTreeSet<u32>, reserved: &BTreeSet<u32>, on_disk: impl Fn(u32) -> bool) -> Option<u32> {
+    let from = from.clamp(range.0, range.1);
+    (from..range.1).chain(range.0..from).find(|n| !held.contains(n) && !reserved.contains(n) && !on_disk(*n))
+}
+
+/// `s<num>` if no slot ever had that id, else the first free `s<num>-<k>` (k >= 2).
+pub fn slot_id_for(num: u32, taken: impl Fn(&str) -> bool) -> String {
+    let base = format!("s{num}");
+    if !taken(&base) {
+        return base;
+    }
+    (2u32..).map(|k| format!("s{num}-{k}")).find(|c| !taken(c)).unwrap()
+}
+
 /// Kill every process of a slot: both leaves and the slot cgroup itself.
 pub fn kill_slot(marker: &str) -> std::io::Result<()> {
     for l in [1, 2] {
@@ -1972,6 +2020,45 @@ pub fn b64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numbers_of_destroyed_slots_are_reused_and_reservations_end() {
+        // the leak this replaces: every number ever handed out stayed reserved, so a long run hit "no free slot
+        // number" after (range size) creates + captures
+        let range = (100, 103);
+        let mut held = BTreeSet::new();
+        let mut reserved = BTreeSet::new();
+        let disk: BTreeSet<u32> = BTreeSet::new();
+        for _ in 0..1000 {
+            // create: reserve, the record takes over, the reservation ends; destroy: the record goes terminal
+            let n = pick_num(range, 0, &held, &reserved, |n| disk.contains(&n)).expect("a number must be free after every destroy");
+            reserved.insert(n);
+            held.insert(n);
+            reserved.remove(&n);
+            held.remove(&n);
+        }
+        // in-flight reservations, live slots and leftovers on disk are never handed out
+        let held: BTreeSet<u32> = [100].into();
+        let reserved: BTreeSet<u32> = [101].into();
+        assert_eq!(pick_num(range, 0, &held, &reserved, |n| n == 102), None);
+        assert_eq!(pick_num(range, 0, &held, &reserved, |_| false), Some(102));
+        // the search starts after the last number handed out and wraps
+        let none = BTreeSet::new();
+        assert_eq!(pick_num((100, 110), 105, &none, &none, |_| false), Some(105));
+        assert_eq!(pick_num((100, 110), 110, &none, &none, |_| false), Some(100));
+        assert_eq!(pick_num((100, 110), 108, &none, &none, |n| n >= 108), Some(100));
+    }
+
+    #[test]
+    fn slot_ids_are_never_reused() {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for _ in 0..5 {
+            let id = slot_id_for(105, |c| seen.contains(c));
+            assert!(seen.insert(id));
+        }
+        assert_eq!(seen.iter().cloned().collect::<Vec<_>>(), vec!["s105", "s105-2", "s105-3", "s105-4", "s105-5"]);
+        assert_eq!(slot_id_for(7, |_| false), "s7");
+    }
+
     #[test]
     fn base64_matches_rfc4648() {
         assert_eq!(b64(b""), "");
