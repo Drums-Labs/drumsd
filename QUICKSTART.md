@@ -22,7 +22,7 @@ Rust toolchain, a hashed Python lock); the installer stops at the first mismatch
 ## Use
 
 ```
-pip install ./python          # or: PYTHONPATH=python; standard library only
+python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install /opt/drums/sdk/drums-*.whl   # any user; standard library only
 export DRUMS_URL=http://127.0.0.1:7070 DRUMS_TOKEN=<token>
 ```
 
@@ -58,6 +58,11 @@ with c.create(image="osworld-ubuntu", task="035f41ba") as env:   # OSWorld task 
 - A process that exits silently on a timer just after the dump is always caught, never a valid reward: the dump is redone,
   or the child fails the alive gate. `quiesce.confirm_s` in drumsd.json redoes more such dumps, at that many seconds per capture.
 - A killed drumsd is restarted by systemd and reconciles its envs from its journal.
+- `c.envs()` lists live envs. Destroyed envs keep their records; `c.env_records(include_destroyed=True)` pages through
+  them (`GET /v1/slots?include_destroyed=true&limit=&after=`).
+- The desktop runs the image's own login (locale, session environment, settings daemons), as the image's display manager
+  would. An installed image's checkpoint made by other runtime sources or another image inspection is stale: drumsd
+  refuses envs from it (`CheckpointStale`) until `install.sh` is run again, which provisions the origin anew.
 - Metrics: `c.metrics()` and `env.metrics()` (latency per op, episodes by verdict, failures and retries by cause,
   cost from the host price per hour set at install: `--host-usd-per-hour`).
 - Examples: `examples/fork_and_verify.py`, `examples/concurrency.py`. API: `api/openapi.json`.

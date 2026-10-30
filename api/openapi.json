@@ -2,7 +2,7 @@
  "openapi": "3.1.0",
  "info": {
   "title": "drumsd",
-  "version": "0.2.1",
+  "version": "0.4.0",
   "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote."
  },
  "paths": {
@@ -56,7 +56,7 @@
   "/v1/checkpoints": {
    "get": {
     "summary": "List checkpoints",
-    "description": "Every adopted or captured checkpoint with its template server.",
+    "description": "Every adopted or captured checkpoint with its template server. Each checkpoint carries `provenance` (the digests of the runtime sources and of the image inspection it was made with) and `stale`/`stale_reason`: an installed image made with other ones than the running drumsd refuses new envs (409 code checkpoint_stale) until the installer re-provisions it.",
     "responses": {
      "200": {
       "description": "OK",
@@ -168,8 +168,8 @@
     ]
    },
    "delete": {
-    "summary": "Delete a saved state",
-    "description": "Stops its template server and frees its images (records kept). 409 while an env made from it exists, and for installed images.",
+    "summary": "Delete a saved state (or, with installed=true, an installed image checkpoint)",
+    "description": "Stops its template server and frees its images (records kept). 409 while an env made from it exists. An installed image is refused unless installed=true (the installer uses this to re-provision a stale origin).",
     "responses": {
      "200": {
       "description": "deleted"
@@ -177,28 +177,96 @@
      "409": {
       "description": "in use or an installed image"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "installed",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "boolean",
+       "default": false
+      }
+     }
+    ]
    }
   },
   "/v1/slots": {
    "get": {
-    "summary": "List slots",
-    "description": "",
+    "summary": "List envs (live ones by default)",
+    "description": "With no query: every live env (not destroyed), as an array (the 0.2 SDK shape). Destroyed envs keep their records and are listed only with include_destroyed=true. Any query parameter selects the paged form {items, next_after}: envs in id order (byte order) after `after`, at most `limit` (1..5000; 500 by default when include_destroyed=true, otherwise all); next_after is the id to pass as `after` for the next page, or null on the last page.",
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "An array of envs (no query), or a page",
       "content": {
        "application/json": {
         "schema": {
-         "type": "array",
-         "items": {
-          "$ref": "#/components/schemas/Slot"
-         }
+         "oneOf": [
+          {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Slot"
+           }
+          },
+          {
+           "type": "object",
+           "properties": {
+            "items": {
+             "type": "array",
+             "items": {
+              "$ref": "#/components/schemas/Slot"
+             }
+            },
+            "next_after": {
+             "type": [
+              "string",
+              "null"
+             ]
+            }
+           },
+           "required": [
+            "items",
+            "next_after"
+           ]
+          }
+         ]
         }
        }
       }
+     },
+     "400": {
+      "description": "limit out of range"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "include_destroyed",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "boolean",
+       "default": false
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 5000
+      }
+     },
+     {
+      "name": "after",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
    },
    "post": {
     "summary": "Create a slot",
