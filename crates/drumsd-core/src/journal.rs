@@ -88,6 +88,16 @@ impl Journal {
         Ok(out)
     }
 
+    /// Remove a record (the event log keeps its history).
+    pub fn remove(&self, kind: &str, id: &str) -> io::Result<()> {
+        let p = self.path(kind, id)?;
+        match fs::remove_file(&p) {
+            Ok(()) => fsync_dir(p.parent().unwrap()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn event(&self, ev: &serde_json::Value) -> io::Result<()> {
         let mut line = serde_json::to_vec(ev)?;
         line.push(b'\n');
@@ -117,6 +127,9 @@ mod tests {
         j.event(&json!({"slot": "s1", "to": "resetting"})).unwrap();
         let ev = fs::read_to_string(d.path().join("events.jsonl")).unwrap();
         assert_eq!(ev.lines().count(), 2);
+        j.remove("slots", "s2").unwrap();
+        j.remove("slots", "s2").unwrap();
+        assert_eq!(j.all::<serde_json::Value>("slots").unwrap().len(), 1);
     }
 
     #[test]

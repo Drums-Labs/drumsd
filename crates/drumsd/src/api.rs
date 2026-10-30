@@ -137,6 +137,9 @@ async fn adopt(State(m): S, Json(r): Json<AdoptReq>) -> J {
 async fn get_ckpt(State(m): S, Path(id): Path<String>) -> J {
     Ok(Json(json!(m.ckpt(&id)?)))
 }
+async fn delete_ckpt(State(m): S, Path(id): Path<String>) -> J {
+    Ok(Json(m.delete_checkpoint(&id).await?))
+}
 async fn list_slots(State(m): S) -> Json<Value> {
     let v: Vec<Value> = m.slots.read().unwrap().values().map(|s| view(&s.view.read().unwrap())).collect();
     Json(json!(v))
@@ -195,7 +198,7 @@ pub fn router(m: Arc<Manager>) -> Router {
         .route("/metrics", get(metrics))
         .route("/openapi.json", get(openapi))
         .route("/v1/checkpoints", get(list_ckpts).post(adopt))
-        .route("/v1/checkpoints/:id", get(get_ckpt))
+        .route("/v1/checkpoints/:id", get(get_ckpt).delete(delete_ckpt))
         .route("/v1/slots", get(list_slots).post(create))
         .route("/v1/slots/:id", get(get_slot).delete(destroy))
         .route("/v1/slots/:id/gates", get(gates))

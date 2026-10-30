@@ -349,6 +349,54 @@ impl Manager {
         .map_err(e500)?
     }
 
+    /// Delete a saved state: stop its template server, remove its images (records and logs are kept under
+    /// state_dir/forgotten). Refused while any env made from it still exists, and for installed images.
+    pub async fn delete_checkpoint(self: &Arc<Self>, id: &str) -> R<Value> {
+        let c = self.ckpt(id)?;
+        if c.captured_from.is_none() {
+            return Err(ApiError::new(409, format!("checkpoint {id} is an installed image, not a saved state")));
+        }
+        let users: Vec<String> = self.slots.read().unwrap().values().filter_map(|s| {
+            let v = s.view.read().unwrap();
+            (v.checkpoint == id && !v.state.is_terminal()).then(|| v.id.clone())
+        }).collect();
+        if !users.is_empty() {
+            return Err(ApiError::new(409, format!("checkpoint {id} is used by envs {users:?}: close them first")));
+        }
+        self.ckpts.write().unwrap().remove(id);
+        let me = self.clone();
+        let c2 = c.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let sp = slotfs::paths(&me.cfg.state_dir, c2.slot);
+            if let Some(pid) = template::adopt(&c2.socket, &sp.images) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            let _ = std::fs::remove_file(&c2.socket);
+            let _ = std::fs::remove_file(template::pidfile_for(&c2.socket));
+            let _ = kill_slot(&slotfs::marker_for(&me.cfg.state_dir, c2.slot));
+            let mut freed = 0u64;
+            for d in ["images", "upper", "upper.snap", "work", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root"] {
+                let p = sp.dir.join(d);
+                if p.symlink_metadata().is_ok() {
+                    freed += dir_bytes(&p);
+                    std::fs::remove_dir_all(&p)?;
+                }
+            }
+            let keep = me.cfg.state_dir.join("forgotten").join(format!("slot{}-{}", c2.slot, (drumsd_linux::now_epoch() * 1000.0) as u64));
+            std::fs::create_dir_all(keep.parent().unwrap())?;
+            if sp.dir.exists() {
+                std::fs::rename(&sp.dir, &keep)?;
+            }
+            Ok::<_, std::io::Error>(freed)
+        })
+        .await
+        .map_err(e500)?
+        .map_err(e500)?;
+        let _ = self.journal.remove("checkpoints", id);
+        self.event(json!({"checkpoint": id, "deleted": true, "freed_bytes": res}));
+        Ok(json!({"id": id, "deleted": true, "freed_bytes": res}))
+    }
+
     fn ensure_server(&self, c: &CheckpointRecord) -> Result<i32, String> {
         let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
         if let Some(pid) = template::adopt(&c.socket, &sp.images) {
@@ -1613,6 +1661,15 @@ pub fn kill_slot(marker: &str) -> std::io::Result<()> {
         cgroup::kill_and_wait(&cgroup::slot_leaf(marker, l), Duration::from_secs(20))?;
     }
     cgroup::kill_and_wait(&cgroup::slot_cg(marker), Duration::from_secs(20)).map(|_| ())
+}
+
+fn dir_bytes(p: &Path) -> u64 {
+    let Ok(m) = p.symlink_metadata() else { return 0 };
+    if m.is_dir() {
+        std::fs::read_dir(p).map(|d| d.flatten().map(|e| dir_bytes(&e.path())).sum()).unwrap_or(0)
+    } else {
+        m.len()
+    }
 }
 
 pub fn hex_sha256(b: &[u8]) -> String {
