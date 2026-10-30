@@ -92,7 +92,7 @@ def calc_write_file(content_b64, label):
 
     def run(env):
         env.step({"type": "execute", "command": ["python3", "-c", write], "shell": False})
-        env.step({"type": "launch", "command": ["libreoffice", "--calc", "/home/user/IncomeStatement2.xlsx"], "shell": False})
+        env.step({"type": "launch", "command": ["libreoffice", "--calc", "--norestore", "/home/user/IncomeStatement2.xlsx"], "shell": False})
         env.step({"type": "execute", "command": ["python3", "-c", wait], "shell": False})
     run.__name__ = label
     return run
