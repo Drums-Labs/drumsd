@@ -108,11 +108,16 @@ pub struct QuiesceConfig {
     pub poll_ms: u64,
     #[serde(default = "d_q_attempts")]
     pub max_attempts: u32,
+    /// Optional: hold the new checkpoint until this many seconds after the dump started before the source check
+    /// (catches a process that sits idle and then exits within that time; costs up to that much per capture). 0 = the
+    /// check runs as soon as the checkpoint is adopted.
+    #[serde(default)]
+    pub confirm_s: f64,
 }
 
 impl Default for QuiesceConfig {
     fn default() -> Self {
-        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts() }
+        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0 }
     }
 }
 

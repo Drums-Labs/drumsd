@@ -1291,6 +1291,10 @@ impl Manager {
             let h = tokio::task::spawn_blocking(move || state_hash(&Guest::new(port, Duration::from_secs(30)))).await.map_err(e500)?.ok();
             let c = self.adopt_checkpoint(cid.clone(), into, h, Some(id.to_string())).await;
             // 5. every dumped process still runs in the source (no action was applied to it since the dump)
+            let hold = Duration::from_secs_f64(self.cfg.quiesce.confirm_s.clamp(0.0, 60.0)).saturating_sub(td.elapsed());
+            if !hold.is_zero() {
+                tokio::time::sleep(hold).await;
+            }
             let cg2 = cg.clone();
             let after = tokio::task::spawn_blocking(move || quiesce::sample(&cg2)).await.map_err(e500)?.map_err(e500)?;
             let gone = q::source_after_dump(&sample, &dumped, &after);
