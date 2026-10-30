@@ -1297,6 +1297,11 @@ impl Manager {
             return Err(fail(FailureClass::GateFailed, msg, &gates, &t));
         }
 
+        // the episode's OOM baseline, taken BEFORE the task setup: an app the setup launches can be OOM-killed while it
+        // starts, and that kill belongs to this episode (it used to be taken after the setup and missed it). Any growth
+        // of the slot cgroup's oom_kill counter (hierarchical memory.events: every task of the tree) invalidates it.
+        let _ = slotfs::record(&sp, json!({"oom_kill_baseline": cgroup::oom_kills(&slot_cg)}));
+
         // 8. task setup (after the hash: the hash is of the checkpoint's state)
         if let Some(task) = task {
             let ts = Instant::now();
@@ -1315,8 +1320,6 @@ impl Manager {
                    "pageshare": {"mode": if private {"pool"} else {"template"}, "socket": c.socket, "criu": if private {Some(self.cfg.criu.clone())} else {None}},
                    "last_restore": {"by": "drumsd", "log": log.file_name().map(|x| x.to_string_lossy().to_string()), "epoch": drumsd_linux::now_epoch()}}),
         );
-        // the episode's OOM baseline: any growth of the slot cgroup's oom_kill counter from here on invalidates it
-        let _ = slotfs::record(&sp, json!({"oom_kill_baseline": cgroup::oom_kills(&slot_cg)}));
         t.insert("sync_total".into(), round3(t_all.elapsed().as_secs_f64()));
         Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm })
     }
@@ -1983,6 +1986,10 @@ impl Manager {
         let me = self.clone();
         let t = task.clone();
         let r = tokio::task::spawn_blocking(move || me.osw("evaluate", num, &t, None)).await.map_err(e500)?;
+        // an OOM kill since the last step (GIMP was killed while it built the filter the last click opened, then the
+        // checker scored 0.0 and the reward came back valid) or during the checker's own postconfig actions: the
+        // validity the reward carries is read only after this check
+        self.check_oom(&slot);
         let v = slot.view.read().unwrap().clone();
         let valid = v.validity == Validity::Valid && matches!(v.state, SlotState::Ready);
         let (score, err, detail) = match &r {
