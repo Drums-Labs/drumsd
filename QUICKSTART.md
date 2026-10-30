@@ -54,8 +54,9 @@ with c.create(image="osworld-ubuntu", task="035f41ba") as env:   # OSWorld task 
   quiescent (no process or thread starting or exiting for 1 s, no task exiting, no unreaped zombie), dumps it, and
   rejects the dump if CRIU's tree differs from the quiescent one or a dumped process exits right after; then it waits
   and dumps again. If the tree never settles within 30 s it raises `NotQuiescent` (with the unstable processes) and
-  captures nothing. `env.wait_quiescent(timeout)` does the wait alone. A process that sits idle and then exits on a
-  timer later than that cannot be seen in advance: the alive gate still marks such children invalid.
+  captures nothing. `env.wait_quiescent(timeout)` does the wait alone.
+- A process that exits silently on a timer just after the dump is always caught, never a valid reward: the dump is redone,
+  or the child fails the alive gate. `quiesce.confirm_s` in drumsd.json redoes more such dumps, at that many seconds per capture.
 - A killed drumsd is restarted by systemd and reconciles its envs from its journal.
 - Metrics: `c.metrics()` and `env.metrics()` (latency per op, episodes by verdict, failures and retries by cause,
   cost from the host price per hour set at install: `--host-usd-per-hour`).
