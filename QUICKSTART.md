@@ -2,81 +2,76 @@
 
 Drums runs isolated Linux desktops (the OSWorld Ubuntu image) as checkpointed process trees on one host. You create
 environments, act in them, fork a reached state into copies, and get rewards from OSWorld's checkers, each tagged with
-whether every isolation and correctness gate passed.
+whether every isolation and correctness gate passed. Names: the SDK's env, saved state, fork and save are the API's
+slot, checkpoint, branch and capture.
 
-## Install
+## 1. Host
 
-Host: a fresh Ubuntu 24.04 x86_64 machine, 16 vCPU / 32 GiB / 120 GiB disk tested (AWS c8i.4xlarge, kernel 7.0.0-1014-aws).
+A fresh Ubuntu 24.04 x86_64 machine with cgroup v2 (the default), 16 vCPU, 32 GiB RAM and a 150 GiB disk, with outbound
+HTTPS during the install. Tested: AWS c8i.4xlarge in us-east-1 with the latest Ubuntu 24.04 AMI. Details, the network
+list and how many envs fit: [docs/host-requirements.md](docs/host-requirements.md).
+
+## 2. Install
 
 ```
 tar xzf drums-release-<commit>.tar.gz
-sudo ./drums-release-<commit>/install.sh            # about 6-7 minutes on c8i.4xlarge; add --remote to listen on all interfaces
+sudo ./drums-release-<commit>/install.sh          # 7-15 min; a progress line every 30 s
 ```
 
-It prints the URL and the API token. The token is also in `/etc/drums/token` (root only). The API listens on
-127.0.0.1 by default; from your machine, tunnel it: `ssh -L 7070:127.0.0.1:7070 <host>`.
+At the end it prints the URL (`http://127.0.0.1:7070`) and where the API token is: `/etc/drums/token` (root only, 0600).
+The token is never printed. Every input is pinned in `install/lock.json` and checked; the first mismatch stops the
+install. Log: `/var/log/drums-install.log`. Running `install.sh` again is safe (it reuses what is already there).
 
-Every input is pinned in `install/lock.json` (apt snapshot and versions, image and file sha256, source commits,
-Rust toolchain, a hashed Python lock); the installer stops at the first mismatch. Log: `/var/log/drums-install.log`.
+The API listens on 127.0.0.1. From your laptop, tunnel it: `ssh -L 7070:127.0.0.1:7070 <host>`. `--remote` binds all
+interfaces instead, over plain HTTP with only the bearer token: use it only inside a private network.
 
-## Reboots (EC2 stop/start)
-
-The state dir is a tmpfs and the image mount is an nbd attachment, so a reboot removes both; envs that were running are gone.
-`drums-boot.service` (before drumsd) mounts the state tmpfs again, loads nbd/overlay and re-attaches the verified image
-read-only; `drums-origin.service` then re-provisions the clean checkpoint (a few minutes). Nothing is downloaded or rebuilt.
-Until it finishes, `GET /v1/checkpoints` shows `stale: true` with `stale_reason: "state_lost: ..."`, `/v1/health` has
-`ok: false` and a warning, and creating from it returns 409 `checkpoint_stale` (SDK: `CheckpointStale`). If a unit fails,
-see `journalctl -u drums-boot -u drums-origin`; re-running `install.sh` is also safe (it reuses the built CRIU).
-
-## Use
+## 3. Connect
 
 ```
-python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install /opt/drums/sdk/drums-*.whl   # any user; standard library only
-export DRUMS_URL=http://127.0.0.1:7070 DRUMS_TOKEN=<token>
+python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install /opt/drums/sdk/drums-*.whl     # any user; no dependencies
+export DRUMS_URL=http://127.0.0.1:7070 DRUMS_TOKEN=$(sudo cat /etc/drums/token)
 ```
 
 ```python
 import drums
-c = drums.connect()                                        # DRUMS_URL, DRUMS_TOKEN
-with c.create(image="osworld-ubuntu", task="035f41ba") as env:   # OSWorld task id, JSON path, or dict
-    env.wait_valid()                                       # this episode's gates passed
-    env.step("pyautogui.hotkey('ctrl', 'home')")           # pyautogui code or {"type": "execute", ...}
-    obs = env.observe()                                    # obs.png + obs.meta
-    kids = env.fork(8)                                     # 8 independent copies of this state
-    for k in kids:
-        k.step("pyautogui.write('Year_Profit')")
-        r = k.verify()                                     # raises InvalidEpisode if a gate failed
-        print(k.id, r.score, r.valid)
-        k.close()
-    state = env.save()                                     # later: c.create(from_state=state); c.delete_state(state) frees it
-    print(c.metrics()["cost"])                             # USD per valid episode / per verified reward
+with drums.connect() as client:                         # DRUMS_URL, DRUMS_TOKEN; closes this client's envs at the end
+    client.reset_metrics()                              # cost from now on (the window otherwise includes idle time)
+    with client.create(task="e0df059f") as env:         # an OSWorld task id (8+ characters), a JSON path, or a dict
+        env.wait_valid()                                # this episode's gates passed (5 s after ready)
+        obs = env.observe()                             # obs.png (1920x1080 PNG), obs.meta (instruction, ...)
+        env.step("pyautogui.hotkey('ctrl', 'alt', 't')")   # pyautogui code, or an action dict
+        with env.fork(4, keep_state=False) as kids:      # 4 independent copies; their saved state is deleted with them
+            for k in kids:
+                k.step({"type": "execute", "command": ["ls", "Desktop"]})
+                r = k.verify(strict=False)              # the task's checker
+                print(k.id, r.score, r.valid, r.invalid_reasons)
+        state = env.save()                              # later: client.create(from_state=state)
+        client.delete_state(state)                      # or let its lease delete it (30 min unused)
+    print(client.metrics()["cost"])                     # USD per valid episode / verified reward, this window
 ```
 
-## What to know
+A longer loop: `examples/rl_loop.py`. All actions and what a screenshot is: [docs/actions-and-observations.md](docs/actions-and-observations.md).
 
-- `verify()` raises `InvalidEpisode` (reward attached, `valid=False`) instead of returning a reward from an episode
-  whose gates did not all pass. `verify(strict=False)` returns it flagged.
-- Failed restores raise `RestoreFailed` (env down) or `GateFailed` (env quarantined), with the gate report in `.record`.
-  drumsd retries only failures that happened before any restored process ran; the SDK retries only GETs while drumsd
-  is restarting. Nothing else is retried.
-- `fork()`/`save()` are safe right after an action; no sleep is needed. drumsd waits until the env's process tree is
-  quiescent (no process or thread starting or exiting for 1 s, no task exiting, no unreaped zombie), dumps it, and
-  rejects the dump if CRIU's tree differs from the quiescent one or a dumped process exits right after; then it waits
-  and dumps again. If the tree never settles within 30 s it raises `NotQuiescent` (with the unstable processes) and
-  captures nothing. `env.wait_quiescent(timeout)` does the wait alone.
-- A process that exits silently on a timer just after the dump is always caught, never a valid reward: the dump is redone,
-  or the child fails the alive gate. `quiesce.confirm_s` in drumsd.json redoes more such dumps, at that many seconds per capture.
-- A killed drumsd is restarted by systemd and reconciles its envs from its journal.
-- `c.envs()` lists live envs. Destroyed envs keep their records; `c.env_records(include_destroyed=True)` pages through
-  them (`GET /v1/slots?include_destroyed=true&limit=&after=`).
-- The desktop runs the image's own login (locale, session environment, settings daemons), as the image's display manager
-  would. An installed image's checkpoint made by other runtime sources or another image inspection is stale: drumsd
-  refuses envs from it (`CheckpointStale`) until `install.sh` is run again, which provisions the origin anew.
-- Metrics: `c.metrics()` and `env.metrics()` (latency per op, episodes by verdict, failures and retries by cause,
-  cost from the host price per hour set at install: `--host-usd-per-hour`).
-- Examples: `examples/fork_and_verify.py`, `examples/concurrency.py`. API: `api/openapi.json`.
-- Not supported yet: more than one host, GPUs, tasks that need the internet inside the desktop, other images.
-- Records of destroyed envs: an env that ended valid keeps only a small summary (`<forgotten_dir>/summary/`); failed,
-  quarantined and rejected ones keep the full archive (`<forgotten_dir>/full/`), which is never pruned unless you set
-  `retention.full_max_gib`. Summaries are capped at `retention.summary_max_gib` (default 2), oldest deleted first.
-  `retention.mode: "keep_all"` keeps a full archive for every env. See the README, "Retention of destroyed-env records".
+## 4. What to know
+
+- **Train only on `Reward.valid`.** `verify()` raises `InvalidEpisode` instead of returning a reward from an invalid
+  episode; `verify(strict=False)` returns it with `valid=False` and `invalid_reasons`. A quarantined env is always
+  invalid. [docs/validity.md](docs/validity.md).
+- **The first 5 s of an episode.** create, reset and fork children are `ready` with verdict `pending`; the last gate
+  resolves 5 s later. An action that ends a process in those 5 s makes the episode invalid: call `env.wait_valid()` first.
+- **Cleanup.** Envs and saved states unused for 30 min are reaped by drumsd (leases; `idle_timeout=`/`ttl=` on create,
+  fork, save; 0 = never). The SDK also closes the envs a client created at exit, on SIGTERM/SIGHUP and at the end of a
+  `with` block. `fork()` returns the children plus `.state`; `keep_state=False` deletes it with them.
+  [docs/lifecycle.md](docs/lifecycle.md).
+- **Errors are typed.** `RestoreFailed` (env down; `reset()` retries), `GateFailed` (env quarantined), `TaskSetupFailed`,
+  `ActionFailed` (the action ran and exited non-zero; `step(..., check=False)` returns it), `EnvGone` (the env was closed
+  or reaped: replace it), `Overloaded` (the host is full: retry later), `NotQuiescent` (fork/save found no stable
+  moment in 30 s; nothing was saved), `CheckpointStale` (re-run the installer). drumsd retries only failures before any
+  restored process ran; the SDK retries only GETs while drumsd restarts.
+- **fork() and save() are safe right after an action.** drumsd waits until the process tree is quiescent and checks the
+  dump against it.
+- **Metrics.** `client.metrics()` and `env.metrics()`: latency per operation, episodes by verdict, failures and retries by
+  cause, rewards, and a cost from the host price per hour set at install (`--host-usd-per-hour`).
+- **Reboots.** `drums-boot.service` and `drums-origin.service` bring the host back after a stop/start (a few minutes);
+  envs that were running are gone.
+- **API.** `api/openapi.json` (also `GET /openapi.json`). Every route except `GET /healthz` needs `Authorization: Bearer <token>`.

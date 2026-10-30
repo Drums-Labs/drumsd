@@ -3,7 +3,7 @@
  "info": {
   "title": "drumsd",
   "version": "0.4.2",
-  "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote."
+  "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote. Names: the SDK's env, saved state, fork and save are this API's slot, checkpoint, branch and capture. Leases: an env or saved state nobody uses is reaped (defaults in drumsd.json `lease`, 1800 s idle; per request `idle_timeout_s`, `ttl_s`, 0 = never). Every request whose path names a slot (`/v1/slots/{id}...`) counts as a use of it. A destroyed slot answers 410 with code `env_gone` to every operation except GET and DELETE (DELETE is idempotent: 200 with the record)."
  },
  "paths": {
   "/healthz": {
@@ -365,7 +365,7 @@
    },
    "delete": {
     "summary": "Destroy a slot",
-    "description": "Kill its tree, remove its bulky state, keep its records and logs (moved to state/forgotten/).",
+    "description": "Kill its tree, remove its bulky state, keep its records (a full archive or, for a slot that ended valid, a summary, in forgotten_dir). Idempotent: a destroyed slot returns its record with 200. Its saved state's idle clock starts; a state made by a branch with delete_state_with_children is deleted when its last slot closes.",
     "responses": {
      "200": {
       "description": "OK",
@@ -465,6 +465,16 @@
         }
        }
       }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     },
     "parameters": [
@@ -517,6 +527,16 @@
      },
      "502": {
       "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
       "content": {
        "application/json": {
         "schema": {
@@ -582,6 +602,16 @@
      },
      "502": {
       "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
       "content": {
        "application/json": {
         "schema": {
@@ -676,6 +706,16 @@
         }
        }
       }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     },
     "requestBody": {
@@ -695,6 +735,16 @@
          "quiesce_window_s": {
           "type": "number",
           "description": "Capture readiness: the quiet window (s) (default 1)."
+         },
+         "idle_timeout_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The saved state's lease (as state_idle_timeout_s in branch)."
+         },
+         "ttl_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The saved state's lease (as state_ttl_s in branch)."
          }
         }
        }
@@ -761,6 +811,16 @@
      },
      "500": {
       "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
       "content": {
        "application/json": {
         "schema": {
@@ -847,6 +907,16 @@
         }
        }
       }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     },
     "requestBody": {
@@ -924,6 +994,16 @@
         }
        }
       }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     },
     "requestBody": {
@@ -991,6 +1071,16 @@
      },
      "500": {
       "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
       "content": {
        "application/json": {
         "schema": {
@@ -1112,7 +1202,7 @@
   "/v1/slots/{id}/verify": {
    "post": {
     "summary": "Verify (reward)",
-    "description": "Waits for the episode's pending gate, runs the task's OSWorld checker (postconfig, getters, metric) and returns {score, valid, validity, gates, checker_error, episode, task_id, seconds}. valid is true only when every gate passed and the slot is ready; a score from any other episode is returned with valid=false.",
+    "description": "Waits for the episode's pending gate, runs the task's OSWorld checker (postconfig, getters, metric) and returns {score, valid, validity, invalid_reasons, checker_skipped, gates, checker_error, state, episode, task_id, seconds}. valid is true only when every gate passed and the slot is ready (never quarantined in the episode, no OOM kill); a score from any other episode is returned with valid=false. On a quarantined slot the checker is not run: score null, checker_skipped 'quarantined: <reason>'. invalid_reasons lists why in words (empty when valid).",
     "responses": {
      "200": {
       "description": "OK",
@@ -1129,6 +1219,16 @@
      },
      "409": {
       "description": "nothing running"
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     }
    }
@@ -1150,6 +1250,16 @@
      },
      "422": {
       "description": "setup failed"
+     },
+     "410": {
+      "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
      }
     },
     "requestBody": {
@@ -1200,13 +1310,19 @@
      },
      "code": {
       "type": "string",
-      "description": "Machine-readable error code when present, e.g. not_quiescent"
+      "description": "Machine-readable error code when present: not_found (404), env_gone (410: the slot was destroyed; closed_reason says why when a lease did it), wrong_state (409), not_quiescent (409), checkpoint_stale (409), overloaded (429), state_dir_full (507)."
      },
      "unstable": {
       "type": "array"
      },
      "quiescence": {
       "type": "object"
+     },
+     "closed_reason": {
+      "type": [
+       "string",
+       "null"
+      ]
      }
     },
     "required": [
@@ -1243,6 +1359,20 @@
      },
      "task": {
       "$ref": "#/components/schemas/Task"
+     },
+     "setup": {
+      "type": "boolean",
+      "description": "Run the task's setup after every restore (default true for a task given here)."
+     },
+     "idle_timeout_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Lease: destroyed after this many seconds with no request naming it. Default: lease.env_idle_timeout_s (1800). 0 = never."
+     },
+     "ttl_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Lease: destroyed this many seconds after it was created. Default: lease.env_ttl_s (none). 0 = never."
      }
     }
    },
@@ -1366,6 +1496,37 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 64
+     },
+     "quiesce_timeout_s": {
+      "type": "number"
+     },
+     "quiesce_window_s": {
+      "type": "number"
+     },
+     "idle_timeout_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The children's lease (as in create)."
+     },
+     "ttl_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The children's lease (as in create)."
+     },
+     "state_idle_timeout_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The saved state's lease: deleted after this many seconds with no slot made from it (counted from its creation or its last slot's close). Default lease.state_idle_timeout_s (1800). 0 = never."
+     },
+     "state_ttl_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The saved state's lease: deleted this many seconds after it was made, once no slot uses it. Default none. 0 = never."
+     },
+     "delete_state_with_children": {
+      "type": "boolean",
+      "default": false,
+      "description": "Delete the saved state this branch makes as soon as no slot made from it exists (its children all closed). SDK: fork(keep_state=False)."
      }
     }
    },
@@ -1386,6 +1547,16 @@
      },
      "children_ready_s": {
       "type": "number"
+     },
+     "state": {
+      "type": "string",
+      "description": "The saved state's (checkpoint's) id: the same as checkpoint.id."
+     },
+     "delete_state_with_children": {
+      "type": "boolean"
+     },
+     "seconds": {
+      "type": "number"
      }
     }
    },
@@ -1402,8 +1573,10 @@
      "state_hash",
      "isolation",
      "alive_after_resume",
-     "no_oom_kill"
-    ]
+     "no_oom_kill",
+     "not_quarantined"
+    ],
+    "description": "no_oom_kill and not_quarantined are only ever added as failed: an OOM kill during the episode, or a quarantine of the slot (detail.reason names why)."
    },
    "GateResult": {
     "type": "object",
@@ -1451,7 +1624,8 @@
        "$ref": "#/components/schemas/Gate"
       }
      }
-    }
+    },
+    "description": "valid only when every gate passed and the slot was never quarantined in the episode. A quarantined slot's validity is {verdict: invalid, gates: [..., not_quarantined]}."
    },
    "GateView": {
     "type": "object",
@@ -1643,6 +1817,53 @@
      },
      "updated_epoch": {
       "type": "number"
+     },
+     "lease": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "idle_timeout_s": {
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "ttl_s": {
+        "type": [
+         "number",
+         "null"
+        ]
+       }
+      }
+     },
+     "last_used_epoch": {
+      "type": [
+       "number",
+       "null"
+      ],
+      "description": "The last request naming this slot."
+     },
+     "lease_expires_epoch": {
+      "type": [
+       "number",
+       "null"
+      ],
+      "description": "When the lease runs out if the slot is not used again (null: no lease, or destroyed)."
+     },
+     "closed_reason": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Why it was destroyed when not by a client's DELETE, e.g. 'lease: idle 1800 s'."
+     },
+     "closed_epoch": {
+      "type": [
+       "number",
+       "null"
+      ]
      }
     }
    },

@@ -31,8 +31,15 @@ stopped; the pre-resume hook puts it back before any task runs; the cgroup gate 
 
 Every create/reset starts an episode with a gate report. Gates: `lock_applied`, `lock_pre_resume`, `cgroup`,
 `init_identity`, `mount_table`, `netns`, `guest_ready`, `state_hash`, `isolation`, `alive_after_resume` (resolves
-`alive_after_s` after the slot answered). An episode is `valid` only when every gate passed; `pending` is never valid.
-A failed gate quarantines the slot. Only failures before any restored task ran are retried (CRIU detach race, template
+`alive_after_s` after the slot answered), plus `no_oom_kill` and `not_quarantined`, which are only ever added as failed
+(an OOM kill in the episode; a quarantine, with its reason). An episode is `valid` only when every gate passed; `pending`
+is never valid. A failed gate quarantines the slot, and a quarantined slot's episode is invalid in every signal (verdict,
+verify's `valid`, the metrics). User-facing: docs/validity.md.
+
+## Leases
+
+Envs and saved states nobody uses are reaped (`lease` in drumsd.json; defaults 1800 s idle, no TTL; per request
+`idle_timeout_s`, `ttl_s`). See docs/lifecycle.md. Only failures before any restored task ran are retried (CRIU detach race, template
 refusal -> private restore, template server down -> restart); every attempt and its seconds are in `cost.attempts`.
 
 ## State and crash safety
@@ -90,7 +97,9 @@ the API binds to 127.0.0.1 unless `allow_remote` is set. Main routes: `POST /v1/
 quarantine|release`, `GET /v1/slots/{id}/gates|screenshot|metrics`, `DELETE /v1/slots/{id}`, `GET /v1/health`,
 `GET /v1/metrics`, `GET /v1/tasks[/{id}]`, `GET /metrics` (Prometheus).
 
-The Python SDK (`python/drums`, 0.2) and the one-command install are in QUICKSTART.md.
+The Python SDK (`python/drums`, 0.2) and the one-command install are in QUICKSTART.md. The user docs that ship in the
+release tarball are QUICKSTART.md, CHANGELOG.md, docs/ (docs/README.md becomes the release's README.md), examples/ and
+api/openapi.json.
 
 ## Build and test
 
