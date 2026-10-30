@@ -2,7 +2,7 @@
  "openapi": "3.1.0",
  "info": {
   "title": "drumsd",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote."
  },
  "paths": {
