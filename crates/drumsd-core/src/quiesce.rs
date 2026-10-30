@@ -72,21 +72,18 @@ fn u(kind: &str, pid: i32, tid: Option<i32>, comm: &str) -> Unstable {
     Unstable { kind: kind.into(), pid, tid, comm: comm.into() }
 }
 
-/// Tasks the kernel already marks as leaving.
+/// Tasks the kernel marks as on their way out: `PF_EXITING` on a task that is not a zombie yet (it is inside
+/// do_exit), or state `X`. A zombie that stays a zombie is a settled state (CRIU dumps and restores it as a zombie and
+/// the alive gate does not count it); a zombie appearing or being reaped is a change, see [`changes`].
 pub fn kernel_issues(s: &Sample) -> Vec<Unstable> {
     let mut v = vec![];
     for (tid, t) in &s.tasks {
         let tid_opt = (*tid != t.tgid).then_some(*tid);
-        if t.state == 'Z' {
-            v.push(u("zombie", t.tgid, tid_opt, &t.comm));
-        } else if t.state == 'X' || t.state == 'x' {
+        if t.state == 'X' || t.state == 'x' {
             v.push(u("dead", t.tgid, tid_opt, &t.comm));
-        } else if t.flags & PF_EXITING != 0 {
+        } else if t.state != 'Z' && t.flags & PF_EXITING != 0 {
             v.push(u("exiting", t.tgid, tid_opt, &t.comm));
         }
-    }
-    for (pid, (_, comm)) in &s.zombies {
-        v.push(u("zombie", *pid, None, comm));
     }
     v
 }
@@ -104,6 +101,23 @@ pub fn changes(a: &Sample, b: &Sample) -> Vec<Unstable> {
         match a.tasks.get(tid) {
             Some(t1) if t1.start == t.start && t1.tgid == t.tgid => {}
             _ => v.push(if *tid == t.tgid { u("process_started", *tid, None, &t.comm) } else { u("thread_started", t.tgid, Some(*tid), &t.comm) }),
+        }
+    }
+    for (tid, t) in &a.tasks {
+        if let Some(t2) = b.tasks.get(tid) {
+            if t2.start == t.start && (t.state == 'Z') != (t2.state == 'Z') {
+                v.push(u(if t2.state == 'Z' { "became_zombie" } else { "left_zombie" }, t.tgid, (*tid != t.tgid).then_some(*tid), &t.comm));
+            }
+        }
+    }
+    for (pid, (_, comm)) in &a.zombies {
+        if !b.zombies.contains_key(pid) {
+            v.push(u("zombie_reaped", *pid, None, comm));
+        }
+    }
+    for (pid, (_, comm)) in &b.zombies {
+        if !a.zombies.contains_key(pid) {
+            v.push(u("zombie_appeared", *pid, None, comm));
         }
     }
     v
@@ -300,7 +314,11 @@ pub fn compare_dump(s: &Sample, dumped: &BTreeMap<i32, DumpedTask>) -> Vec<Unsta
     for (pid, d) in dumped {
         let comm = d.comm.clone().unwrap_or_default();
         if d.state != TASK_ALIVE && d.state != TASK_STOPPED {
-            v.push(u("dumped_dead", *pid, None, &comm));
+            // a zombie in the dump is fine only if it was already a settled zombie in the quiescent sample
+            let settled = s.zombies.contains_key(pid) || s.tasks.get(pid).map(|t| t.state == 'Z').unwrap_or(false);
+            if !settled {
+                v.push(u("dumped_dead", *pid, None, &comm));
+            }
             continue;
         }
         if !procs.contains_key(pid) {
@@ -394,10 +412,9 @@ mod tests {
     }
 
     #[test]
-    fn exiting_and_zombie_tasks_block_and_time_out_with_the_reason() {
+    fn an_exiting_task_blocks_and_times_out_with_the_reason() {
         let mut s = sample(&[(20, 20, 200, "chrome"), (30, 30, 300, "bash")]);
         s.tasks.get_mut(&20).unwrap().flags |= PF_EXITING;
-        s.zombies.insert(31, (30, "sleep".into()));
         let mut w = Waiter::new(Params { window_s: 0.2, timeout_s: 1.0, poll_ms: 50 }, 0.0);
         let mut v = Verdict::Wait;
         let mut now = 0.0;
@@ -407,8 +424,27 @@ mod tests {
         }
         assert!(matches!(v, Verdict::TimedOut));
         let kinds: BTreeSet<String> = w.report.unstable.iter().map(|x| x.kind.clone()).collect();
-        assert!(kinds.contains("exiting") && kinds.contains("zombie"), "{:?}", w.report.unstable);
+        assert!(kinds.contains("exiting"), "{:?}", w.report.unstable);
         assert!(!w.report.quiescent);
+    }
+
+    #[test]
+    fn a_settled_zombie_is_quiescent_but_a_zombie_appearing_or_reaped_is_a_change() {
+        let mut s = sample(&[(30, 30, 300, "python")]);
+        s.zombies.insert(31, (30, "python3".into()));
+        let mut zl = s.clone();
+        zl.tasks.insert(40, TaskInfo { tgid: 40, start: 400, state: 'Z', flags: PF_EXITING, comm: "leader".into() });
+        assert!(kernel_issues(&zl).is_empty(), "zombies are not 'exiting'");
+        let mut w = Waiter::new(Params { window_s: 0.2, timeout_s: 5.0, poll_ms: 50 }, 0.0);
+        w.feed(s.clone(), 0.0, 1.0);
+        assert!(matches!(w.feed(s.clone(), 0.25, 1.0), Verdict::Quiescent(_)));
+        let mut reaped = s.clone();
+        reaped.zombies.clear();
+        assert_eq!(changes(&s, &reaped), vec![u("zombie_reaped", 31, None, "python3")]);
+        assert_eq!(changes(&reaped, &s), vec![u("zombie_appeared", 31, None, "python3")]);
+        let mut z = s.clone();
+        z.tasks.get_mut(&30).unwrap().state = 'Z';
+        assert_eq!(changes(&s, &z), vec![u("became_zombie", 30, None, "python")]);
     }
 
     #[test]
@@ -455,9 +491,12 @@ mod tests {
     fn dump_and_sample_must_match() {
         let d = parse_dump_log(LOG).unwrap();
         let good = sample(&[(12804, 12804, 1, "python3"), (13493, 13493, 2, "chrome"), (13494, 13493, 3, "chrome"), (13600, 13600, 4, "chrome")]);
-        // the dead task in the dump is reported (it was exiting when frozen)
+        // the dead task in the dump is reported (it was exiting when frozen) unless it was a settled zombie already
         let v = compare_dump(&good, &d);
         assert_eq!(v, vec![u("dumped_dead", 13500, None, "")]);
+        let mut gz = good.clone();
+        gz.zombies.insert(13500, (12804, "sh".into()));
+        assert!(compare_dump(&gz, &d).is_empty());
         let mut d2 = d.clone();
         d2.remove(&13500);
         assert!(compare_dump(&good, &d2).is_empty());

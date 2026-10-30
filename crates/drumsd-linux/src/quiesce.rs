@@ -111,7 +111,7 @@ mod tests {
         }
     }
 
-    /// A zombie child (exited, not reaped) is reported, and an unreaped zombie keeps the tree from being quiescent.
+    /// A zombie child (exited, not reaped) is in the sample, and its appearance is a change.
     #[test]
     fn a_zombie_child_is_seen() {
         let cg = crate::procfs::cgroup_path(std::process::id() as i32).unwrap();
@@ -120,6 +120,7 @@ mod tests {
             eprintln!("skipped: no readable cgroup");
             return;
         }
+        let s0 = sample(&p).unwrap();
         let child = std::process::Command::new("true").spawn().unwrap();
         let cpid = child.id() as i32;
         // wait for it to become a zombie (not reaped: no wait() yet)
@@ -132,8 +133,8 @@ mod tests {
         let s = sample(&p).unwrap();
         let in_cg = s.tasks.get(&cpid).map(|t| t.state);
         assert!(s.zombies.contains_key(&cpid) || in_cg == Some('Z'), "zombie {cpid} seen: zombies {:?} task {:?}", s.zombies, in_cg);
-        let issues = drumsd_core::quiesce::kernel_issues(&s);
-        assert!(issues.iter().any(|x| x.pid == cpid && x.kind == "zombie"));
+        let ch = drumsd_core::quiesce::changes(&s0, &s);
+        assert!(ch.iter().any(|x| x.pid == cpid), "the new zombie is a change: {ch:?}");
         let mut child = child;
         let _ = child.wait();
     }
