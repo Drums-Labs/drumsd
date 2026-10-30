@@ -74,6 +74,53 @@ pub struct Config {
     /// pre-resume action, before any restored task runs. The cgroup gate proves the limits afterwards.
     #[serde(default)]
     pub restore_cpu_boost: bool,
+    /// drums-criu app-compat build: name `--nested-pidns` on restore (dump side is the capture verb's), so sandboxed
+    /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.
+    #[serde(default)]
+    pub nested_pidns: bool,
+    /// File holding the API bearer token (generated at install, mode 0600). Every route except `GET /healthz` needs
+    /// `Authorization: Bearer <token>`. drumsd refuses to start without one.
+    pub token_file: Option<PathBuf>,
+    /// Allow a non-loopback `listen` address. Off by default: the API is bound to localhost unless this is set.
+    #[serde(default)]
+    pub allow_remote: bool,
+    /// OSWorld task setup and checkers (the pinned OSWorld checkout run by an unprivileged helper).
+    pub osw: Option<OswConfig>,
+    /// Host price in USD per hour (on-demand or what the operator pays), for the cost metrics. 0 = cost not reported.
+    #[serde(default)]
+    pub host_usd_per_hour: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OswConfig {
+    /// Python of the OSWorld venv.
+    pub python: PathBuf,
+    /// drums_osw.py (setup / evaluate / stage).
+    pub helper: PathBuf,
+    /// OSWorld checkout at the pinned commit.
+    pub osworld_dir: PathBuf,
+    /// Shared download cache (OSWorld layout: <cache>/<task id>/...).
+    pub cache_dir: PathBuf,
+    /// The helper runs as this uid/gid (never root).
+    pub uid: u32,
+    pub gid: u32,
+    #[serde(default = "d_setup_t")]
+    pub setup_timeout_s: u64,
+    #[serde(default = "d_eval_t")]
+    pub eval_timeout_s: u64,
+    /// sudo password of the image's user (OSWorld's `client_password`).
+    #[serde(default = "d_pw")]
+    pub client_password: String,
+}
+
+fn d_setup_t() -> u64 {
+    600
+}
+fn d_eval_t() -> u64 {
+    600
+}
+fn d_pw() -> String {
+    "password".into()
 }
 
 fn yes() -> bool {
@@ -84,5 +131,64 @@ impl Config {
     pub fn load(p: &str) -> Result<Config, String> {
         let b = std::fs::read(p).map_err(|e| format!("{p}: {e}"))?;
         serde_json::from_slice(&b).map_err(|e| format!("{p}: {e}"))
+    }
+
+    /// Refuse unsafe exposure: a non-loopback address needs `allow_remote`, and a token is always required.
+    pub fn check_listen(&self) -> Result<(), String> {
+        let addr: std::net::SocketAddr = self.listen.parse().map_err(|e| format!("listen {:?}: {e}", self.listen))?;
+        if !addr.ip().is_loopback() && !self.allow_remote {
+            return Err(format!("listen {} is not a loopback address; set \"allow_remote\": true to expose the API (it is token-protected, not encrypted: use a tunnel or a private network)", self.listen));
+        }
+        Ok(())
+    }
+
+    /// The API token, read from `token_file` (whitespace trimmed). At least 32 characters.
+    pub fn load_token(&self) -> Result<String, String> {
+        let p = self.token_file.as_ref().ok_or("token_file is required (the API is never served without auth)")?;
+        let t = std::fs::read_to_string(p).map_err(|e| format!("token_file {}: {e}", p.display()))?.trim().to_string();
+        if t.len() < 32 {
+            return Err(format!("token in {} is shorter than 32 characters", p.display()));
+        }
+        Ok(t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(listen: &str, remote: bool, token: Option<PathBuf>) -> Config {
+        let mut v = serde_json::json!({"state_dir": "/s", "journal_dir": "/j", "lower": "/l", "image_sha256": "x", "py_src": "/p",
+            "py_config": "/c", "criu": "/criu", "vcpus": 4, "memory_mib": 4096, "port_base": 25000, "listen": listen, "allow_remote": remote});
+        if let Some(t) = token {
+            v["token_file"] = serde_json::json!(t);
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn remote_listen_needs_the_flag() {
+        assert!(cfg("127.0.0.1:7070", false, None).check_listen().is_ok());
+        assert!(cfg("[::1]:7070", false, None).check_listen().is_ok());
+        assert!(cfg("0.0.0.0:7070", false, None).check_listen().is_err());
+        assert!(cfg("10.0.0.5:7070", false, None).check_listen().is_err());
+        assert!(cfg("0.0.0.0:7070", true, None).check_listen().is_ok());
+    }
+
+    #[test]
+    fn token_is_required_and_long() {
+        assert!(cfg("127.0.0.1:1", false, None).load_token().is_err());
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("t");
+        std::fs::write(&p, "short\n").unwrap();
+        assert!(cfg("127.0.0.1:1", false, Some(p.clone())).load_token().is_err());
+        std::fs::write(&p, "abcdefghijklmnopqrstuvwxyz0123456789\n").unwrap();
+        assert_eq!(cfg("127.0.0.1:1", false, Some(p)).load_token().unwrap(), "abcdefghijklmnopqrstuvwxyz0123456789");
+    }
+
+    #[test]
+    fn old_configs_still_load() {
+        let c = cfg("127.0.0.1:7070", false, None);
+        assert!(!c.nested_pidns && c.osw.is_none() && c.host_usd_per_hour == 0.0);
     }
 }
