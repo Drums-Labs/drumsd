@@ -129,6 +129,10 @@ def one_task(client, task_id, prefix, conts, log):
     for a in prefix:
         r = env.step(a)
         log.append({"env": env.id, "action": a, "seconds": r.seconds})
+    # settle before the checkpoint: a process ended by the last action (closing a tab ends its renderer) must be gone
+    # before the capture, or it exits in every child after the restore and the alive gate counts it (it cannot tell
+    # that exit from a bad restore)
+    env.step({"type": "sleep", "seconds": 3})
     obs = env.observe()
     rec["parent_observation"] = {"size": [obs.width, obs.height], "meta": obs.meta}
     t1 = time.monotonic()
