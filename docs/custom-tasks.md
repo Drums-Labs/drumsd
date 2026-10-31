@@ -19,7 +19,7 @@ and how it is scored. With a **lab verifier**, the reward is a function you writ
 
 | step | parameters | runs |
 |---|---|---|
-| `upload_file` | `files: [{"local_path": HOST_PATH, "path": DESKTOP_PATH}]` | copies a host file into the desktop (parent directories are created) |
+| `upload_file` | `files: [{"local_path": HOST_PATH, "path": DESKTOP_PATH}]` | copies a host file under `/var/lib/drums/assets` into the desktop (parent directories are created) |
 | `download` | `files: [{"url": URL, "path": DESKTOP_PATH}]` | the host fetches the URL once (cached per task) and copies it in |
 | `launch` | `command: [...]`, `shell: false` | starts a program in the desktop and returns at once (an app server, Chrome, a file) |
 | `execute` | `command: [...]`, `shell: false` | runs a command in the desktop and waits; a non-zero exit fails the setup |
@@ -29,23 +29,43 @@ and how it is scored. With a **lab verifier**, the reward is a function you writ
   `launch`, `execute` and `open` run as the desktop user `user` (uid 1000, not root), with no network: an app the
   task needs has to run from what the image has (`python3` 3.10 with its standard library, Chrome, LibreOffice,
   GIMP, VS Code, Thunderbird, VLC) plus the files you copy in.
+- **Steps that need root.** The desktop user has no `sudo` (below). An `execute` or `command` step whose command runs
+  `sudo` (OSWorld's `echo {CLIENT_PASSWORD} | sudo -S ...`, also in an evaluator's `postconfig`) is trusted
+  provisioning: drumsd runs it in the env itself, as `user` but with `sudo` working for that step only, so the parts
+  under `sudo` run as root and the rest as `user`, as on the VM. It runs before the env is handed out (or in the
+  checker's postconfig), never while the agent acts. Its exit status is treated as OSWorld treats it (ignored, as on
+  the VM). Steps without `sudo` go to the desktop as before.
 - `evaluator`: a lab verifier (below), or any OSWorld evaluator (`func`, `result`, `expected`, `options`).
 
 If a setup step fails, the env is left `down` and `create()` raises `TaskSetupFailed` with the step's error.
 
 ## Your files on the host (trusted setup)
 
-`upload_file` reads `local_path` on the host as the unprivileged checker user `drums-osw`. Put your app and data in
-a directory of your own that this user can read, installed by the host's operator:
+`upload_file` reads `local_path` on the host as the unprivileged checker user `drums-osw`, and **only a regular file
+under the assets directory** `/var/lib/drums/assets` (created by the installer; `osw.assets_dir` in drumsd.json
+overrides it). Symlinks are resolved first, so a link out of the directory is refused too; any other path fails the
+setup (`TaskSetupFailed`: "... is outside the assets directory"). The host's operator installs a task's files there:
 
 ```
-sudo install -d -m 0755 /opt/acme/app /opt/acme/data
-sudo install -m 0644 acme_app.py /opt/acme/app/ && sudo install -m 0644 q3_sales.xlsx /opt/acme/data/
+sudo install -d -m 0755 /var/lib/drums/assets/acme/app /var/lib/drums/assets/acme/data
+sudo install -m 0644 acme_app.py /var/lib/drums/assets/acme/app/ && sudo install -m 0644 q3_sales.xlsx /var/lib/drums/assets/acme/data/
 ```
 
 Setup is trusted, the agent is not: nothing in this page gives the agent more than the desktop user's rights.
-**Warning:** `local_path` can name any host file `drums-osw` can read. That includes world-readable files outside your
-directory (for example `/etc/drums/drumsd.json`). Only send tasks you wrote. The API token is the trust boundary.
+
+## No privilege escalation for the agent
+
+The agent acts as `user`, and `user` gets no root in an env: it is in none of the administrator groups (`sudo`,
+`admin`, `wheel`, and `lxd`/`docker`, which give root through a daemon), neither in its processes nor in the env's
+`/etc/group` and `/etc/gshadow`, and every process it drives (the guest server, the desktop, everything they start)
+runs with `no_new_privs`, so `sudo`, `su`, `pkexec` and file capabilities do nothing. `sudo -n true` and
+`echo password | sudo -S true` both fail in an env.
+
+- A task whose **setup** needs root is supported: that step is provisioning (above).
+- A task that needs the **agent** to act as root is unsupported in this execution profile: `create()` raises
+  `TaskUnsupported` (HTTP 422, code `task_unsupported`) and `GET /v1/tasks` lists it with `"supported": false` and
+  the reason. In the pinned OSWorld: 5812b315 (create an SSH user), 94d95f96 (install Spotify), b6781586 (set the
+  system time zone).
 
 ## Lab verifiers: your reward function in Python
 
@@ -95,7 +115,7 @@ data. Saved states live in the RAM-backed state dir (~0.6 GB each) and are lost 
 
 ## Checklist for a new task
 
-1. The app runs as `user` with no network and no `sudo`.
+1. The app runs as `user` with no network and no `sudo`; its host files are under `/var/lib/drums/assets`.
 2. `create(task=...)` comes up `valid` (`wait_valid()`), and a screenshot shows the start state.
 3. The verifier returns 0 on the start state and 1 on a state you solved by hand (`env.step` actions, then `verify`).
 4. A wrong solution scores 0, and the verifier never raises on any state the agent can reach.

@@ -24,7 +24,7 @@ valid: restored correctly, isolated, never quarantined.
 | `docs/lifecycle.md` | env states, leases, cleanup, fork states, records, reboots, metrics windows |
 | `examples/` | `rl_loop.py` (a minimal leak-free loop), `fork_and_verify.py`, `concurrency.py` |
 | `api/openapi.json` | the HTTP API (also served at `GET /openapi.json`) |
-| `sdk/drums-0.2.4-py3-none-any.whl` | the Python SDK (standard library only) |
+| `sdk/drums-0.2.5-py3-none-any.whl` | the Python SDK (standard library only) |
 | `CHANGELOG.md` | what changed |
 | `install/`, `sources/`, `SHA256SUMS`, `RELEASE_COMMIT` | pinned inputs and source bundles the installer checks |
 
