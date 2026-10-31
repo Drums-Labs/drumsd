@@ -148,6 +148,14 @@ pub fn argv_marker(state_dir: &Path, slot: u32) -> String {
         .unwrap_or_else(|| marker_for(state_dir, slot))
 }
 
+/// Give `dst` the owner, group and mode bits of `src` (directories of a branch mirror its origin's).
+pub fn copy_access(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let m = fs::metadata(src)?;
+    std::os::unix::fs::chown(dst, Some(m.uid()), Some(m.gid()))?;
+    fs::set_permissions(dst, fs::Permissions::from_mode(m.mode() & 0o7777))
+}
+
 /// Hard-link every file of `src` into a new `dst` (same inodes: the template server accepts only its own inodes).
 /// `stats-restore` is not linked, CRIU rewrites it on every restore.
 pub fn link_images(src: &Path, dst: &Path) -> io::Result<usize> {
@@ -217,6 +225,11 @@ pub fn create_branch_dir(b: &BranchSpec) -> io::Result<SlotPaths> {
     fs::write(p.dir.join(SLOT_MARKER), serde_json::to_vec_pretty(&marker)?)?;
     let t0 = Instant::now();
     link_images(&po.images, &p.images)?;
+    // A slot of the hardened profile restores inside its own user namespace, where CRIU reads the images as the slot's mapped
+    // root: the branch gets the origin's access to its slot and images directories (drums-lab harden.prepare_slot_access,
+    // 0710 root:<slot base>), not drumsd's root-only 0700 (rc1 dev host: "Unable to open tty-info.img: Permission denied").
+    copy_access(&po.dir, &p.dir)?;
+    copy_access(&po.images, &p.images)?;
     cp_a(&po.snap, &p.snap)?;
     for n in COPIED_RECORDS {
         let s = po.dir.join(n);
@@ -321,6 +334,19 @@ pub fn image_inodes(images: &Path) -> io::Result<Vec<(String, u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_branch_gets_the_access_of_its_origin_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        fs::DirBuilder::new().mode(0o700).create(&a).unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o710)).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&b).unwrap();
+        copy_access(&a, &b).unwrap();
+        assert_eq!(fs::metadata(&b).unwrap().mode() & 0o7777, 0o710);
+        assert_eq!(fs::metadata(&b).unwrap().gid(), fs::metadata(&a).unwrap().gid());
+    }
 
     #[test]
     fn device_binds_of_a_hardened_checkpoint_are_restored_from_the_host_nodes() {
