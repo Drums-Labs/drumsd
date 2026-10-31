@@ -144,7 +144,7 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
     match &c.provenance {
         None => Some("made before provenance was recorded (drumsd < 0.4): re-provision the origin".into()),
         Some(p) if p != current => {
-            let diff: Vec<&str> = ["source_sha256", "inspection_sha256", "procview_dir"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
+            let diff: Vec<&str> = ["source_sha256", "inspection_sha256", "procview_dir", "harden"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
             Some(format!("made by other {} than this drumsd runs with: re-provision the origin", diff.join(" and ")))
         }
         _ => None,
@@ -163,6 +163,11 @@ pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
     // whether the origin's tree binds the per-env view: an origin made with the other setting is stale (re-provisioned)
     if let Some(pv) = cfg.as_ref().and_then(|c| c.get("procview_dir")).filter(|x| !x.is_null()) {
         v["procview_dir"] = pv.clone();
+    }
+    // the slot profile: an origin made unhardened (the trusted-only opt-out, "harden": false) and one made hardened are
+    // not interchangeable; the hardened default keeps the earlier shape
+    if cfg.as_ref().and_then(|c| c.get("harden")) == Some(&json!(false)) {
+        v["harden"] = json!(false);
     }
     v
 }
@@ -1206,6 +1211,8 @@ impl Manager {
                 Err(e) => return Err(fail(FailureClass::TemplateServerDown, e, &gates, &t)),
             }
         };
+        // the lower layer the checkpoint ran on: the idmapped view of the image for a hardened slot (own user namespace)
+        let (lower, userxattr) = slotfs::restore_lower(&sp.dir, &self.cfg.lower, is_mounted).map_err(|e| fail(FailureClass::Infra, format!("restore lower: {e}"), &gates, &t))?;
         let spec = restore::RestoreSpec {
             images: sp.images.clone(),
             croot: sp.croot.clone(),
@@ -1213,7 +1220,7 @@ impl Manager {
             log: log.clone(),
             hook: Some(hook),
             file_locks,
-            lower: self.cfg.lower.clone(),
+            lower,
             upper: sp.upper.clone(),
             work: sp.work.clone(),
             cgroup: cg.clone(),
@@ -1222,7 +1229,8 @@ impl Manager {
             out: sp.dir.join(format!("restore-drumsd-{gen}-{stamp}.out")),
             empty_net: self.cfg.netns_fast,
             nested_pidns: self.cfg.nested_pidns,
-            externals: view_externals(&sp.dir, &self.cfg.procview_dir),
+            externals: [slot_dev_externals(&sp.dir), view_externals(&sp.dir, &self.cfg.procview_dir)].concat(),
+            userxattr,
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
 
@@ -2735,6 +2743,12 @@ pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
 /// its saved state never deleted).
 /// The per-env view binds of a checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments re-binding them
 /// from the live view mount. A checkpoint made without the view gets none and restores as before.
+/// The host device binds of a hardened slot's checkpoint, from its dumped mount table (none for an unhardened one).
+pub fn slot_dev_externals(slot_dir: &Path) -> Vec<String> {
+    let rows: Vec<[String; 3]> = std::fs::read(slot_dir.join("mounts-pre-dump.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    slotfs::dev_restore_externals(&rows)
+}
+
 pub fn view_externals(slot_dir: &Path, dir: &Path) -> Vec<String> {
     let rows: Vec<[String; 3]> = std::fs::read(slot_dir.join("mounts-pre-dump.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     drumsd_linux::procview::restore_externals(&rows, dir)
@@ -3203,6 +3217,11 @@ mod tests {
         assert_eq!(q["procview_dir"], json!("/run/drums/procview"));
         std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "procview_dir": null})).unwrap()).unwrap();
         assert_ne!(provenance("src", &cfgp), q);
+        // the slot profile: hardened (absent or true) keeps the shape, the trusted-only opt-out is recorded
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "harden": true})).unwrap()).unwrap();
+        assert_eq!(provenance("src", &cfgp), p);
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "harden": false})).unwrap()).unwrap();
+        assert_eq!(provenance("src", &cfgp)["harden"], json!(false));
     }
     #[test]
     fn numbers_of_destroyed_slots_are_reused_and_reservations_end() {

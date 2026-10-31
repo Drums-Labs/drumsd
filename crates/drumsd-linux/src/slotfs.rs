@@ -34,6 +34,40 @@ pub const COPIED_RECORDS: [&str; 8] = [
 ];
 const COMPLETE: &str = ".drumsd-complete";
 
+/// The host device nodes a hardened slot (own user namespace, drums-lab harden.DEV_BIND_NODES) binds into its /dev: a
+/// tmpfs mounted inside a user namespace cannot hold usable nodes. Each is a CRIU external mount `drums-dev-<name>`.
+pub const DEV_BIND_NODES: [&str; 6] = ["null", "zero", "full", "random", "urandom", "tty"];
+
+/// `criu_root.restore_externals`' device half: `--external mnt[drums-dev-<n>]:/dev/<n>` for each host device bind in a
+/// checkpoint's dumped mount table (`mounts-pre-dump.json` rows [mountpoint, fstype, root]); none for an unhardened slot.
+pub fn dev_restore_externals(rows: &[[String; 3]]) -> Vec<String> {
+    let mut v = vec![];
+    for n in DEV_BIND_NODES {
+        if rows.iter().any(|r| r[0] == format!("/dev/{n}") && r[1] == "devtmpfs" && r[2] == format!("/{n}")) {
+            v.push("--external".into());
+            v.push(format!("mnt[drums-dev-{n}]:/dev/{n}"));
+        }
+    }
+    v
+}
+
+/// The lower layer a checkpoint's slot ran on and whether it ran in its own user namespace, from its plan
+/// (`service-plan.json`, copied with every checkpoint; `candidate._restore_lower`). A hardened slot's lower layer is the
+/// idmapped read-only view of the image the provisioning made (`/run/drums-idmap/...`): it must still be mounted, or the
+/// restore is refused (a host restart removes it; the origin is then re-provisioned). No plan userns: `default_lower`.
+pub fn restore_lower(slot_dir: &Path, default_lower: &Path, is_mounted: impl Fn(&Path) -> bool) -> io::Result<(PathBuf, bool)> {
+    let plan = read_json(&slot_dir.join("service-plan.json"))
+        .map_err(|e| io::Error::other(format!("{}/service-plan.json is missing or unreadable ({e}): the restore cannot tell which lower layer the checkpoint ran on", slot_dir.display())))?;
+    if plan.get("userns").map(|u| u.is_null()).unwrap_or(true) {
+        return Ok((default_lower.to_path_buf(), false));
+    }
+    let lower = plan["lower"].as_str().map(PathBuf::from).ok_or_else(|| io::Error::other("the plan of a user-namespace slot names no lower layer"))?;
+    if !is_mounted(&lower) {
+        return Err(io::Error::other(format!("the idmapped lower layer {} of this checkpoint is not mounted (host restarted?): re-provision the origin", lower.display())));
+    }
+    Ok((lower, true))
+}
+
 /// `launch.marker_for`: rootfs-<sha256(abspath(state_dir))[:8]>-<slot>.
 pub fn marker_for(state_dir: &Path, slot: u32) -> String {
     let h = hex::encode(Sha256::digest(state_dir.to_string_lossy().as_bytes()));
@@ -287,6 +321,27 @@ pub fn image_inodes(images: &Path) -> io::Result<Vec<(String, u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_binds_of_a_hardened_checkpoint_are_restored_from_the_host_nodes() {
+        let r = |a: &str, b: &str, c: &str| [a.to_string(), b.to_string(), c.to_string()];
+        let rows = vec![r("/", "overlay", "/"), r("/dev", "tmpfs", "/"), r("/dev/null", "devtmpfs", "/null"), r("/dev/tty", "devtmpfs", "/tty"),
+                        r("/dev/zero", "tmpfs", "/zero"), r("/dev/sda", "devtmpfs", "/sda")];
+        assert_eq!(dev_restore_externals(&rows), vec!["--external", "mnt[drums-dev-null]:/dev/null", "--external", "mnt[drums-dev-tty]:/dev/tty"]);
+        assert!(dev_restore_externals(&[r("/", "overlay", "/")]).is_empty());
+    }
+
+    #[test]
+    fn restore_lower_follows_the_checkpoint_plan() {
+        let d = tempfile::tempdir().unwrap();
+        let img = Path::new("/mnt/osworld");
+        assert!(restore_lower(d.path(), img, |_| true).is_err());                      // no plan: refuse, never guess
+        fs::write(d.path().join("service-plan.json"), br#"{"lower": "/mnt/osworld"}"#).unwrap();
+        assert_eq!(restore_lower(d.path(), img, |_| true).unwrap(), (img.to_path_buf(), false));
+        fs::write(d.path().join("service-plan.json"), br#"{"lower": "/run/drums-idmap/ab-100000", "userns": {"base": 100000, "count": 65536}}"#).unwrap();
+        assert_eq!(restore_lower(d.path(), img, |_| true).unwrap(), (PathBuf::from("/run/drums-idmap/ab-100000"), true));
+        assert!(restore_lower(d.path(), img, |_| false).is_err());                     // the idmapped view is gone
+    }
 
     fn origin(state: &Path) -> SlotPaths {
         let p = paths(state, 0);

@@ -2,8 +2,13 @@
 # Drums one-command install: a fresh Ubuntu 24.04 x86_64 host -> a running drumsd with the drums-criu build, the OSWorld
 # image as a clean checkpoint, OSWorld's checkers, and an API token.
 #
-#   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N] [--no-procview]
+#   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N] [--procview]
+#                     [--trusted-unhardened]
 #
+# Envs run in the HARDENED slot profile by default (docs/security.md): each desktop in its own user namespace (root in it
+# is an unprivileged host uid), no_new_privs, a capability bounding set, a seccomp blocklist and a metadata firewall.
+# --trusted-unhardened turns that off, for hosts that run only trusted code: root in an env is then root on the host.
+# --procview (opt-in) gives each env its own memory/CPU view (/proc files and sysinfo(2)).
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
 # hashed Python lock) and checked before use; the first mismatch stops the install.
@@ -16,7 +21,7 @@ set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$REL/install/lock.json"
-REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=0
+REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=0; HARDEN=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=1; shift;;
@@ -26,7 +31,8 @@ while [ $# -gt 0 ]; do
     --swap-mib) SWAP_MIB="${2:?}"; shift 2;;   # swap per env (needs host swap, e.g. zram); default 0
     --procview) PROCVIEW=1; shift;;          # opt-in: the per-env memory/CPU view (FUSE + BPF on sysinfo(2)); see docs/procview.md
     --no-procview) PROCVIEW=0; shift;;       # the default since rc1: envs read the host's memory and CPU files
-    -h|--help) sed -n 2,15p "$0"; exit 0;;
+    --trusted-unhardened) HARDEN=0; shift;;  # trusted-only hosts: no user namespace, seccomp, cap drop or metadata firewall
+    -h|--help) sed -n 2,21p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
@@ -110,6 +116,11 @@ fs.inotify.max_user_instances = 131072
 fs.inotify.max_user_watches = 4194304
 EOF
 sysctl -q --system
+# the hardened slot profile: root (the launcher) may map the slots' host uid/gid ranges (newuidmap enforces this even for
+# root); 100 slots of 65536 from 100000 (drums-lab harden.subid_delegation_lines). Restored envs share the origin's range.
+for f in /etc/subuid /etc/subgid; do
+  grep -qx 'root:100000:6553600' "$f" 2>/dev/null || echo 'root:100000:6553600' >> "$f"
+done
 printf 'nbd\noverlay\n' > /etc/modules-load.d/drums.conf
 modprobe nbd max_part=16 || die "modprobe nbd"; modprobe overlay || die "modprobe overlay"
 phase kernel $t
@@ -245,7 +256,8 @@ cat > "$E/rootfs-config.json" <<EOF
 {"state_dir": "$D/state", "lower": "/mnt/osworld", "inspection": "$E/inspection.json", "image_sha256": "$IMGSHA",
  "vcpus": $(lk runtime.vcpus), "memory_mib": $(lk runtime.memory_mib), "screen": "$(lk runtime.screen)", "profile": "gnome_x11",
  "service_base_port": 25000, "guest_service_port": 5000, "display_stage_deb": "$D/packages/dummy.deb",
- "procview_dir": $([ "$PROCVIEW" = 1 ] && echo '"/run/drums/procview"' || echo null)}
+ "procview_dir": $([ "$PROCVIEW" = 1 ] && echo '"/run/drums/procview"' || echo null),
+ "harden": $([ "$HARDEN" = 1 ] && echo true || echo false)}
 EOF
 [ -s "$E/token" ] || (umask 077; python3 -c "import secrets; print(secrets.token_urlsafe(32))" > "$E/token")
 chmod 0600 "$E/token"

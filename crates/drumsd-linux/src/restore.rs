@@ -42,8 +42,12 @@ pub struct RestoreSpec {
     /// `--nested-pidns` (drums-criu app-compat): restore the pid/user/net namespaces sandboxed apps nest below the
     /// slot's, as launch.py's CRIU_COMMON does on that branch.
     pub nested_pidns: bool,
-    /// `--external mnt[KEY]:PATH` pairs (the per-env view binds the checkpoint holds; see procview::restore_externals).
+    /// `--external mnt[KEY]:PATH` pairs: the host device binds of a hardened slot (slotfs::dev_restore_externals) and the
+    /// per-env view binds (procview::restore_externals) the checkpoint's mount table holds.
     pub externals: Vec<String>,
+    /// The checkpoint's slot ran in its own user namespace (the hardened profile, drums-lab harden.py): its overlay keeps
+    /// its metadata in user.overlay xattrs, so the restore root is mounted with `userxattr` (criu_root.overlay_options).
+    pub userxattr: bool,
 }
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
@@ -73,14 +77,14 @@ pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
 }
 
 /// `criu_root.overlay_options`: refuse paths that cannot be overlay mount options.
-pub fn overlay_options(lower: &Path, upper: &Path, work: &Path) -> io::Result<String> {
+pub fn overlay_options(lower: &Path, upper: &Path, work: &Path, userxattr: bool) -> io::Result<String> {
     for (what, p) in [("lower", lower), ("upper", upper), ("work", work)] {
         let s = p.display().to_string();
         if s.contains(',') || s.contains(':') || s.chars().any(|c| c.is_whitespace()) {
             return Err(io::Error::other(format!("the {what} path {s:?} contains a comma, colon or space")));
         }
     }
-    Ok(format!("lowerdir={},upperdir={},workdir={}", lower.display(), upper.display(), work.display()))
+    Ok(format!("lowerdir={},upperdir={},workdir={}{}", lower.display(), upper.display(), work.display(), if userxattr { ",userxattr" } else { "" }))
 }
 
 /// Arguments for the helper: `drumsd restore-client --cgroup CG --overlay OPTS --root CROOT (--socket S | --criu BIN) -- criu restore ...`
@@ -90,7 +94,7 @@ pub fn client_args(s: &RestoreSpec) -> io::Result<Vec<String>> {
         "--cgroup".into(),
         s.cgroup.display().to_string(),
         "--overlay".into(),
-        overlay_options(&s.lower, &s.upper, &s.work)?,
+        overlay_options(&s.lower, &s.upper, &s.work, s.userxattr)?,
         "--root".into(),
         s.croot.display().to_string(),
     ];
@@ -308,6 +312,7 @@ mod tests {
             empty_net: false,
             nested_pidns: false,
             externals: vec![],
+            userxattr: false,
         }
     }
 
@@ -354,8 +359,17 @@ mod tests {
 
     #[test]
     fn overlay_options_refuse_bad_paths() {
-        assert!(overlay_options(Path::new("/a,b"), Path::new("/u"), Path::new("/w")).is_err());
-        assert!(overlay_options(Path::new("/a"), Path::new("/u:x"), Path::new("/w")).is_err());
+        assert!(overlay_options(Path::new("/a,b"), Path::new("/u"), Path::new("/w"), false).is_err());
+        assert!(overlay_options(Path::new("/a"), Path::new("/u:x"), Path::new("/w"), false).is_err());
+    }
+
+    #[test]
+    fn a_hardened_checkpoint_is_restored_on_user_overlay_xattrs() {
+        let mut s = spec(None);
+        s.userxattr = true;
+        s.lower = "/run/drums-idmap/0f3a9c1e-100000".into();
+        let a = client_args(&s).unwrap();
+        assert!(a.contains(&"lowerdir=/run/drums-idmap/0f3a9c1e-100000,upperdir=/s/slot5/upper,workdir=/s/slot5/work,userxattr".to_string()), "{a:?}");
     }
 
     #[test]
