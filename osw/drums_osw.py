@@ -20,6 +20,12 @@ Each run then works in its own private cache directory (`<cache>/.runs/<task8>-X
 hard links to the staged files only. OSWorld's getters write what they fetch from the desktop (`vm_file`, ...) into
 the task's cache directory under a fixed name; with one directory shared by every slot of a task, two slots
 verifying at once overwrote each other's file, and a slot could be scored on another slot's desktop.
+
+Lab verifiers (docs/custom-tasks.md): a task whose evaluator is {"func": "drums_verifier", "verifier": NAME,
+"function": FN, "options": {...}} is scored by FN in NAME.py from the verifiers directory (default
+/etc/drums/verifiers, `osw.verifiers_dir` in drumsd.json). Only files the host's root owns and nobody else can write
+are loaded: the task JSON (which any API client can send) names a verifier, it never carries code. FN runs here, as
+this unprivileged helper user, outside the desktop; it reads the desktop through `Ctx` (the slot's own guest server).
 """
 from __future__ import annotations
 
@@ -37,6 +43,9 @@ import urllib.request
 import uuid
 
 OSWORLD_COMMIT = "044bc33901cb893808e3f91ebc9a17ed8e54b44c"
+VERIFIER_FUNC = "drums_verifier"
+DEFAULT_VERIFIERS_DIR = "/etc/drums/verifiers"
+TRUSTED_UID = 0                 # lab verifiers must be owned by root (tests point this at their own uid)
 
 
 def as_list(x):
@@ -137,8 +146,95 @@ class OswEnv:
         return self.controller.get_vm_machine()
 
     def load(self, task):
-        self._set_task_info(task)
+        if is_lab_task(task):           # OSWorld's metrics table has no lab verifier: set the task info without it
+            self.task_id = task["id"]
+            self.cache_dir = os.path.join(self.cache_dir_base, self.task_id)
+            os.makedirs(self.cache_dir, exist_ok=True)
+            self.instruction = task.get("instruction", "")
+            self.config = task.get("config") or []
+            self.evaluator = task["evaluator"]
+        else:
+            self._set_task_info(task)
         self.setup_controller.reset_cache_dir(self.cache_dir)
+
+
+# ------------------------------------------------------------------------------------------------ lab verifiers
+def is_lab_task(task) -> bool:
+    return isinstance(task.get("evaluator"), dict) and task["evaluator"].get("func") == VERIFIER_FUNC
+
+
+class Ctx:
+    """What a lab verifier sees of the episode's desktop. Everything goes through the slot's own guest server, so a
+    verifier reads exactly the desktop it scores (and runs commands there as the desktop user, never as root)."""
+
+    def __init__(self, host, port, task, options, workdir, timeout=120):
+        self.base = f"http://{host}:{port}"
+        self.task, self.options, self.workdir, self.timeout = task, options, workdir, timeout
+
+    def read_file(self, path: str):
+        """The file's bytes, or None if it does not exist (HTTP 404). Any other failure raises: a checker error,
+        never a silent 0."""
+        import requests
+        r = requests.post(self.base + "/file", data={"file_path": path}, timeout=self.timeout)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.content
+
+    def run(self, command, shell: bool = False, timeout: float | None = None) -> dict:
+        """Run a command in the desktop as its user; returns {"returncode", "output", "error"} (no exception on a
+        non-zero exit: the exit status is often the answer)."""
+        import requests
+        r = requests.post(self.base + "/execute", json={"command": command, "shell": shell}, timeout=timeout or self.timeout)
+        r.raise_for_status()
+        v = r.json()
+        return {"returncode": v.get("returncode"), "output": v.get("output", ""), "error": v.get("error", "")}
+
+
+def load_verifier(vdir: str, name: str):
+    """NAME.py from vdir, only if the directory and the file are owned by root and not writable by group or others."""
+    import importlib.util
+    import re
+    import stat
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
+        raise ValueError(f"verifier name {name!r}: letters, digits and _ only")
+    path = os.path.join(vdir, name + ".py")
+    for p in (vdir, path):
+        try:
+            st = os.stat(p)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"no lab verifier {path} (install it as root: docs/custom-tasks.md)") from None
+        if st.st_uid != TRUSTED_UID or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise PermissionError(f"{p} must be owned by root and not group/world-writable (it scores rewards)")
+    spec = importlib.util.spec_from_file_location(f"drums_lab_verifier_{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def lab_score(out) -> tuple:
+    """A verifier's return value -> (score, info). A number (or bool), or {"score": number, "info": {...}}."""
+    info = None
+    if isinstance(out, dict):
+        out, info = out.get("score"), out.get("info")
+    if isinstance(out, bool):
+        out = float(out)
+    if not isinstance(out, (int, float)) or out != out or out in (float("inf"), float("-inf")):
+        raise TypeError(f"a verifier must return a finite number or {{'score': number}}, got {out!r}")
+    return float(out), info
+
+
+def run_lab_verifier(env, task, req) -> dict:
+    ev = task["evaluator"]
+    if ev.get("postconfig"):
+        if env.setup_controller.setup(ev["postconfig"], False) is False:
+            raise RuntimeError("Postconfig setup failed")
+    mod = load_verifier(req.get("verifiers_dir") or DEFAULT_VERIFIERS_DIR, ev.get("verifier"))
+    fn = getattr(mod, ev.get("function") or "reward", None)
+    if not callable(fn):
+        raise AttributeError(f"verifier {ev.get('verifier')!r} has no function {ev.get('function') or 'reward'!r}")
+    ctx = Ctx(req["host"], req["server_port"], task, ev.get("options") or {}, env.cache_dir)
+    return lab_score(fn(ctx, **(ev.get("options") or {})))
 
 
 def main(argv) -> dict:
@@ -165,27 +261,35 @@ def run_request(verb, req) -> dict:
     env.cache_dir = private_cache(req["cache_dir"], task["id"], staged)
     env.setup_controller.reset_cache_dir(env.cache_dir)
     try:
-        return run_verb(verb, env, task, staged, t0)
+        return run_verb(verb, env, task, staged, t0, req)
     finally:
         shutil.rmtree(env.cache_dir, ignore_errors=True)
 
 
-def run_verb(verb, env, task, staged, t0) -> dict:
+def run_verb(verb, env, task, staged, t0, req=None) -> dict:
     if verb == "setup":
         ok = env.setup_controller.setup(env.config, False)
         r = {"ok": bool(ok), "seconds": round(time.monotonic() - t0, 3), "n_steps": len(env.config), "staged": len(staged)}
         if not ok:
             r["error"] = "OSWorld setup returned False (a config step failed; see the helper log)"
         return r
+    info = None
     try:
-        score = env._evaluate()
+        if is_lab_task(task):
+            score, info = run_lab_verifier(env, task, req)
+        else:
+            score = env._evaluate()
         err = None
     except Exception as e:  # a checker error is its own outcome, never a score
         score, err = None, f"{type(e).__name__}: {e}"[:800]
     ev = task.get("evaluator") or {}
-    return {"ok": True, "score": None if score is None else float(score), "checker_error": err,
-            "seconds": round(time.monotonic() - t0, 3), "osworld_commit": OSWORLD_COMMIT,
-            "postconfig_ran": bool(ev.get("postconfig"))}
+    out = {"ok": True, "score": None if score is None else float(score), "checker_error": err,
+           "seconds": round(time.monotonic() - t0, 3), "osworld_commit": OSWORLD_COMMIT,
+           "postconfig_ran": bool(ev.get("postconfig"))}
+    if is_lab_task(task):
+        out["verifier"] = f"{ev.get('verifier')}.{ev.get('function') or 'reward'}"
+        out["info"] = info
+    return out
 
 
 # ------------------------------------------------------------------------------------------------ fork server

@@ -20,6 +20,7 @@ valid: restored correctly, isolated, never quarantined.
 | `docs/host-requirements.md` | OS, CPU, RAM, disk, network, how many envs a host holds |
 | `docs/actions-and-observations.md` | screen size, coordinates, action types, who `execute` runs as, screenshots |
 | `docs/validity.md` | the gates and what `Reward.valid` means |
+| `docs/custom-tasks.md` | your own tasks: setup steps, your app and data, reward functions in Python (lab verifiers) |
 | `docs/lifecycle.md` | env states, leases, cleanup, fork states, records, reboots, metrics windows |
 | `examples/` | `rl_loop.py` (a minimal leak-free loop), `fork_and_verify.py`, `concurrency.py` |
 | `api/openapi.json` | the HTTP API (also served at `GET /openapi.json`) |

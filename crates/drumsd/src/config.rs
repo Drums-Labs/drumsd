@@ -284,6 +284,10 @@ pub struct OswConfig {
     /// sudo password of the image's user (OSWorld's `client_password`).
     #[serde(default = "d_pw")]
     pub client_password: String,
+    /// Lab verifiers (`"func": "drums_verifier"` evaluators): NAME.py files owned by root (docs/custom-tasks.md).
+    /// None = the helper's default, /etc/drums/verifiers.
+    #[serde(default)]
+    pub verifiers_dir: Option<PathBuf>,
 }
 
 fn d_setup_t() -> u64 {

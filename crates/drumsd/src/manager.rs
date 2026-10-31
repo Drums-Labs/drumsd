@@ -2106,7 +2106,8 @@ impl Manager {
         let o = self.cfg.osw.as_ref().ok_or("no OSWorld helper configured (osw)")?;
         let (server, chromium, vlc) = self.osw_ports(num);
         let req = json!({"task": task, "host": "127.0.0.1", "server_port": server, "chromium_port": chromium, "vlc_port": vlc,
-                         "cache_dir": o.cache_dir, "osworld_dir": o.osworld_dir, "client_password": o.client_password, "extra": extra});
+                         "cache_dir": o.cache_dir, "osworld_dir": o.osworld_dir, "client_password": o.client_password, "extra": extra,
+                         "verifiers_dir": o.verifiers_dir});
         let timeout = Duration::from_secs(if verb == "evaluate" { o.eval_timeout_s } else { o.setup_timeout_s });
         let mut cmd = std::process::Command::new(&o.python);
         cmd.arg("-I").arg(&o.helper).arg(verb).current_dir(&o.osworld_dir).env_clear()
@@ -2244,7 +2245,7 @@ impl Manager {
             "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "checker_skipped": detail.get("skipped"),
             "state": v.state.name(), "gates": v.gates, "checker_error": err,
             "checker": {"func": task["evaluator"]["func"], "osworld_commit": detail["osworld_commit"], "seconds": detail["seconds"],
-                        "postconfig_ran": detail["postconfig_ran"]},
+                        "postconfig_ran": detail["postconfig_ran"], "verifier": detail.get("verifier"), "info": detail.get("info")},
             "seconds": round3(secs),
         });
         self.event(json!({"slot": v.id, "verify": {"episode": v.episode, "task": tid, "score": score, "valid": valid, "error": err}}));
