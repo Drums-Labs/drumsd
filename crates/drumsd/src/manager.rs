@@ -253,10 +253,18 @@ pub struct Manager {
     pinned_states: StdMutex<BTreeSet<String>>,
     /// Exits by crash signal, attributed by cgroup (the `no_app_crash` gate). None only when `crash_watch` is off.
     pub crash: Option<drumsd_linux::crashwatch::CrashWatch>,
-    /// One-time provisioning capabilities: token -> slot number, valid while one OSWorld helper call for that slot runs.
-    provision_tokens: StdMutex<BTreeMap<String, u32>>,
+    /// One-time provisioning capabilities: token -> the slot and (during a restore's task setup, before the slot record
+    /// has them) its tree's init pid and cgroup; valid while one OSWorld helper call for that slot runs.
+    provision_tokens: StdMutex<BTreeMap<String, ProvisionTarget>>,
     /// The image's desktop user (from the image inspection): provisioning steps run as this user, with sudo for the step.
     image_user: Option<ImageUser>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProvisionTarget {
+    pub num: u32,
+    /// (init pid, the tree's cgroup) when the caller knows them better than the slot record (a restore's setup).
+    pub tree: Option<(i32, PathBuf)>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1116,7 +1124,9 @@ impl Manager {
                     if osworld_task_id(&t).is_some() {
                         let ts = Instant::now();
                         let me = self.clone();
-                        let r = tokio::task::spawn_blocking(move || me.osw("setup", num, &t, None)).await.map_err(e500)?;
+                        // the new tree is not in the slot record yet: provisioning steps of this setup run in it
+                        let tree = Some((ok.pid, self.episode_cg(num, ok.leaf)));
+                        let r = tokio::task::spawn_blocking(move || me.osw_on("setup", num, &t, None, tree)).await.map_err(e500)?;
                         let secs = ts.elapsed().as_secs_f64();
                         setup_s = Some(round3(secs));
                         self.account(Some(slot), |l| l.op("task_setup", secs, r.is_ok()));
@@ -2236,14 +2246,19 @@ impl Manager {
     /// Run the OSWorld helper (`drums_osw.py VERB`) as the unprivileged user, request on stdin, JSON reply on the last
     /// stdout line. Blocking.
     pub fn osw(&self, verb: &str, num: u32, task: &Value, extra: Option<Value>) -> Result<Value, String> {
+        self.osw_on(verb, num, task, extra, None)
+    }
+
+    /// `osw` for a tree the slot record does not name yet (`tree`: init pid and cgroup), e.g. a restore's task setup.
+    pub fn osw_on(&self, verb: &str, num: u32, task: &Value, extra: Option<Value>, tree: Option<(i32, PathBuf)>) -> Result<Value, String> {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt;
         let o = self.cfg.osw.as_ref().ok_or("no OSWorld helper configured (osw)")?;
         let (server, chromium, vlc) = self.osw_ports(num);
         // a one-time capability for this call: setup steps that run sudo go to drumsd (provision_step), not to the desktop
         let token = random_token();
-        self.provision_tokens.lock().unwrap().insert(token.clone(), num);
-        struct Revoke<'a>(&'a StdMutex<BTreeMap<String, u32>>, String);
+        self.provision_tokens.lock().unwrap().insert(token.clone(), ProvisionTarget { num, tree });
+        struct Revoke<'a>(&'a StdMutex<BTreeMap<String, ProvisionTarget>>, String);
         impl Drop for Revoke<'_> {
             fn drop(&mut self) {
                 self.0.lock().unwrap().remove(&self.1);
@@ -2297,15 +2312,19 @@ impl Manager {
     /// checker call through that call's capability URL. Runs in the slot as the desktop user with sudo for this step
     /// only (drumsd_linux::provision). Reply in the guest server's /setup/execute form.
     pub async fn provision_step(self: &Arc<Self>, token: &str, body: Value) -> R<Value> {
-        let num = *self.provision_tokens.lock().unwrap().get(token).ok_or_else(|| ApiError::new(403, "unknown or expired provisioning token"))?;
+        let target = self.provision_tokens.lock().unwrap().get(token).cloned().ok_or_else(|| ApiError::new(403, "unknown or expired provisioning token"))?;
+        let num = target.num;
         let slot = {
             let map = self.slots.read().unwrap();
             map.values().find(|s| s.view.read().unwrap().num == num && !s.view.read().unwrap().state.is_terminal()).cloned()
         }
         .ok_or_else(|| ApiError::new(409, format!("no live env in slot {num}")))?;
-        let (init_pid, leaf, id) = {
+        let (init_pid, cgroup, id) = {
             let v = slot.view.read().unwrap();
-            (v.init_pid, v.leaf, v.id.clone())
+            match &target.tree {
+                Some((p, cg)) => (Some(*p), cg.clone(), v.id.clone()),
+                None => (v.init_pid, self.episode_cg(num, v.leaf), v.id.clone()),
+            }
         };
         let init_pid = init_pid.ok_or_else(|| ApiError::new(409, format!("env {id} has no running tree")))?;
         let user = self.image_user.clone().ok_or_else(|| ApiError::new(503, "no image user known (inspection unreadable): provisioning is unavailable"))?;
@@ -2317,7 +2336,7 @@ impl Manager {
         let argv = drumsd_linux::provision::step_argv(&body["command"], shell).map_err(|e| ApiError::new(400, e))?;
         let spec = drumsd_linux::provision::ProvisionSpec {
             init_pid,
-            cgroup: self.episode_cg(num, leaf),
+            cgroup,
             user: user.name,
             uid: user.uid,
             gid: user.gid,
