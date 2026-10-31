@@ -218,46 +218,6 @@ impl Config {
 fn d_procview() -> PathBuf {
     drumsd_linux::procview::MOUNTPOINT.into()
 }
-/// `retention` in the config file.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetentionConfig {
-    /// `failures_full` (default): failed, invalid, quarantined and rejected envs keep a full archive, valid envs a
-    /// small summary. `keep_all`: every env keeps a full archive.
-    #[serde(default)]
-    pub mode: drumsd_linux::forget::Mode,
-    /// Summaries beyond this many GiB are deleted, oldest first (default 2).
-    #[serde(default = "d_summary_max")]
-    pub summary_max_gib: Option<f64>,
-    /// Full records beyond this many GiB are deleted, oldest first. Default None: failure records are never pruned.
-    #[serde(default)]
-    pub full_max_gib: Option<f64>,
-}
-
-impl Default for RetentionConfig {
-    fn default() -> Self {
-        RetentionConfig { mode: Default::default(), summary_max_gib: d_summary_max(), full_max_gib: None }
-    }
-}
-
-fn d_summary_max() -> Option<f64> {
-    Some(2.0)
-}
-fn gib(g: f64) -> u64 {
-    (g.max(0.0) * (1u64 << 30) as f64) as u64
-}
-
-impl Config {
-    /// The caps the retention policy sets, in bytes.
-    pub fn forget_caps(&self) -> drumsd_linux::forget::Caps {
-        drumsd_linux::forget::Caps {
-            summary: self.retention.summary_max_gib.map(gib),
-            full: self.retention.full_max_gib.map(gib),
-            total: self.forgotten_max_gib.map(gib),
-        }
-    }
-}
-
 fn d_forgotten_warn() -> f64 {
     50.0
 }
@@ -465,22 +425,4 @@ mod tests {
         assert_eq!(c.retention.summary_max_gib, Some(2.0), "unset fields keep their defaults");
     }
 
-    #[test]
-    fn retention_and_the_old_cap_parse() {
-        let mut v = serde_json::json!({"state_dir": "/s", "journal_dir": "/j", "lower": "/l", "image_sha256": "x", "py_src": "/p",
-            "py_config": "/c", "criu": "/criu", "vcpus": 4, "memory_mib": 4096, "port_base": 25000, "listen": "127.0.0.1:1"});
-        v["forgotten_max_gib"] = serde_json::json!(100.0);
-        let c: Config = serde_json::from_value(v.clone()).unwrap();
-        assert_eq!(c.forget_caps().total, Some(100 << 30));
-        v["retention"] = serde_json::json!({"mode": "keep_all", "summary_max_gib": null, "full_max_gib": 10});
-        let c: Config = serde_json::from_value(v.clone()).unwrap();
-        assert_eq!(c.retention.mode, drumsd_linux::forget::Mode::KeepAll);
-        let caps = c.forget_caps();
-        assert_eq!((caps.summary, caps.full), (None, Some(10 << 30)));
-        v["retention"] = serde_json::json!({"mode": "everything"});
-        assert!(serde_json::from_value::<Config>(v.clone()).is_err(), "a misspelt mode is refused");
-        v["retention"] = serde_json::json!({"mode": "keep_all"});
-        let c: Config = serde_json::from_value(v).unwrap();
-        assert_eq!(c.retention.summary_max_gib, Some(2.0), "unset fields keep their defaults");
-    }
 }

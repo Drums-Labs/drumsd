@@ -2737,30 +2737,24 @@ pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
     !state.is_terminal() && !(lost && matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
 }
 
-/// The filesystem half of a destroy: remove the slot's disk state, keep its records and logs under forgotten/ (the
-/// directory moves aside so the number can be reused). Idempotent: a destroy interrupted by a daemon kill after the
-/// move left no directory, and the retry used to fail with ENOENT, leaving an env that could never be closed (and
-/// its saved state never deleted).
-/// The per-env view binds of a checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments re-binding them
-/// from the live view mount. A checkpoint made without the view gets none and restores as before.
-/// The host device binds of a hardened slot's checkpoint, from its dumped mount table (none for an unhardened one).
+/// The host device binds of a hardened slot's checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments
+/// re-binding them from the host's own nodes. A checkpoint of an unhardened slot gets none.
 pub fn slot_dev_externals(slot_dir: &Path) -> Vec<String> {
     let rows: Vec<[String; 3]> = std::fs::read(slot_dir.join("mounts-pre-dump.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     slotfs::dev_restore_externals(&rows)
 }
 
+/// The per-env view binds of a checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments re-binding them
+/// from the live view mount. A checkpoint made without the view gets none and restores as before.
 pub fn view_externals(slot_dir: &Path, dir: &Path) -> Vec<String> {
     let rows: Vec<[String; 3]> = std::fs::read(slot_dir.join("mounts-pre-dump.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     drumsd_linux::procview::restore_externals(&rows, dir)
 }
 
-/// Whether an env in `state` keeps its checkpoint from being deleted. Once the checkpoint's state is lost (a host
-/// restart), an env that is down or quarantined holds nothing of it: no tree runs (drums-scale, 2026-10-30: 115 down
-/// and quarantined envs from before a reboot blocked the boot unit's re-provisioning with 409 "used by envs").
-pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
-    !state.is_terminal() && !(lost && matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
-}
-
+/// The filesystem half of a destroy: remove the slot's disk state, keep its records and logs under forgotten/ (the
+/// directory moves aside so the number can be reused). Idempotent: a destroy interrupted by a daemon kill after the
+/// move left no directory, and the retry used to fail with ENOENT, leaving an env that could never be closed (and
+/// its saved state never deleted).
 pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64, forget: impl FnOnce(&Path, &str) -> std::io::Result<PathBuf>) -> std::io::Result<PathBuf> {
     let sp = slotfs::paths(state_dir, num);
     if sp.dir.symlink_metadata().is_err() {
@@ -3218,8 +3212,10 @@ mod tests {
         std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "procview_dir": null})).unwrap()).unwrap();
         assert_ne!(provenance("src", &cfgp), q);
         // the slot profile: hardened (absent or true) keeps the shape, the trusted-only opt-out is recorded
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp})).unwrap()).unwrap();
+        let plain = provenance("src", &cfgp);
         std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "harden": true})).unwrap()).unwrap();
-        assert_eq!(provenance("src", &cfgp), p);
+        assert_eq!(provenance("src", &cfgp), plain);
         std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "harden": false})).unwrap()).unwrap();
         assert_eq!(provenance("src", &cfgp)["harden"], json!(false));
     }
