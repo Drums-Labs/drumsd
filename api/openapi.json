@@ -1298,6 +1298,47 @@
      }
     }
    }
+  },
+  "/provision/{token}/setup/execute": {
+   "post": {
+    "summary": "Internal: one task setup step that runs sudo, sent by the OSWorld helper of a running setup or checker call. The one-time capability in the path (handed to that call only) is its authorization, not the API token. drumsd runs the step in the env as the desktop user with sudo for that step only (trusted provisioning); every other request is refused. Reply in the guest server's /setup/execute form.",
+    "parameters": [
+     {
+      "name": "token",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "command": {},
+         "shell": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "{status, output, error, returncode}"
+     },
+     "400": {
+      "description": "the command does not run sudo"
+     },
+     "403": {
+      "description": "unknown or expired capability"
+     }
+    }
+   }
   }
  },
  "components": {

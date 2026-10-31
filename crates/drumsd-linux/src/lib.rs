@@ -10,11 +10,13 @@ pub mod guest;
 pub mod hook;
 pub mod pidfd;
 pub mod procfs;
+pub mod provision;
 pub mod proxy;
 pub mod quiesce;
 pub mod restore;
 pub mod slotfs;
 pub mod checks;
+pub mod crashwatch;
 pub mod forget;
 pub mod template;
 
