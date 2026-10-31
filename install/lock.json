@@ -93,7 +93,7 @@
     "drums-lab": {
       "repo": "sahiljagtap08/drums-lab",
       "branch": "rc1",
-      "commit": "e19909ef971d5743b100d488a393a635f81a3e26",
+      "commit": "cb3145d9249fd8bede5dd03f39addb98092310d5",
       "note": "rc1: fix/session-fidelity 15e29e4 (app-compat 0f6b2b6 + the image's own login) merged with harness/oom-inotify 1e38321 (incl. harness/reset-failures a11d712), sec/slot-hardening ed0bc53 (the hardened slot profile, default on; \"harden\": false opts out, trusted-only), daily-use 4343e68 via daily-use-hardened 94b4187 (no privilege escalation for the desktop user, assets dir, Acme lab tasks) and runtime-v0.5 a75d1d7 (per-env view binds, opt-in). See CHANGES-RC1.md"
     },
     "osworld": {
