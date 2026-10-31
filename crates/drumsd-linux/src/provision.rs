@@ -49,6 +49,27 @@ pub struct ProvisionSpec {
     /// argv run as the user (a shell command is `["/bin/sh", "-c", CMD]`).
     pub argv: Vec<String>,
     pub timeout: Duration,
+    /// The slot has its own user namespace (the hardened slot profile): the step enters it too, so it runs as the
+    /// slot's mapped root/user (unprivileged on the host) and the sudoers rule it writes is owned by the slot's root.
+    pub userns: bool,
+}
+
+/// Is `pid` in a user namespace other than drumsd's own?
+pub fn own_userns(pid: i32) -> bool {
+    match (std::fs::read_link(format!("/proc/{pid}/ns/user")), std::fs::read_link("/proc/self/ns/user")) {
+        (Ok(a), Ok(b)) => a != b,
+        _ => false,
+    }
+}
+
+fn ns_flags(spec: &ProvisionSpec, all: bool) -> Vec<String> {
+    let mut v = vec!["-t".to_string(), spec.init_pid.to_string()];
+    if spec.userns {
+        v.push("-U".into());
+    }
+    let f: &[&str] = if all { &["-m", "-u", "-i", "-n", "-p", "-r", "-w"] } else { &["-m", "-r"] };
+    v.extend(f.iter().map(|s| s.to_string()));
+    v
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -85,7 +106,8 @@ pub fn step_argv(command: &serde_json::Value, shell: bool) -> Result<Vec<String>
 /// The nsenter command line (host side) for a step.
 pub fn command(spec: &ProvisionSpec) -> Command {
     let mut c = Command::new("nsenter");
-    c.args(["-t", &spec.init_pid.to_string(), "-m", "-u", "-i", "-n", "-p", "-r", "-w", "--", "/bin/sh", "-c", SCRIPT, "drums-provision"]);
+    c.args(ns_flags(spec, true));
+    c.args(["--", "/bin/sh", "-c", SCRIPT, "drums-provision"]);
     c.args(&spec.argv);
     c.env_clear()
         .env("PATH", SECURE_PATH)
@@ -151,7 +173,8 @@ pub fn run(spec: &ProvisionSpec) -> io::Result<ProvisionOut> {
 /// Remove every provisioning sudoers rule in the slot (they are named zz-drums-provision-<pid>).
 pub fn cleanup(spec: &ProvisionSpec) -> io::Result<bool> {
     let st = Command::new("nsenter")
-        .args(["-t", &spec.init_pid.to_string(), "-m", "-r", "--", "/bin/sh", "-c", "rm -f /etc/sudoers.d/zz-drums-provision-*"])
+        .args(ns_flags(spec, false))
+        .args(["--", "/bin/sh", "-c", "rm -f /etc/sudoers.d/zz-drums-provision-*"])
         .env_clear()
         .env("PATH", SECURE_PATH)
         .stdin(Stdio::null())
@@ -200,7 +223,7 @@ mod tests {
     #[test]
     fn the_command_enters_the_slot_and_the_script_scopes_the_rule_to_the_step() {
         let s = ProvisionSpec { init_pid: 42, cgroup: "/sys/fs/cgroup/x".into(), user: "user".into(), uid: 1000, gid: 1000, home: "/home/user".into(),
-                                argv: vec!["/bin/sh".into(), "-c".into(), "mkdir /x".into()], timeout: Duration::from_secs(1) };
+                                argv: vec!["/bin/sh".into(), "-c".into(), "mkdir /x".into()], timeout: Duration::from_secs(1), userns: false };
         let c = command(&s);
         let a: Vec<String> = c.get_args().map(|x| x.to_string_lossy().to_string()).collect();
         assert_eq!(&a[..12], &["-t", "42", "-m", "-u", "-i", "-n", "-p", "-r", "-w", "--", "/bin/sh", "-c"]);
@@ -212,5 +235,10 @@ mod tests {
         assert!(w < r && r < rm);
         assert!(!SCRIPT.contains("--no-new-privs"));
         assert!(SCRIPT.contains(SUDOERS_PREFIX));
+        // a hardened slot (own user namespace): the step enters it first, so it is never host root inside the slot
+        let h = ProvisionSpec { userns: true, ..s };
+        let a: Vec<String> = command(&h).get_args().map(|x| x.to_string_lossy().to_string()).collect();
+        assert_eq!(&a[..4], &["-t", "42", "-U", "-m"]);
+        assert!(!own_userns(std::process::id() as i32), "drumsd's own process is in its own user namespace");
     }
 }

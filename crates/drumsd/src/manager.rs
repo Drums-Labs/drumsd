@@ -2343,6 +2343,7 @@ impl Manager {
             home: user.home,
             argv,
             timeout: Duration::from_secs(120),
+            userns: drumsd_linux::provision::own_userns(init_pid),
         };
         let out = tokio::task::spawn_blocking(move || drumsd_linux::provision::run(&spec)).await.map_err(e500)?.map_err(|e| ApiError::new(500, format!("provisioning: {e}")))?;
         // the command itself is not logged (OSWorld commands carry {CLIENT_PASSWORD}); its exit and timing are
