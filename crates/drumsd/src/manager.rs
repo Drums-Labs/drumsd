@@ -1454,11 +1454,6 @@ impl Manager {
         }
         gates.push(iso);
         t.insert("hash_isolation".into(), round3(ts.elapsed().as_secs_f64()));
-        // a state saved after an app crashed holds the broken app: every env made from it is invalid from the start
-        // (not a restore failure: the env comes up, so the reward says why it is not usable)
-        if let Some(taint) = &c.crash_taint {
-            gates.push(GateResult::fail(Gate::NoAppCrash, 0.0, json!({"inherited": taint, "checkpoint": c.id})));
-        }
         gates.push(GateResult::pending(Gate::AliveAfterResume));
         if let Some(f) = gates.first_failure() {
             let msg = format!("gate {} failed: {}", f.gate.as_str(), f.detail);
@@ -1467,6 +1462,13 @@ impl Manager {
                 tg.clear();
             }
             return Err(fail(FailureClass::GateFailed, msg, &gates, &t));
+        }
+
+        // a state saved after an app crashed holds the broken app: every env made from it is invalid from the start.
+        // Added after the restore gates' check: the restore itself is sound, so the env comes up (not quarantined, not
+        // killed) and its rewards say why they are not usable
+        if let Some(taint) = &c.crash_taint {
+            gates.push(GateResult::fail(Gate::NoAppCrash, 0.0, json!({"inherited": taint, "checkpoint": c.id})));
         }
 
         // the episode's OOM baseline, taken BEFORE the task setup: an app the setup launches can be OOM-killed while it
