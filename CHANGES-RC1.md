@@ -6,10 +6,10 @@ was measured on the release tarball built from these heads, and from no other br
 
 | repo | rc1 head | base |
 |---|---|---|
-| drumsd | `957b010f1` | runtime-v0.4.2 `3841ee705` (released internally) |
-| drums-lab | `e19909ef9` | fix/session-fidelity `15e29e437` (= v0.4.2's pin; app-compat 0f6b2b6 + the image's own login) |
+| drumsd | `c6aedae97` | runtime-v0.4.2 `3841ee705` (released internally) |
+| drums-lab | `cb3145d92` | fix/session-fidelity `15e29e437` (= v0.4.2's pin; app-compat 0f6b2b6 + the image's own login) |
 | drums-criu | `b4fbfddf1` | drums-main `358380f66` |
-| drums-verifiers | tag `rc1` -> `7585cf894` | main (the prime-rl adapter: turn cap, admission retry, cleanup) |
+| drums-verifiers | tag `rc1` -> `4e6f51e61` | main (the prime-rl adapter: turn cap, admission retry, cleanup) |
 
 **Coordinator decisions in RC1, labelled as such; the owner has not yet approved them:**
 - the HARDENED slot profile is the default, and `--trusted-unhardened` (`"harden": false`) is a documented opt-out for trusted-only hosts;
@@ -77,6 +77,8 @@ Why: each one resolves a merge at its root, or makes the hardened default work u
 - `3589ed7` docs: security.md (the hardened slot profile, its limits, the trusted-only opt-out), procview.md (the opt-in per-env view)
 - `5ac1032` rc1: drop what the runtime-v0.5 merge added twice (RetentionConfig and its test, blocks_checkpoint_delete: cherry-picked into 0.4.2 at other places); provenance test compares against the current inspection
 - `efd5026` slotfs: a branch gets its origin's access to the slot and images directories (a hardened slot restores in its own user namespace, where CRIU reads the images as the slot's mapped root; drumsd's 0700 root-only dirs failed every restore with 'Unable to open tty-info.img: Permission denied'); test
+- `cf72484` rc1 docs: CHANGES-RC1.md (every merged commit and why), the RC1 changelog entry, README and QUICKSTART on the hardened default and the opt-in view; the release ships and requires CHANGES-RC1.md, docs/security.md and docs/procview.md
+- `c6aedae` tests: oom_host case A accepts an env that is already invalid when it is handed out (no_oom_kill named; since no_app_crash a setup-time OOM can also kill Chrome with SIGTRAP before wait_valid); lock: drums-lab rc1 cb3145d
 
 ## drums-lab (`rc1`)
 
@@ -135,6 +137,7 @@ Why: the slot side of the opt-in per-env view (read-only binds, the mount contra
 ### [rc1] commits made while building RC1
 
 - `2de95e0` harden: the hardened slot profile stays the default; "harden": false is the trusted-only opt-out
+- `cb3145d` tests: the OCI reference bundle's user has the image's groups minus the administrator ones (4343e68 drops sudo, gid 27); the expectation still had it (rc1 full-suite run on Linux: 875/876)
 
 The conflict resolutions are in the merge commits' messages. pageshare.sweep keeps both backstops, and runs no cgroup.kill before the replaced-slot check. CRIU external mounts now come from the slot's own mount table, so the device binds of a hardened slot and the view binds of a view slot are each named exactly when they exist.
 
@@ -170,14 +173,14 @@ Why: the root cause of the restored-Chrome crash in fork copies. CRIU dropped ea
 
 ## drums-verifiers (tag `rc1`)
 
-The tag points at main `7585cf8`. It adds no commits; for context, the adapter's last commits:
+The tag points at main `4e6f51e`: `7585cf8` (the adapter that daily-use and prime-rl-adapter validated) plus `4e6f51e`, which removes the sudo password from the ScaleCUA prompt. The prompt is a modification of Apache-2.0 SCALE-CUA text, and the file header marks it as one. The adapter's last commits:
 
-- `64641fe` admission: a create or fork refused by drumsd with 429 Overloaded (nothing started) waits and asks again, up to admission_wait_s (900 s), every wait recorded; any episode that ends before a trace is scored gets a failed-episode row; summary checks prime-rl's trace-less episodes against those rows (found in the fresh-host mock acceptance: 4 concurrent fork episodes on a c8i.4xlarge, one fork refused, the episode lost silently and the run still passed); tests
 - `1d476d8` soak: --hard-stop-utc (no iteration starts after it, a running one is killed at it and marked partial), so a shared model endpoint is released on time
 - `83a2d26` inject: slot number from the record's num (fork child ids are s<n>-<k>, found in a mock soak where the crashed restore never fired)
 - `bd276e8` latency_probe: a shared model endpoint's latency during a soak (one short request every 30 s, vLLM running/waiting/KV gauges)
 - `e993cb1` close envs that never came up: a create that comes back down (RestoreFailed) and failed fork children were never closed and stayed in drumsd's live list as down slots (found in the real-model soak: crashed restore of the control parent s245-2); test fails without the fix. refused_calls.py: second, labelled verdict exempting only tool calls the adapter refused as invalid actions (count must equal invalid_actions)
 - `7585cf8` cleanup survives a drumsd restart: env close and fork-state delete are retried while drumsd is unreachable (up to 120 s; the SDK never retries a DELETE), a cleanup that still fails is recorded and fails the acceptance check (found in the real-model soak: a fork group's closes fell in the 1.28 s restart after the injected SIGKILL; 2 ready + 1 down slots and the fork state s418-c422 were left behind); test fails without the fix
+- `4e6f51e` scalecua: the system prompt no longer gives the model the image's sudo password (a marked modification of the Apache-2.0 SCALE-CUA text; in a Drums env the desktop user has no privilege escalation and an agent is never handed a credential); test
 
 ## Not in RC1
 
