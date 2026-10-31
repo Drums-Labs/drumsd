@@ -25,6 +25,11 @@ install. Log: `/var/log/drums-install.log`. Running `install.sh` again is safe (
 The API listens on 127.0.0.1. From your laptop, tunnel it: `ssh -L 7070:127.0.0.1:7070 <host>`. `--remote` binds all
 interfaces instead, over plain HTTP with only the bearer token: use it only inside a private network.
 
+Envs run in the **hardened profile** by default. Each desktop gets its own user namespace, so root in it is an
+unprivileged host uid. It also gets no_new_privs, a capability bounding set, seccomp and a metadata firewall. The desktop
+user has no sudo. See [docs/security.md](docs/security.md). `--trusted-unhardened` turns the profile off, and only belongs
+on hosts that run code you trust. `--procview` (opt-in) gives each env its own memory/CPU view: [docs/procview.md](docs/procview.md).
+
 ## 3. Connect
 
 ```

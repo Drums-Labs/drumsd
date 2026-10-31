@@ -1,5 +1,24 @@
 # Changelog
 
+## RC1, 2026-10-31
+
+Release candidate 1: one build of the pieces that were on separate branches (CHANGES-RC1.md lists every commit), and
+no new features beyond the profile switch below.
+- **Envs run in the hardened profile by default** ([docs/security.md](docs/security.md)). Each desktop runs in its own
+  user namespace (root in it is host uid 100000), with no_new_privs, an 18-capability bounding set, a seccomp blocklist
+  and a metadata firewall. drumsd restores such checkpoints on the idmapped image view with `userxattr` and the host
+  device binds. A branch gets its origin's directory access. The installer pins `uidmap` and `python3-seccomp` and
+  delegates `root:100000:6553600` in `/etc/subuid` and `/etc/subgid`. `--trusted-unhardened` (`"harden": false`) is
+  the opt-out, for hosts that run only trusted code. Hardened-by-default and the opt-out are the coordinator's
+  recommendation; the owner has not yet approved them.
+- **The per-env memory/CPU view (from 0.5) is opt-in:** `--procview` ([docs/procview.md](docs/procview.md)).
+- **From 0.5:** one template-server start at a time (concurrent creates after a reinstall failed); per-gate
+  state-hash timing; `--swap-mib`.
+- **drums-criu rc1:** fix/userns-slot (dump/restore of a slot in its own user namespace) plus fix/pkeys (memory
+  protection keys).
+- **drums-lab rc1:** harness/reset-failures and harness/oom-inotify (reset, capture and restore failures under load;
+  template servers protected from the OOM killer).
+
 ## fork-chrome-crash (on daily-use; SDK 0.2.5), 2026-10-31
 
 **Correctness**

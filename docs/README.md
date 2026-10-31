@@ -1,4 +1,6 @@
-# Drums 0.4.2
+# Drums RC1
+
+Release candidate 1 for evaluation and rollout support (drumsd 0.4.2 line; see CHANGES-RC1.md and RC1-VALIDATION.md).
 
 Drums runs isolated Linux desktops (the OSWorld Ubuntu image) as checkpointed process trees on one host, for
 computer-use RL. You create environments, act in them with pyautogui code or shell commands, fork a reached state into
@@ -21,6 +23,8 @@ valid: restored correctly, isolated, never quarantined.
 | `docs/actions-and-observations.md` | screen size, coordinates, action types, who `execute` runs as, screenshots |
 | `docs/validity.md` | the gates and what `Reward.valid` means |
 | `docs/custom-tasks.md` | your own tasks: setup steps, your app and data, reward functions in Python (lab verifiers) |
+| `docs/security.md` | the hardened env profile (default), its limits, and the trusted-only `--trusted-unhardened` opt-out |
+| `docs/procview.md` | the opt-in per-env memory/CPU view (`--procview`) |
 | `docs/lifecycle.md` | env states, leases, cleanup, fork states, records, reboots, metrics windows |
 | `examples/` | `rl_loop.py` (a minimal leak-free loop), `fork_and_verify.py`, `concurrency.py` |
 | `api/openapi.json` | the HTTP API (also served at `GET /openapi.json`) |
