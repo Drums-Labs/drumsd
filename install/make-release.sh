@@ -21,7 +21,7 @@ git -C "$HERE" archive --format=tar HEAD install | tar -x -C "$R"; cp "$R/instal
 # the user docs, from the same commit: a customer reads these, not the wheel's source
 git -C "$HERE" archive --format=tar HEAD QUICKSTART.md CHANGELOG.md docs examples api/openapi.json | tar -x -C "$R"
 mv "$R/docs/README.md" "$R/README.md"
-for f in README.md QUICKSTART.md CHANGELOG.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md api/openapi.json; do
+for f in README.md QUICKSTART.md CHANGELOG.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md api/openapi.json; do
   [ -s "$R/$f" ] || { echo "release is missing $f" >&2; exit 1; }
 done
 echo "$C" > "$R/RELEASE_COMMIT"

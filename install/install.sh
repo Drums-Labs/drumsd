@@ -189,6 +189,8 @@ say "drumsd: building with Rust $(lk rust_toolchain) (--locked)"
 (cd "$O/src/drumsd" && with_progress "drumsd build" "$O/rust/bin/cargo" build -q --release --locked) > "$D/drumsd-build.log" 2>&1 || { tail -30 "$D/drumsd-build.log"; die "drumsd build"; }
 install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
+# lab verifiers (docs/custom-tasks.md): root-owned, so a task can name one but never supply its code
+install -d -m 0755 -o root -g root "$E/verifiers"
 # the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
 rm -rf "$O/sdk"; install -d -m 0755 "$O/sdk"
 for w in "$REL"/sdk/drums-*-py3-none-any.whl; do [ -f "$w" ] && install -m 0644 "$w" "$O/sdk/"; done

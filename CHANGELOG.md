@@ -1,5 +1,18 @@
 # Changelog
 
+## daily-use (on 0.4.2), 2026-10-31
+
+What an outside lab's own (non-OSWorld) tasks needed.
+- **Lab verifiers:** a task's evaluator may be `{"func": "drums_verifier", "verifier": NAME, "function": FN,
+  "options": {...}}`. drumsd scores the episode with FN from `/etc/drums/verifiers/NAME.py`: plain Python, run on the
+  host as the unprivileged checker user, reading the desktop through `ctx.read_file` / `ctx.run`. Only root-owned files
+  that nobody else can write are loaded. A task names a verifier and never carries code. Exceptions and non-numeric
+  returns are checker errors, never scores. `info` returns in the reward's `checker` block. Before this, such a task
+  failed at setup (`AttributeError: ... no attribute 'drums_verifier'`).
+- The installer creates `/etc/drums/verifiers` (root, 0755); `osw.verifiers_dir` in drumsd.json overrides it.
+- New doc `docs/custom-tasks.md`: the task format, the setup steps and who runs them, host files for setup, lab
+  verifiers, one-time setup via a saved state.
+
 ## 0.4.2 (SDK 0.2.4), 2026-10-30
 
 A patch release: fixes for what an outside user hit with 0.4.1. Same pins: drums-lab 15e29e4, drums-criu fbbd7c20a,
