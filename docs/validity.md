@@ -10,7 +10,8 @@ episode carries a **gate report**, and a reward is usable for training only when
 
 1. every gate below passed (none failed, none still pending);
 2. the env was never quarantined during the episode;
-3. no task of the env was killed by the OOM killer during the episode (setup, actions, and the checker included).
+3. no task of the env was killed by the OOM killer during the episode (setup, actions, and the checker included);
+4. no process of the env died of a crash signal during the episode (`no_app_crash`, below).
 
 Train only on rewards with `valid == True`. `verify()` (strict, the default) raises `InvalidEpisode` instead of returning
 any other reward; `verify(strict=False)` returns it with `valid=False` and `invalid_reasons`.
@@ -33,7 +34,38 @@ any other reward; `verify(strict=False)` returns it with `valid=False` and `inva
 | `isolation` | pid, mount, net, ipc and uts namespaces differ from the host's and every other env's | after ready |
 | `alive_after_resume` | every restored process is still running 5 s after the env answered (known natural exits excluded) | ready + 5 s |
 | `no_oom_kill` | added only as **failed**, when the OOM killer took a task of the env during the episode | each step, and before verify reads validity |
+| `no_app_crash` | added only as **failed**, when a process of the env died of a crash signal (SIGSEGV, SIGILL, SIGBUS, SIGFPE, SIGABRT, SIGTRAP, SIGSYS) since its restore began, or when drumsd cannot vouch for the episode (below); its detail names what crashed | each step, `gates()`/`refresh()`, before verify reads validity, at fork/save, at the episode's end |
 | `not_quarantined` | added only as **failed**, when the env was quarantined (by you, a failed gate, a failed save, a failed task setup, or a daemon restart during a save); its detail names the reason | when it is quarantined |
+
+## App crashes (`no_app_crash`)
+
+A desktop can look alive while an app in it is broken: when a Chrome renderer dies, the browser stays up and shows
+"Can't open this page", so the process gates and the checker do not see it, and the checker scores the broken page
+(a valid 0.0). drumsd watches the kernel's process events (the process events connector, filtered to exits with a
+non-zero status) for every exit by a crash signal, attributes it to the cgroup of the dead process (or of its parent,
+when the process was already reaped), and fails `no_app_crash` for the episode whose tree it was in:
+
+```python
+r = env.verify(strict=False)
+r.valid            # False
+r.bad_gates        # ["no_app_crash"]
+r.invalid_reasons  # ["no_app_crash: chrome (pid 15003) died of SIGILL; a child of chrome (pid 15982) died of SIGILL"]
+```
+
+- It covers the restore, the task setup, every action and the checker's own steps.
+- A fork or save of an env whose app crashed carries the crash: the saved state is marked, and every env made from it
+  starts with `no_app_crash` failed ("made from saved state ... captured after an app crash").
+- **Fail closed.** The episode is also invalid when drumsd cannot vouch for it: the kernel dropped process events
+  (socket overflow), a crash could not be attributed to any cgroup, the watch stopped, or the episode started before
+  the watch did. The last one means: **after a restart of drumsd, the envs it adopts finish their current episode
+  invalid** (a crash while drumsd was down would be unseen); their next reset is a new, judged episode.
+- An app that exits normally, or is killed (SIGKILL, SIGTERM: what a reset does), is not a crash. A crash that is part
+  of what an app does on purpose is still a crash here: drumsd cannot tell it apart.
+- drumsd refuses to start when it cannot open the watch (it needs root in the host's initial user namespace).
+  `"crash_watch": false` in drumsd.json turns it off; `/v1/health` then warns that an env whose app crashed can return
+  a valid reward. Do not turn it off on a host whose rewards you train on.
+- `/v1/health` → `crash_watch` (running, events seen, unattributed, overflows); `/v1/metrics` →
+  `drumsd_app_crashes_total{signal}`.
 
 ## Verdicts
 

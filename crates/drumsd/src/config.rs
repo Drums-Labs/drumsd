@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn d_true() -> bool {
+    true
+}
 fn d_listen() -> String {
     "127.0.0.1:7070".into()
 }
@@ -85,6 +88,11 @@ pub struct Config {
     /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.
     #[serde(default)]
     pub nested_pidns: bool,
+    /// The `no_app_crash` gate: watch the kernel's process events for exits by crash signal (SIGSEGV, SIGILL, ...) in
+    /// env trees. On by default; drumsd refuses to start when it cannot open the watch. Turn it off only on a host
+    /// whose rewards nobody trains on: without it, an env whose app crashed can return a valid reward.
+    #[serde(default = "d_true")]
+    pub crash_watch: bool,
     /// File holding the API bearer token (generated at install, mode 0600). Every route except `GET /healthz` needs
     /// `Authorization: Bearer <token>`. drumsd refuses to start without one.
     pub token_file: Option<PathBuf>,
@@ -298,6 +306,18 @@ pub struct OswConfig {
     /// None = the helper's default, /etc/drums/verifiers.
     #[serde(default)]
     pub verifiers_dir: Option<PathBuf>,
+    /// The only host directory a task's `upload_file` setup step may read (a file under it, symlinks resolved).
+    /// None = /var/lib/drums/assets.
+    #[serde(default)]
+    pub assets_dir: Option<PathBuf>,
+}
+
+pub const DEFAULT_ASSETS_DIR: &str = "/var/lib/drums/assets";
+
+impl OswConfig {
+    pub fn assets_dir(&self) -> PathBuf {
+        self.assets_dir.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_ASSETS_DIR))
+    }
 }
 
 fn d_setup_t() -> u64 {
@@ -376,6 +396,7 @@ mod tests {
     #[test]
     fn old_configs_still_load() {
         let c = cfg("127.0.0.1:7070", false, None);
+        assert!(c.crash_watch, "the crash watch is on unless a config turns it off");
         assert!(!c.nested_pidns && c.osw.is_none() && c.host_usd_per_hour == 0.0);
         assert_eq!(c.quiesce, QuiesceConfig::default(), "an old config gets the readiness check with its defaults");
         assert_eq!(c.forgotten_dir(), PathBuf::from("/forgotten"), "records go next to the journal, not to the state dir");

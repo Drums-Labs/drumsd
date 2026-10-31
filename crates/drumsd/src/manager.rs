@@ -75,6 +75,9 @@ pub struct SlotRecord {
     pub last_error: Option<String>,
     pub task: Option<Value>,
     pub ready_epoch: Option<f64>,
+    /// When this episode's restore began (the crash watch judges the episode's tree from then on).
+    #[serde(default)]
+    pub episode_start_epoch: Option<f64>,
     pub created_epoch: f64,
     pub updated_epoch: f64,
     /// OSWorld task setup runs after every restore of this slot (a slot made from a clean image with a task). False for
@@ -132,6 +135,10 @@ pub struct CheckpointRecord {
     /// When the last env made from it closed (its idle time counts from this or its creation).
     #[serde(default)]
     pub last_used_epoch: Option<f64>,
+    /// Set when the env it was captured from had an app crash (or an unvouched stretch) in its episode before or
+    /// during the dump: every env made from it starts with a failed `no_app_crash` gate naming this reason.
+    #[serde(default)]
+    pub crash_taint: Option<String>,
 }
 
 /// Why an installed image's checkpoint does not match this drumsd's runtime (None: it matches, or it is a saved state).
@@ -256,6 +263,44 @@ pub struct Manager {
     pinned_states: StdMutex<BTreeSet<String>>,
     /// Held while a template server is being started (see ensure_server).
     server_start: StdMutex<()>,
+    /// Exits by crash signal, attributed by cgroup (the `no_app_crash` gate). None only when `crash_watch` is off.
+    pub crash: Option<drumsd_linux::crashwatch::CrashWatch>,
+    /// One-time provisioning capabilities: token -> the slot and (during a restore's task setup, before the slot record
+    /// has them) its tree's init pid and cgroup; valid while one OSWorld helper call for that slot runs.
+    provision_tokens: StdMutex<BTreeMap<String, ProvisionTarget>>,
+    /// The image's desktop user (from the image inspection): provisioning steps run as this user, with sudo for the step.
+    image_user: Option<ImageUser>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProvisionTarget {
+    pub num: u32,
+    /// (init pid, the tree's cgroup) when the caller knows them better than the slot record (a restore's setup).
+    pub tree: Option<(i32, PathBuf)>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ImageUser {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: String,
+}
+
+/// The desktop user of the image, from the runtime config's inspection file.
+pub fn read_image_user(py_config: &Path) -> Result<ImageUser, String> {
+    let cfg: Value = serde_json::from_slice(&std::fs::read(py_config).map_err(|e| format!("{}: {e}", py_config.display()))?).map_err(|e| e.to_string())?;
+    let insp = cfg["inspection"].as_str().ok_or("runtime config has no inspection path")?;
+    let i: Value = serde_json::from_slice(&std::fs::read(insp).map_err(|e| format!("{insp}: {e}"))?).map_err(|e| e.to_string())?;
+    serde_json::from_value(i["user"].clone()).map_err(|e| format!("inspection user: {e}"))
+}
+
+/// 32 random bytes, hex (a provisioning capability).
+pub fn random_token() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 32];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).expect("/dev/urandom");
+    hex::encode(b)
 }
 
 /// Lease and readiness options for a new env or saved state (from the request; None = the daemon's default).
@@ -314,6 +359,8 @@ struct RestoreOk {
     ready_at: Instant,
     ready_epoch: f64,
     upper_warm: bool,
+    /// When the CRIU restore was spawned: the episode's tree is judged by the crash watch from then on.
+    spawn_epoch: f64,
 }
 
 impl Manager {
@@ -354,7 +401,26 @@ impl Manager {
         }
         let provenance = provenance(&source_sha, &cfg.py_config);
         let criu_sha256 = std::fs::read(&cfg.criu).map(|b| hex_sha256(&b)).unwrap_or_else(|e| format!("unreadable: {e}"));
+        // the crash watch starts before any env is adopted or made: an episode it did not see from its start is never
+        // vouched for (judge() reports it incomplete)
+        let crash = if cfg.crash_watch {
+            Some(drumsd_linux::crashwatch::start().map_err(|e| format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on"))?)
+        } else {
+            tracing::warn!("crash_watch is off: an app that crashes in an env does not make its episode invalid");
+            None
+        };
+        metrics.counter("drumsd_app_crashes_total", "Processes of envs that died of a crash signal, by signal");
+        let image_user = match read_image_user(&cfg.py_config) {
+            Ok(u) => Some(u),
+            Err(e) => {
+                tracing::warn!("no image user for provisioning steps ({e}): task setup steps that use sudo will fail");
+                None
+            }
+        };
         let m = Manager {
+            crash,
+            provision_tokens: StdMutex::new(BTreeMap::new()),
+            image_user,
             usage: StdMutex::new(u),
             token,
             started_epoch: drumsd_linux::now_epoch(),
@@ -641,6 +707,7 @@ impl Manager {
                 lease: None,
                 delete_with_children: false,
                 last_used_epoch: None,
+                crash_taint: None,
             };
             // the alive gate's reference set comes from the dump itself (CRIU's log of what it seized)
             if let Err(e) = write_dumped_reference(&sp.dir) {
@@ -797,6 +864,10 @@ impl Manager {
             if osworld_task_id(t).is_some() && self.cfg.osw.is_none() {
                 return Err(ApiError::new(400, "task: this drumsd has no OSWorld helper configured (osw)"));
             }
+            if let Some((id, why)) = osworld_task_id(t).and_then(|id| unsupported_reason(&id).map(|w| (id, w))) {
+                return Err(ApiError::new(422, format!("task {id} is unsupported in this execution profile: {why}"))
+                    .with(json!({"code": "task_unsupported", "task_id": id, "reason": why})));
+            }
         }
         let (task, setup_on_restore) = match task {
             Some(t) => {
@@ -835,6 +906,7 @@ impl Manager {
             last_error: None,
             task,
             ready_epoch: None,
+            episode_start_epoch: None,
             created_epoch: now,
             updated_epoch: now,
             task_setup_on_restore: setup_on_restore,
@@ -925,9 +997,66 @@ impl Manager {
         });
     }
 
+    /// Both after-the-fact checks of a running episode: OOM kills and app crashes.
+    fn check_episode(&self, slot: &Slot) {
+        self.check_oom(slot);
+        self.check_crash(slot);
+    }
+
+    /// The cgroup that holds the slot's running tree (its leaf, or the slot cgroup itself without leaves).
+    fn episode_cg(&self, num: u32, leaf: u8) -> PathBuf {
+        let marker = slotfs::marker_for(&self.cfg.state_dir, num);
+        if leaf == 0 { cgroup::slot_cg(&marker) } else { cgroup::slot_leaf(&marker, leaf) }
+    }
+
+    /// What the crash watch says about the slot's current episode. None when there is no episode, or no watch.
+    fn crash_judgment(&self, slot: &Slot) -> Option<(u64, drumsd_linux::crashwatch::Judgment)> {
+        let w = self.crash.as_ref()?;
+        let (num, leaf, episode, start, has_pid) = {
+            let v = slot.view.read().unwrap();
+            (v.num, v.leaf, v.episode, v.episode_start_epoch, v.init_pid.is_some())
+        };
+        if episode == 0 || !has_pid {
+            return None;
+        }
+        let cg = self.episode_cg(num, leaf);
+        // an episode with no recorded start (adopted from a record written before the watch existed) cannot be vouched for
+        let since = start.unwrap_or(0.0);
+        Some((episode, w.judge(&cg.display().to_string(), since)))
+    }
+
+    /// The episode is invalid if any process of its tree died of a crash signal, or if the watch cannot vouch for it:
+    /// a failed `no_app_crash` gate, once per episode, naming what crashed.
+    pub fn check_crash(&self, slot: &Slot) {
+        if slot.view.read().unwrap().gates.get(Gate::NoAppCrash).map(|g| g.status == GateStatus::Fail).unwrap_or(false) {
+            return;
+        }
+        let Some((episode, j)) = self.crash_judgment(slot) else { return };
+        if j.clean() {
+            return;
+        }
+        for c in &j.crashes {
+            self.metrics.inc("drumsd_app_crashes_total", &[("signal", c.signal_name.as_str())], 1.0);
+        }
+        let r = GateResult::fail(Gate::NoAppCrash, 0.0, json!({"crashes": j.crashes, "incomplete": j.incomplete}));
+        self.metrics.inc("drumsd_gate_results_total", &[("gate", "no_app_crash"), ("status", "fail")], 1.0);
+        self.event(json!({"slot": slot.id, "episode": episode, "no_app_crash": r.detail}));
+        let mut applied = false;
+        self.put_slot(slot, |rec| {
+            if rec.episode == episode {
+                rec.gates.push(r.clone());
+                rec.validity = rec.gates.validity(&required_gates());
+                applied = true;
+            }
+        });
+        if applied {
+            self.account(Some(slot), |l| l.failure("gate:no_app_crash"));
+        }
+    }
+
     /// Count the episode that is ending by its final validity.
     fn finalize_episode(&self, slot: &Slot) {
-        self.check_oom(slot);
+        self.check_episode(slot);
         let v = slot.view.read().unwrap();
         if v.episode == 0 {
             return;
@@ -1017,7 +1146,9 @@ impl Manager {
                     if osworld_task_id(&t).is_some() {
                         let ts = Instant::now();
                         let me = self.clone();
-                        let r = tokio::task::spawn_blocking(move || me.osw("setup", num, &t, None)).await.map_err(e500)?;
+                        // the new tree is not in the slot record yet: provisioning steps of this setup run in it
+                        let tree = Some((ok.pid, self.episode_cg(num, ok.leaf)));
+                        let r = tokio::task::spawn_blocking(move || me.osw_on("setup", num, &t, None, tree)).await.map_err(e500)?;
                         let secs = ts.elapsed().as_secs_f64();
                         setup_s = Some(round3(secs));
                         self.account(Some(slot), |l| l.op("task_setup", secs, r.is_ok()));
@@ -1086,6 +1217,7 @@ impl Manager {
                     r.timings = timings;
                     r.last_error = None;
                     r.ready_epoch = Some(ok.ready_epoch);
+                    r.episode_start_epoch = Some(ok.spawn_epoch);
                     r.mode = if private { "private".into() } else { "template".into() };
                 });
                 self.metrics.inc("drumsd_ops_total", &[("op", op.as_str()), ("outcome", "ok")], 1.0);
@@ -1375,6 +1507,13 @@ impl Manager {
             return Err(fail(FailureClass::GateFailed, msg, &gates, &t));
         }
 
+        // a state saved after an app crashed holds the broken app: every env made from it is invalid from the start.
+        // Added after the restore gates' check: the restore itself is sound, so the env comes up (not quarantined, not
+        // killed) and its rewards say why they are not usable
+        if let Some(taint) = &c.crash_taint {
+            gates.push(GateResult::fail(Gate::NoAppCrash, 0.0, json!({"inherited": taint, "checkpoint": c.id})));
+        }
+
         // the episode's OOM baseline, taken BEFORE the task setup: an app the setup launches can be OOM-killed while it
         // starts, and that kill belongs to this episode (it used to be taken after the setup and missed it). Any growth
         // of the slot cgroup's oom_kill counter (hierarchical memory.events: every task of the tree) invalidates it.
@@ -1399,7 +1538,7 @@ impl Manager {
                    "last_restore": {"by": "drumsd", "log": log.file_name().map(|x| x.to_string_lossy().to_string()), "epoch": drumsd_linux::now_epoch()}}),
         );
         t.insert("sync_total".into(), round3(t_all.elapsed().as_secs_f64()));
-        Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm })
+        Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm, spawn_epoch })
     }
 
     /// After a restore: the alive gate at ready + alive_after_s, the next warm spare, trash removal.
@@ -1485,6 +1624,8 @@ impl Manager {
         if applied && failed {
             self.account(Some(slot), |l| l.failure("gate:alive_after_resume"));
         }
+        // a crash in the first seconds (the restore itself, the task's setup) shows in the verdict wait_valid() reads
+        self.check_crash(slot);
     }
 
     pub async fn step(self: &Arc<Self>, id: &str, action: Value, screenshot: bool) -> R<Value> {
@@ -1505,7 +1646,7 @@ impl Manager {
         let secs = t0.elapsed().as_secs_f64();
         self.account(Some(&slot), |l| l.op("step", secs, out.is_ok()));
         let out = out.map_err(|e| ApiError::new(502, e.to_string()))?;
-        self.check_oom(&slot);
+        self.check_episode(&slot);
         let cur = slot.view.read().unwrap().clone();
         Ok(json!({"result": out.0, "screenshot_png_b64": out.1.map(|p| b64(&p)), "episode": cur.episode, "validity": cur.validity,
                   "seconds": round3(t0.elapsed().as_secs_f64())}))
@@ -1716,6 +1857,9 @@ impl Manager {
                 continue;
             }
             attempts.push(att);
+            // an app that crashed in the source before or during the dump is in the saved state too
+            self.check_episode(&slot);
+            let taint = slot.view.read().unwrap().gates.get(Gate::NoAppCrash).filter(|g| g.status == GateStatus::Fail).map(|g| app_crash_words(&g.detail));
             let quiescence = json!({"attempts": attempts, "params": params, "seconds": round3(t0.elapsed().as_secs_f64()),
                                     "wait_s_total": round3(attempts.iter().filter_map(|a| a["wait_s"].as_f64()).sum::<f64>())});
             let c = c.map(|mut c| {
@@ -1729,6 +1873,7 @@ impl Manager {
                 c.quiescence = Some(quiescence.clone());
                 c.lease = Some(state_lease);
                 c.delete_with_children = delete_with_children;
+                c.crash_taint = taint.clone();
                 self.put_ckpt(&c);
                 c
             });
@@ -2134,13 +2279,30 @@ impl Manager {
     /// Run the OSWorld helper (`drums_osw.py VERB`) as the unprivileged user, request on stdin, JSON reply on the last
     /// stdout line. Blocking.
     pub fn osw(&self, verb: &str, num: u32, task: &Value, extra: Option<Value>) -> Result<Value, String> {
+        self.osw_on(verb, num, task, extra, None)
+    }
+
+    /// `osw` for a tree the slot record does not name yet (`tree`: init pid and cgroup), e.g. a restore's task setup.
+    pub fn osw_on(&self, verb: &str, num: u32, task: &Value, extra: Option<Value>, tree: Option<(i32, PathBuf)>) -> Result<Value, String> {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt;
         let o = self.cfg.osw.as_ref().ok_or("no OSWorld helper configured (osw)")?;
         let (server, chromium, vlc) = self.osw_ports(num);
+        // a one-time capability for this call: setup steps that run sudo go to drumsd (provision_step), not to the desktop
+        let token = random_token();
+        self.provision_tokens.lock().unwrap().insert(token.clone(), ProvisionTarget { num, tree });
+        struct Revoke<'a>(&'a StdMutex<BTreeMap<String, ProvisionTarget>>, String);
+        impl Drop for Revoke<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().remove(&self.1);
+            }
+        }
+        let _revoke = Revoke(&self.provision_tokens, token.clone());
+        let port = self.cfg.listen.rsplit(':').next().unwrap_or("7070");
         let req = json!({"task": task, "host": "127.0.0.1", "server_port": server, "chromium_port": chromium, "vlc_port": vlc,
                          "cache_dir": o.cache_dir, "osworld_dir": o.osworld_dir, "client_password": o.client_password, "extra": extra,
-                         "verifiers_dir": o.verifiers_dir});
+                         "verifiers_dir": o.verifiers_dir, "assets_dir": o.assets_dir(),
+                         "provision_url": format!("http://127.0.0.1:{port}/provision/{token}")});
         let timeout = Duration::from_secs(if verb == "evaluate" { o.eval_timeout_s } else { o.setup_timeout_s });
         let mut cmd = std::process::Command::new(&o.python);
         cmd.arg("-I").arg(&o.helper).arg(verb).current_dir(&o.osworld_dir).env_clear()
@@ -2177,6 +2339,53 @@ impl Manager {
             Some(v) => Err(v["error"].as_str().unwrap_or("helper reported failure").chars().take(1500).collect()),
             None => Err(format!("osw {verb} exit {:?}, no reply; stderr: {}", out.status.code(), stderr.chars().rev().take(1200).collect::<String>().chars().rev().collect::<String>())),
         }
+    }
+
+    /// A task setup step that needs root (its command runs sudo), sent by the OSWorld helper of a running setup or
+    /// checker call through that call's capability URL. Runs in the slot as the desktop user with sudo for this step
+    /// only (drumsd_linux::provision). Reply in the guest server's /setup/execute form.
+    pub async fn provision_step(self: &Arc<Self>, token: &str, body: Value) -> R<Value> {
+        let target = self.provision_tokens.lock().unwrap().get(token).cloned().ok_or_else(|| ApiError::new(403, "unknown or expired provisioning token"))?;
+        let num = target.num;
+        let slot = {
+            let map = self.slots.read().unwrap();
+            map.values().find(|s| s.view.read().unwrap().num == num && !s.view.read().unwrap().state.is_terminal()).cloned()
+        }
+        .ok_or_else(|| ApiError::new(409, format!("no live env in slot {num}")))?;
+        let (init_pid, cgroup, id) = {
+            let v = slot.view.read().unwrap();
+            match &target.tree {
+                Some((p, cg)) => (Some(*p), cg.clone(), v.id.clone()),
+                None => (v.init_pid, self.episode_cg(num, v.leaf), v.id.clone()),
+            }
+        };
+        let init_pid = init_pid.ok_or_else(|| ApiError::new(409, format!("env {id} has no running tree")))?;
+        let user = self.image_user.clone().ok_or_else(|| ApiError::new(503, "no image user known (inspection unreadable): provisioning is unavailable"))?;
+        let shell = body["shell"].as_bool().unwrap_or(false);
+        // only what needs root comes here: everything else runs as the user through the guest server
+        if !drumsd_linux::provision::needs_root(&body["command"]) {
+            return Err(ApiError::new(400, "provisioning runs only setup steps whose command runs sudo"));
+        }
+        let argv = drumsd_linux::provision::step_argv(&body["command"], shell).map_err(|e| ApiError::new(400, e))?;
+        let spec = drumsd_linux::provision::ProvisionSpec {
+            init_pid,
+            cgroup,
+            user: user.name,
+            uid: user.uid,
+            gid: user.gid,
+            home: user.home,
+            argv,
+            timeout: Duration::from_secs(120),
+            userns: drumsd_linux::provision::own_userns(init_pid),
+        };
+        let out = tokio::task::spawn_blocking(move || drumsd_linux::provision::run(&spec)).await.map_err(e500)?.map_err(|e| ApiError::new(500, format!("provisioning: {e}")))?;
+        // the command itself is not logged (OSWorld commands carry {CLIENT_PASSWORD}); its exit and timing are
+        self.event(json!({"slot": id, "provision_step": {"returncode": out.returncode, "timed_out": out.timed_out, "seconds": round3(out.seconds)}}));
+        self.account(Some(&slot), |l| l.op("provision_step", out.seconds, out.returncode == Some(0)));
+        if out.timed_out {
+            return Ok(json!({"status": "error", "message": "provisioning step timed out after 120 s", "output": out.output, "error": out.error, "returncode": null}));
+        }
+        Ok(json!({"status": "success", "output": out.output, "error": out.error, "returncode": out.returncode}))
     }
 
     /// Load an OSWorld task into a ready slot: its setup runs now, and again after every reset of this slot.
@@ -2253,7 +2462,7 @@ impl Manager {
         // an OOM kill since the last step (GIMP was killed while it built the filter the last click opened, then the
         // checker scored 0.0 and the reward came back valid) or during the checker's own postconfig actions: the
         // validity the reward carries is read only after this check
-        self.check_oom(&slot);
+        self.check_episode(&slot);
         let v = slot.view.read().unwrap().clone();
         let valid = v.validity == Validity::Valid && matches!(v.state, SlotState::Ready);
         let (score, err, detail) = match &r {
@@ -2302,7 +2511,8 @@ impl Manager {
                 let f = f.map_err(e500)?.path();
                 if f.extension().map(|x| x == "json").unwrap_or(false) {
                     if let Ok(t) = serde_json::from_slice::<Value>(&std::fs::read(&f).unwrap_or_default()) {
-                        out.push(json!({"id": t["id"], "domain": dom, "instruction": t["instruction"]}));
+                        let why = t["id"].as_str().and_then(unsupported_reason);
+                        out.push(json!({"id": t["id"], "domain": dom, "instruction": t["instruction"], "supported": why.is_none(), "unsupported_reason": why}));
                     }
                 }
             }
@@ -2451,6 +2661,11 @@ impl Manager {
                 }
             }
         }
+        match &self.crash {
+            None => warnings.push("crash_watch is off: an env whose app crashed can return a valid reward".into()),
+            Some(w) if !w.summary()["running"].as_bool().unwrap_or(false) => warnings.push("the crash watch stopped: every episode since then is invalid (no_app_crash)".into()),
+            _ => {}
+        }
         if left_on_tmpfs > 0 {
             warnings.push(format!("{} MiB of env records could not be packed and are on the state dir ({}/forgotten)", left_on_tmpfs >> 20, self.cfg.state_dir.display()));
         }
@@ -2474,6 +2689,7 @@ impl Manager {
         json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"),
                "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed, "status": pv_status}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
+               "crash_watch": self.crash.as_ref().map(|w| w.summary()),
                "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
                "state_dir_free_bytes": free(&self.cfg.state_dir), "warnings": warnings,
@@ -2651,6 +2867,7 @@ pub fn invalid_reasons(r: &SlotRecord) -> Vec<String> {
         out.push(match g {
             Gate::NotQuarantined => format!("quarantined: {}", d.and_then(|d| d["reason"].as_str()).unwrap_or("?")),
             Gate::NoOomKill => format!("no_oom_kill: the OOM killer took {} task(s) of the env", d.map(|d| d["oom_kills"].to_string()).unwrap_or_else(|| "?".into())),
+            Gate::NoAppCrash => format!("no_app_crash: {}", d.map(app_crash_words).unwrap_or_else(|| "?".into())),
             _ if r.gates.get(*g).is_none() => format!("gate {} missing", g.as_str()),
             _ => format!("gate {} failed", g.as_str()),
         });
@@ -2668,6 +2885,22 @@ pub fn invalid_reasons(r: &SlotRecord) -> Vec<String> {
         out.push(format!("env is {}", r.state.name()));
     }
     out
+}
+
+/// The `no_app_crash` detail in words: what died of what, or why the watch cannot vouch for the episode.
+pub fn app_crash_words(d: &Value) -> String {
+    let mut parts: Vec<String> = vec![];
+    if let Some(t) = d["inherited"].as_str() {
+        parts.push(format!("made from saved state {} captured after an app crash ({t})", d["checkpoint"].as_str().unwrap_or("?")));
+    }
+    for c in d["crashes"].as_array().into_iter().flatten() {
+        let who = c["comm"].as_str().map(|s| s.to_string()).unwrap_or_else(|| format!("a child of {}", c["parent_comm"].as_str().unwrap_or("?")));
+        parts.push(format!("{who} (pid {}) died of {}", c["tgid"], c["signal_name"].as_str().unwrap_or("?")));
+    }
+    for s in d["incomplete"].as_array().into_iter().flatten() {
+        parts.push(s.as_str().unwrap_or("?").to_string());
+    }
+    if parts.is_empty() { "?".into() } else { parts.join("; ") }
 }
 
 /// Key in slot.json that marks an env that failed at some point (value: the first reason seen).
@@ -2827,6 +3060,18 @@ pub fn hex_sha256(b: &[u8]) -> String {
 }
 
 /// An OSWorld task: an `id` usable as a directory name, a `config` list and an `evaluator` object.
+/// OSWorld tasks this execution profile cannot run: the agent gets no privilege escalation, and these need the agent
+/// itself to act as root (a task whose *setup* needs root is fine: drumsd runs that step as trusted provisioning).
+pub const UNSUPPORTED_AGENT_ROOT: [(&str, &str); 3] = [
+    ("5812b315-e7bd-4265-b51f-863c02174c28", "the agent must create a system user with SSH access (useradd, /etc/ssh): agent root is not available"),
+    ("94d95f96-9699-4208-98ba-3c3119edf9c2", "the agent must install a system package (Spotify: apt or snap): agent root is not available"),
+    ("b6781586-6346-41cd-935a-a6b1487918fc", "the agent must change the system time zone (timedatectl): agent root is not available (its setup also needs systemd, which a slot does not run)"),
+];
+
+pub fn unsupported_reason(task_id: &str) -> Option<&'static str> {
+    UNSUPPORTED_AGENT_ROOT.iter().find(|(id, _)| *id == task_id).map(|(_, w)| *w)
+}
+
 pub fn osworld_task_id(t: &Value) -> Option<String> {
     let id = t["id"].as_str()?;
     if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -2986,7 +3231,7 @@ mod tests {
         }
         SlotRecord { id: "s147".into(), num: 147, checkpoint: "osworld-ubuntu".into(), state, episode: 1, init_pid: Some(1), init_start_ticks: None,
                      restore_generation: 1, leaf: 1, mode: "template".into(), port: 25147, extra_ports: vec![], validity: gates.validity(&required_gates()), gates,
-                     cost: CostRecord::default(), timings: BTreeMap::new(), last_error: None, task: None, ready_epoch: None, created_epoch: 0.0,
+                     cost: CostRecord::default(), timings: BTreeMap::new(), last_error: None, task: None, ready_epoch: None, episode_start_epoch: None, created_epoch: 0.0,
                      updated_epoch: 0.0, task_setup_on_restore: false, usage: Ledger::default(), verified: None, closed_epoch: None, lease: None,
                      last_used_epoch: None, closed_reason: None }
     }
@@ -3030,6 +3275,33 @@ mod tests {
     }
 
     #[test]
+    fn an_app_crash_makes_the_episode_invalid_with_a_named_reason() {
+        let mut o = qrec(SlotState::Ready);
+        assert_eq!(o.validity, Validity::Valid);
+        let crash = json!({"crashes": [{"tgid": 15003, "pid": 15003, "comm": "chrome", "parent_comm": "chrome", "signal_name": "SIGILL"},
+                                       {"tgid": 15982, "pid": 15982, "comm": null, "parent_comm": "chrome", "signal_name": "SIGILL"}],
+                           "incomplete": []});
+        o.gates.push(GateResult::fail(Gate::NoAppCrash, 0.0, crash));
+        o.validity = o.gates.validity(&required_gates());
+        assert_eq!(o.validity, Validity::Invalid { gates: vec![Gate::NoAppCrash] });
+        assert_eq!(invalid_reasons(&o), vec!["no_app_crash: chrome (pid 15003) died of SIGILL; a child of chrome (pid 15982) died of SIGILL".to_string()]);
+        // an episode the watch cannot vouch for, and one made from a state saved after a crash
+        let w = app_crash_words(&json!({"crashes": [], "incomplete": ["the kernel dropped process events at 1.000 (socket overflow)"]}));
+        assert_eq!(w, "the kernel dropped process events at 1.000 (socket overflow)");
+        let w = app_crash_words(&json!({"inherited": "chrome (pid 9) died of SIGSEGV", "checkpoint": "s101-c102"}));
+        assert_eq!(w, "made from saved state s101-c102 captured after an app crash (chrome (pid 9) died of SIGSEGV)");
+    }
+
+    #[test]
+    fn tasks_that_need_agent_root_are_unsupported() {
+        assert!(unsupported_reason("5812b315-e7bd-4265-b51f-863c02174c28").unwrap().contains("agent root"));
+        assert!(unsupported_reason("b6781586-6346-41cd-935a-a6b1487918fc").is_some());
+        // a task whose setup alone uses sudo is supported (its setup runs as provisioning)
+        assert!(unsupported_reason("e0df059f-28a6-4169-924f-b9623e7184cc").is_none());
+        assert!(unsupported_reason("acme-expense-01").is_none());
+    }
+
+    #[test]
     fn operations_on_a_destroyed_env_are_410_env_gone() {
         let mut r = qrec(SlotState::Destroyed);
         r.closed_reason = Some("lease: idle 1800 s".into());
@@ -3060,7 +3332,7 @@ mod tests {
         CheckpointRecord { id: "osworld-ubuntu".into(), slot: 0, socket: "/s".into(), server_pid: None, argv_marker: "m".into(),
                            expected_state_hash: None, hash_reference: "r".into(), captured_from: captured_from.map(|s| s.into()),
                            created_epoch: 0.0, server_ready_s: 0.0, task: None, quiescence: None, provenance,
-                           lease: None, delete_with_children: false, last_used_epoch: None }
+                           lease: None, delete_with_children: false, last_used_epoch: None, crash_taint: None }
     }
 
     #[test]

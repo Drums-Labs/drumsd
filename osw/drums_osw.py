@@ -26,6 +26,14 @@ Lab verifiers (docs/custom-tasks.md): a task whose evaluator is {"func": "drums_
 /etc/drums/verifiers, `osw.verifiers_dir` in drumsd.json). Only files the host's root owns and nobody else can write
 are loaded: the task JSON (which any API client can send) names a verifier, it never carries code. FN runs here, as
 this unprivileged helper user, outside the desktop; it reads the desktop through `Ctx` (the slot's own guest server).
+
+No privilege escalation for the agent: the desktop user has no sudo in a slot (no administrator group, no_new_privs on
+every process it drives). A setup or postconfig step whose command runs `sudo` (OSWorld writes `echo {CLIENT_PASSWORD}
+| sudo -S ...`) is trusted provisioning: it is sent to drumsd (`provision_url`, a one-time capability for this call),
+which runs it in the slot as the user with sudo for that step only. Every other step goes to the guest server as before.
+
+`upload_file` reads only files under the assets directory (`assets_dir`, default /var/lib/drums/assets; symlinks are
+resolved first): a task names a host file, and any API client can send a task.
 """
 from __future__ import annotations
 
@@ -43,6 +51,7 @@ import urllib.request
 import uuid
 
 OSWORLD_COMMIT = "044bc33901cb893808e3f91ebc9a17ed8e54b44c"
+DEFAULT_ASSETS_DIR = "/var/lib/drums/assets"
 VERIFIER_FUNC = "drums_verifier"
 DEFAULT_VERIFIERS_DIR = "/etc/drums/verifiers"
 TRUSTED_UID = 0                 # lab verifiers must be owned by root (tests point this at their own uid)
@@ -158,6 +167,59 @@ class OswEnv:
         self.setup_controller.reset_cache_dir(self.cache_dir)
 
 
+# ------------------------------------------------------------------------------------------------ provisioning, assets
+def needs_root(command) -> bool:
+    """A setup command that runs sudo (the same rule as drumsd's provision::needs_root): a word `sudo` or `.../sudo`."""
+    import re
+    text = command if isinstance(command, str) else " ".join(str(x) for x in (command or []))
+    words = re.split(r"[^A-Za-z0-9_\-/.]+", text)
+    return any(w == "sudo" or w.endswith("/sudo") for w in words)
+
+
+def route_root_steps(ctrl, provision_url):
+    """Steps whose command runs sudo go to drumsd's provisioning endpoint instead of the desktop's guest server (same
+    request and reply form as the guest's /setup/execute). Covers `execute`, `command` and OSWorld's own internal sudo
+    calls (they all go through _execute_setup). Without a provisioning URL they go to the guest, where sudo refuses."""
+    orig = getattr(ctrl, "_execute_setup", None)
+    if orig is None:            # a controller without it has no execute/command steps to route
+        return
+
+    def _execute_setup(command, *a, **kw):
+        if provision_url and needs_root(command):
+            saved = ctrl.http_server
+            ctrl.http_server = provision_url
+            try:
+                return orig(command, *a, **kw)
+            finally:
+                ctrl.http_server = saved
+        return orig(command, *a, **kw)
+    ctrl._execute_setup = _execute_setup
+
+
+def restrict_uploads(ctrl, assets_dir):
+    """`upload_file` copies a host file into the desktop: only a regular file under assets_dir (after resolving symlinks)."""
+    orig = getattr(ctrl, "_upload_file_setup", None)
+    if orig is None:            # no upload_file step exists on such a controller (setup() asserts the method)
+        return
+    root = os.path.realpath(assets_dir)
+
+    def _upload_file_setup(files, *a, **kw):
+        checked = []
+        for f in files:
+            lp = f.get("local_path")
+            if not isinstance(lp, str) or not lp:
+                raise ValueError("upload_file: local_path must be a host path under the assets directory")
+            real = os.path.realpath(lp)
+            if real == root or os.path.commonpath([real, root]) != root:
+                raise PermissionError(f"upload_file: {lp!r} is outside the assets directory {assets_dir} "
+                                      "(the operator installs a task's host files there: docs/custom-tasks.md)")
+            if not os.path.isfile(real):
+                raise FileNotFoundError(f"upload_file: {lp!r} is not a regular file under {assets_dir}")
+            checked.append(dict(f, local_path=real))
+        return orig(checked, *a, **kw)
+    ctrl._upload_file_setup = _upload_file_setup
+
+
 # ------------------------------------------------------------------------------------------------ lab verifiers
 def is_lab_task(task) -> bool:
     return isinstance(task.get("evaluator"), dict) and task["evaluator"].get("func") == VERIFIER_FUNC
@@ -260,6 +322,8 @@ def run_request(verb, req) -> dict:
     env.load(task)
     env.cache_dir = private_cache(req["cache_dir"], task["id"], staged)
     env.setup_controller.reset_cache_dir(env.cache_dir)
+    route_root_steps(env.setup_controller, req.get("provision_url"))
+    restrict_uploads(env.setup_controller, req.get("assets_dir") or DEFAULT_ASSETS_DIR)
     try:
         return run_verb(verb, env, task, staged, t0, req)
     finally:

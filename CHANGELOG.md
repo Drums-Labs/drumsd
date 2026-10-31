@@ -1,5 +1,33 @@
 # Changelog
 
+## fork-chrome-crash (on daily-use; SDK 0.2.5), 2026-10-31
+
+**Correctness**
+- **Fork children restored Chrome without its memory protection keys.** Chrome 130 keeps memory under protection key 1
+  (PartitionAlloc thread isolation). CRIU dropped each VMA's key and the mm's allocated keys, so in a restored
+  Chrome the next `pkey_mprotect(..., 1)` failed with EINVAL and Chrome crashed on the check (SIGILL, "Can't open this
+  page"): every fork child on a multi-field form submit. drums-criu `fix/pkeys` keeps the keys (each VMA's key, the
+  allocated keys, PKRU); a plain restore of the same checkpoint crashed the same way before.
+- **New gate `no_app_crash`:** a process of the env that dies of a crash signal (SIGSEGV, SIGILL, SIGBUS, SIGFPE,
+  SIGABRT, SIGTRAP, SIGSYS) makes the episode invalid with a named reason, from the kernel's process events (attributed
+  by cgroup). Fail closed: dropped events, an unattributed crash, a stopped watch, or an episode that started before
+  the watch (envs adopted after a drumsd restart finish their current episode invalid) are invalid too. A fork or save
+  of a crashed env passes the crash on to every env made from it. `crash_watch` in drumsd.json (default on);
+  `/v1/health` `crash_watch`; metric `drumsd_app_crashes_total`.
+
+**Security**
+- **No privilege escalation for the agent.** In an env the desktop user is in no administrator group (`sudo`, `admin`,
+  `wheel`, `lxd`, `docker`; the image put it in `sudo` and `lxd` with OSWorld's published password), and every
+  process it drives has `no_new_privs`. drums-lab `daily-use`; the runtime sources change, so the installer
+  re-provisions the image's origin.
+- **Trusted provisioning:** a setup or postconfig step whose command runs `sudo` is run by drumsd in the env (as the
+  user, with sudo for that step only), never by the agent; a one-time capability per helper call
+  (`/provision/{token}/setup/execute`). OSWorld e0df059f's folder is created again.
+- Tasks that need the agent itself to act as root are refused with `TaskUnsupported` (422 `task_unsupported`) and
+  marked `"supported": false` in `GET /v1/tasks`: 5812b315, 94d95f96, b6781586.
+- **`upload_file` reads only under `/var/lib/drums/assets`** (symlinks resolved; `osw.assets_dir`). Before, a task
+  could copy any host file the checker user could read (e.g. `/etc/drums/drumsd.json`) into a desktop.
+
 ## daily-use (on 0.4.2), 2026-10-31
 
 What an outside lab's own (non-OSWorld) tasks needed.

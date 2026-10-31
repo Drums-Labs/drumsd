@@ -33,7 +33,7 @@ pyautogui, execute and launch run **inside the env as the desktop user `user`** 
 
 | | value (measured) |
 |---|---|
-| user | `user` (groups include `sudo`, but sudo needs a password: OSWorld's `password`) |
+| user | `user`, with **no privilege escalation**: not in `sudo`, `admin`, `wheel`, `lxd` or `docker` (the image puts it in `sudo` and `lxd`; the env does not), and every process it drives has `no_new_privs`, so `sudo`, `su` and `pkexec` refuse (`sudo -n true` and `echo password \| sudo -S true` both fail) |
 | working directory | `/home/user` |
 | `HOME` | `/home/user` |
 | `DISPLAY` | `:0` |

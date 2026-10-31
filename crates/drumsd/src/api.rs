@@ -218,7 +218,9 @@ pub fn token_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 async fn auth(State(m): S, req: Request, next: Next) -> Response {
-    if req.uri().path() == "/healthz" {
+    // /provision/<capability>/...: the OSWorld helper of a running setup call; the one-time capability in the path is
+    // its authorization (checked by the handler), not the API token, which the unprivileged helper never holds
+    if req.uri().path() == "/healthz" || req.uri().path().starts_with("/provision/") {
         return next.run(req).await;
     }
     let ok = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|t| token_eq(t.trim().as_bytes(), m.token.as_bytes())).unwrap_or(false);
@@ -321,10 +323,14 @@ async fn create(State(m): S, Json(r): Json<CreateReq>) -> Result<(StatusCode, Js
     Ok((StatusCode::CREATED, Json(view(&rec))))
 }
 async fn get_slot(State(m): S, Path(id): Path<String>) -> J {
-    Ok(Json(view(&m.slot(&id)?.view.read().unwrap())))
+    let s = m.slot(&id)?;
+    m.check_crash(&s);      // the verdict a client reads includes any crash since the last step
+    let v = view(&s.view.read().unwrap());
+    Ok(Json(v))
 }
 async fn gates(State(m): S, Path(id): Path<String>) -> J {
     let s = m.slot(&id)?;
+    m.check_crash(&s);
     let v = s.view.read().unwrap();
     Ok(Json(json!({"slot": v.id, "episode": v.episode, "validity": v.validity, "gates": v.gates, "cost": v.cost})))
 }
@@ -362,6 +368,9 @@ async fn quarantine(State(m): S, Path(id): Path<String>, body: Option<Json<Quara
 async fn release(State(m): S, Path(id): Path<String>) -> J {
     Ok(Json(view(&m.release(&id).await?)))
 }
+async fn provision_step(State(m): S, Path(token): Path<String>, Json(body): Json<Value>) -> J {
+    Ok(Json(m.provision_step(&token, body).await?))
+}
 async fn destroy(State(m): S, Path(id): Path<String>) -> J {
     Ok(Json(view(&m.destroy(&id).await?)))
 }
@@ -392,6 +401,7 @@ pub fn router(m: Arc<Manager>) -> Router {
         .route("/v1/slots/:id/quiescent", post(quiescent))
         .route("/v1/slots/:id/quarantine", post(quarantine))
         .route("/v1/slots/:id/release", post(release))
+        .route("/provision/:token/setup/execute", post(provision_step))
         .layer(middleware::from_fn_with_state(m.clone(), auth))
         .with_state(m)
 }
