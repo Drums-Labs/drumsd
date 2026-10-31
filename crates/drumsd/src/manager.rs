@@ -144,7 +144,7 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
     match &c.provenance {
         None => Some("made before provenance was recorded (drumsd < 0.4): re-provision the origin".into()),
         Some(p) if p != current => {
-            let diff: Vec<&str> = ["source_sha256", "inspection_sha256"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
+            let diff: Vec<&str> = ["source_sha256", "inspection_sha256", "procview_dir"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
             Some(format!("made by other {} than this drumsd runs with: re-provision the origin", diff.join(" and ")))
         }
         _ => None,
@@ -154,12 +154,17 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
 /// The provenance of an origin provisioned now: the digest of the runtime sources drumsd restores with and of the
 /// inspection file named by the Python config (`inspection`), whose facts (user, session, login) the origin was made from.
 pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
-    let insp = std::fs::read(py_config).ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    let cfg = std::fs::read(py_config).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let insp = cfg.as_ref()
         .and_then(|v| v.get("inspection").and_then(|x| x.as_str()).map(PathBuf::from))
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| hex_sha256(&b));
-    json!({"source_sha256": source_sha, "inspection_sha256": insp})
+    let mut v = json!({"source_sha256": source_sha, "inspection_sha256": insp});
+    // whether the origin's tree binds the per-env view: an origin made with the other setting is stale (re-provisioned)
+    if let Some(pv) = cfg.as_ref().and_then(|c| c.get("procview_dir")).filter(|x| !x.is_null()) {
+        v["procview_dir"] = pv.clone();
+    }
+    v
 }
 
 /// Whether `mp` is a mount point now (an entry of /proc/self/mountinfo).
@@ -244,6 +249,8 @@ pub struct Manager {
     lease_reaped: StdMutex<BTreeMap<String, u64>>,
     /// Saved states a fork is creating children from: the reaper leaves them alone until the children exist.
     pinned_states: StdMutex<BTreeSet<String>>,
+    /// Held while a template server is being started (see ensure_server).
+    server_start: StdMutex<()>,
 }
 
 /// Lease and readiness options for a new env or saved state (from the request; None = the daemon's default).
@@ -318,6 +325,7 @@ impl Manager {
         metrics.counter("drumsd_recoveries_total", "Restores that succeeded after a retry");
         metrics.gauge("drumsd_slots", "Slots by state");
         metrics.gauge("drumsd_state_dir_free_bytes", "Free bytes on the state dir (tmpfs)");
+        metrics.gauge("drumsd_procview_live", "1 when the per-env memory/CPU view mount answers");
         metrics.gauge("drumsd_forgotten_bytes", "Bytes of kept records of destroyed envs, by where they are (where) and by class (full, summary)");
         metrics.gauge("drumsd_forgotten_files", "Kept records of destroyed envs, by class (full, summary)");
         metrics.counter("drumsd_forget_total", "Slot directories moved off the state dir, by class (full, summary) and whether they were kept off the tmpfs");
@@ -330,7 +338,7 @@ impl Manager {
         metrics.histogram("drumsd_create_seconds", "Create latency, branch dir to all synchronous gates passed", LATENCY_BUCKETS);
         metrics.histogram("drumsd_phase_seconds", "Restore pipeline phase latency", LATENCY_BUCKETS);
         metrics.histogram("drumsd_criu_restore_seconds", "CRIU's own restore clock (Restore finished successfully)", LATENCY_BUCKETS);
-        let limits = cgroup::expected_limits(cfg.vcpus, cfg.memory_mib);
+        let limits = cgroup::expected_limits(cfg.vcpus, cfg.memory_mib, cfg.swap_mib);
         let natural = cfg.natural_exits.iter().cloned().collect();
         let policy = Policy { max_attempts: cfg.max_attempts };
         let token = cfg.load_token()?;
@@ -349,6 +357,7 @@ impl Manager {
             forget_pruned: StdMutex::new(BTreeMap::new()),
             lease_reaped: StdMutex::new(BTreeMap::new()),
             pinned_states: StdMutex::new(BTreeSet::new()),
+            server_start: StdMutex::new(()),
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
             exe,
@@ -693,6 +702,14 @@ impl Manager {
 
     fn ensure_server(&self, c: &CheckpointRecord) -> Result<i32, String> {
         let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
+        if let Some(pid) = template::adopt(&c.socket, &sp.images) {
+            return Ok(pid);
+        }
+        // One start at a time: concurrent creates of a checkpoint whose server is down (after a reinstall, every one)
+        // all missed `adopt` while the first start was still building the template, then found its process in the
+        // server cgroup and failed with "template server cgroup ... still holds processes" (dev host, 9 of 12 creates).
+        // The winner starts it; the others wait here and adopt it.
+        let _one = self.server_start.lock().unwrap();
         if let Some(pid) = template::adopt(&c.socket, &sp.images) {
             return Ok(pid);
         }
@@ -1205,6 +1222,7 @@ impl Manager {
             out: sp.dir.join(format!("restore-drumsd-{gen}-{stamp}.out")),
             empty_net: self.cfg.netns_fast,
             nested_pidns: self.cfg.nested_pidns,
+            externals: view_externals(&sp.dir, &self.cfg.procview_dir),
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
 
@@ -1329,6 +1347,13 @@ impl Manager {
             }
             (Err(e), _) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"error": e, "sections_s": sections_s,
                                                                                     "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64()}))),
+        }
+        // one line per state-hash gate with the host's load at that moment: the 60 s budget must not hide overload
+        // (the gate's own seconds and each guest request's are what a report computes the 10/30/60 s tails from)
+        if let Some(g) = gates.gates.iter().rev().find(|g| g.gate == Gate::StateHash) {
+            self.event(json!({"state_hash_gate": {"slot": slot.id, "status": g.status, "seconds": round3(hs), "sections_s": sections_s,
+                "error": g.detail.get("error"), "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64(), "guest_ready_s": t.get("guest_ready"),
+                "load": load_snapshot(), "admit_in_flight_mib": self.admit_in_flight.load(std::sync::atomic::Ordering::SeqCst)}}));
         }
         gates.push(iso);
         t.insert("hash_isolation".into(), round3(ts.elapsed().as_secs_f64()));
@@ -2428,7 +2453,18 @@ impl Manager {
                 warnings.push(format!("forgotten_dir {} is on the same filesystem as the state dir", fd.display()));
             }
         }
-        json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"), "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
+        let pv_live = drumsd_linux::procview::fuse::is_live(&self.cfg.procview_dir);
+        let pv_needed = self.ckpts.read().unwrap().values().any(|c| !view_externals(&slotfs::paths(&self.cfg.state_dir, c.slot).dir, &self.cfg.procview_dir).is_empty());
+        self.metrics.set("drumsd_procview_live", &[], if pv_live { 1.0 } else { 0.0 });
+        if pv_needed && !pv_live {
+            warnings.push(format!("the per-env memory/CPU view at {} is not live (drums-procview.service): restores of checkpoints that bind it fail closed", self.cfg.procview_dir.display()));
+        }
+        let pv_status: Value = std::fs::read(drumsd_linux::procview::STATUS).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        if pv_needed && pv_live && pv_status["sysinfo"].as_str() != Some("attached") {
+            warnings.push(format!("the per-env view serves files but not sysinfo(2): {} (sysconf(_SC_PHYS_PAGES) in envs reports the host)", pv_status["sysinfo"]));
+        }
+        json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"),
+               "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed, "status": pv_status}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
                "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
@@ -2443,7 +2479,7 @@ impl Manager {
                "host_mem_available_bytes": std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("MemAvailable:"))
                    .and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<u64>().ok())).map(|k| k * 1024),
                "loadavg": std::fs::read_to_string("/proc/loadavg").ok().map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" ")), "host_usd_per_hour": self.cfg.host_usd_per_hour,
-               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores},
+               "limits": {"vcpus": self.cfg.vcpus, "memory_mib": self.cfg.memory_mib, "swap_mib": self.cfg.swap_mib, "max_concurrent_restores": self.cfg.max_concurrent_restores},
                "leases": {"defaults": self.cfg.lease, "reaped": *self.lease_reaped.lock().unwrap()},
                "admission": self.admission_view()})
     }
@@ -2697,6 +2733,20 @@ pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
 /// directory moves aside so the number can be reused). Idempotent: a destroy interrupted by a daemon kill after the
 /// move left no directory, and the retry used to fail with ENOENT, leaving an env that could never be closed (and
 /// its saved state never deleted).
+/// The per-env view binds of a checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments re-binding them
+/// from the live view mount. A checkpoint made without the view gets none and restores as before.
+pub fn view_externals(slot_dir: &Path, dir: &Path) -> Vec<String> {
+    let rows: Vec<[String; 3]> = std::fs::read(slot_dir.join("mounts-pre-dump.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    drumsd_linux::procview::restore_externals(&rows, dir)
+}
+
+/// Whether an env in `state` keeps its checkpoint from being deleted. Once the checkpoint's state is lost (a host
+/// restart), an env that is down or quarantined holds nothing of it: no tree runs (drums-scale, 2026-10-30: 115 down
+/// and quarantined envs from before a reboot blocked the boot unit's re-provisioning with 409 "used by envs").
+pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
+    !state.is_terminal() && !(lost && matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
+}
+
 pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64, forget: impl FnOnce(&Path, &str) -> std::io::Result<PathBuf>) -> std::io::Result<PathBuf> {
     let sp = slotfs::paths(state_dir, num);
     if sp.dir.symlink_metadata().is_err() {
@@ -2802,6 +2852,15 @@ pub fn status_str(s: &GateStatus) -> &'static str {
 /// and were quarantined with "Resource temporarily unavailable" (the socket read timeout), not with a hash mismatch.
 /// The gate itself is unchanged: the hash must equal the checkpoint's; no answer within this time still fails it.
 pub const STATE_HASH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// drumsd's thread count, memory and CPU pressure (some avg10) and the 1-minute load, read now (cheap: four small files).
+pub fn load_snapshot() -> Value {
+    let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+    let threads = rd("/proc/self/status").lines().find_map(|l| l.strip_prefix("Threads:").and_then(|v| v.trim().parse::<u64>().ok()));
+    let psi = |p: &str| rd(p).lines().find(|l| l.starts_with("some")).and_then(|l| l.split_whitespace().find_map(|f| f.strip_prefix("avg10=").and_then(|v| v.parse::<f64>().ok())));
+    let la = rd("/proc/loadavg").split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
+    json!({"drumsd_threads": threads, "mem_psi_some_avg10": psi("/proc/pressure/memory"), "cpu_psi_some_avg10": psi("/proc/pressure/cpu"), "loadavg1": la})
+}
 
 pub fn state_hash(g: &Guest) -> Result<String, String> {
     state_hash_timed(g).0
@@ -3137,6 +3196,13 @@ mod tests {
         std::fs::write(&insp, b"{\"login\": {\"locale\": {}}}").unwrap();
         assert_ne!(provenance("src", &cfgp), p);
         assert_eq!(provenance("src", &t.path().join("missing.json"))["inspection_sha256"], Value::Null);
+        // the view setting is part of it; a config without one keeps the 0.4 shape
+        assert!(p.get("procview_dir").is_none());
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "procview_dir": "/run/drums/procview"})).unwrap()).unwrap();
+        let q = provenance("src", &cfgp);
+        assert_eq!(q["procview_dir"], json!("/run/drums/procview"));
+        std::fs::write(&cfgp, serde_json::to_vec(&json!({"inspection": insp, "procview_dir": null})).unwrap()).unwrap();
+        assert_ne!(provenance("src", &cfgp), q);
     }
     #[test]
     fn numbers_of_destroyed_slots_are_reused_and_reservations_end() {

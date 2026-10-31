@@ -4,6 +4,7 @@
 //!     drumsd openapi                               print the OpenAPI spec
 //!     drumsd restore-client ...                    internal: one restore (see drumsd_linux::restore)
 //!     drumsd hook DIR                              internal: CRIU action script (see drumsd_linux::hook)
+//!     drumsd procview [--mount DIR]                per-env memory/CPU view: FUSE + sysinfo program (root)
 
 mod api;
 mod config;
@@ -17,6 +18,7 @@ fn main() {
         // the two internal modes run before any thread exists (the client unshares its mount namespace)
         Some("restore-client") => std::process::exit(drumsd_linux::restore::client_main(&args[2..])),
         Some("hook") => std::process::exit(drumsd_linux::hook::hook_main(args.get(2).map(|s| s.as_str()).unwrap_or("."))),
+        Some("procview") => std::process::exit(drumsd_linux::procview::main(&args[2..])),
         Some("openapi") => {
             print!("{}", api::OPENAPI);
         }

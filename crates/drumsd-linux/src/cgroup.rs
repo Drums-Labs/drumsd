@@ -141,8 +141,10 @@ pub struct Limits {
     pub swap_max: String,
 }
 
-pub fn expected_limits(vcpus: u32, memory_mib: u64) -> Limits {
-    Limits { cpu_max: format!("{} 100000", vcpus * 100000), memory_max: (memory_mib * 1024 * 1024).to_string(), swap_max: "0".into() }
+/// The slot limits: `vcpus` CPUs of quota, `memory_mib` of memory and `swap_mib` of swap (0 = none, the default;
+/// a VM-equivalent envelope such as 4096 + 3220 needs host swap, e.g. a zram device).
+pub fn expected_limits(vcpus: u32, memory_mib: u64, swap_mib: u64) -> Limits {
+    Limits { cpu_max: format!("{} 100000", vcpus * 100000), memory_max: (memory_mib * 1024 * 1024).to_string(), swap_max: (swap_mib * 1024 * 1024).to_string() }
 }
 
 /// The delegated pool scope with a keeper process (same as pageshare.pool_init); idempotent.
@@ -306,7 +308,7 @@ mod tests {
     #[test]
     fn limits_match_launch_py() {
         assert_eq!(
-            expected_limits(4, 4096),
+            expected_limits(4, 4096, 0),
             Limits { cpu_max: "400000 100000".into(), memory_max: "4294967296".into(), swap_max: "0".into() }
         );
         assert!(slot_cg("rootfs-0734af49-2").ends_with("drumsbench-pool.scope/drumsbench-rootfs-0734af49-2-pool.scope"));
