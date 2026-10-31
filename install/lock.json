@@ -1,6 +1,6 @@
 {
   "lock_version": 1,
-  "written_utc": "2026-10-30",
+  "written_utc": "2026-10-31",
   "host": {
     "os": "Ubuntu 24.04",
     "arch": "x86_64",
@@ -81,18 +81,18 @@
   "sources": {
     "drums-criu": {
       "repo": "sahiljagtap08/drums-criu",
-      "branch": "fix/ip6tables",
-      "commit": "fbbd7c20ad817086bf5d5ca935297c742d0fb1aa",
+      "branch": "fix/pkeys",
+      "commit": "b2643c09c4457b24430c44f7b547cb173dda1d2a",
       "tag": null,
-      "note": "358380f66 (drums-main, tag runtime-20261030b) plus fbbd7c20a: a dump's cleanup unlocks only the network lock it took (no stray 'Bad rule' iptables/ip6tables errors after a dump that failed before the lock). Gate: runbooks/runtime-v04",
-      "reference_binary_sha256": "2135aee1f25cc04059a5ad235249b7dbfa3dab63e1464c7041043de740592fd1",
-      "reference_binary_note": "make criu on the drums-v04 host's dev root (Ubuntu 24.04, apt not snapshot-pinned), 2026-10-30; informational: the installer prints its own build's sha256"
+      "note": "fbbd7c20a (v0.4.2's pin) plus fix/pkeys: memory protection keys survive C/R (each VMA's key, the mm's allocated keys; PKRU opened while the parasite splices pages). Without it a restored Chrome whose PartitionAlloc keeps memory under key 1 crashes (SIGILL) at its next pkey_mprotect. Gate: runbooks/fork-chrome-crash",
+      "reference_binary_sha256": "873a04e052a0d36749f745d9fb128565656a5f0b9d87f985466c998204151fa4",
+      "reference_binary_note": "make criu on the fork-chrome-crash dev host (c8i.4xlarge, Ubuntu 24.04, apt snapshot-pinned by the v0.4.2 installer), 2026-10-31; informational: the installer prints its own build's sha256"
     },
     "drums-lab": {
       "repo": "sahiljagtap08/drums-lab",
-      "branch": "fix/session-fidelity",
-      "commit": "15e29e4376b4323d1bf1e35f092b23d1ed68f5ea",
-      "note": "app-compat 0f6b2b6 plus the image's own login in the slot (pam_env/locale, keyring, environment generators, Xsession, gnome-session variables and components); the inspection gains `login` facts, so an origin made before is re-provisioned"
+      "branch": "daily-use",
+      "commit": "4343e684c120b91914d29f6552927057d2c06378",
+      "note": "fix/session-fidelity 15e29e4 (v0.4.2's pin) merged with daily-use, plus: the desktop user gets no privilege escalation in a slot (no administrator group in its processes or in the slot's /etc/group and /etc/gshadow; no_new_privs on every process run as the user). The runtime sources change, so an origin made before is re-provisioned"
     },
     "osworld": {
       "repo": "https://github.com/xlang-ai/OSWorld.git",
