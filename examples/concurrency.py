@@ -9,12 +9,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
-import drums  # noqa: E402
+import drums
 
 
 def episode(client, i, task, steps):
