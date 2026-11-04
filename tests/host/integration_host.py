@@ -1,6 +1,6 @@
 """Integration test against a real drumsd on a Linux host (root daemon, adopted checkpoint `clean`).
 
-    python3 integration_host.py OUT_DIR
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/integration_host.py OUT_DIR
 
 Each check prints one JSON line and is appended to OUT_DIR/integration.jsonl; the exit code is the number of failed
 checks. Needs: drumsd running (restart script /opt/drumsd/restart.sh CONFIG), checkpoint `clean` adopted."""
@@ -11,8 +11,7 @@ import sys
 import time
 import secrets
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import drums  # noqa: E402
+import drums
 
 OUT = sys.argv[1]
 os.makedirs(OUT, exist_ok=True)

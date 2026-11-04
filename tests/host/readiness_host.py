@@ -2,7 +2,7 @@
 Each trial: create a Chrome env with the OSWorld task, wait for its gates, do the trigger action, then fork(N)
 IMMEDIATELY (no sleep), and record every child's verdict and the alive-gate detail.
 
-    sudo python3 python/tests/readiness_host.py --mode MODE --trials 20 --children 2 --out out.json
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/readiness_host.py --mode MODE --trials 20 --children 2 --out out.json
 
 Modes: slow_exit (a helper ends one thread every 250 ms after SIGTERM, then exits: the exiting-process case),
 close_window / pkill_chrome / tabclose / kill_renderer (Chrome shutting down, or a tab closed, just before the fork),
@@ -10,7 +10,7 @@ silent_exit_2s / silent_exit_8s (a helper that does nothing visible for 2 or 8 s
 can be seen in advance), post_resume_kill (nothing before the fork; the helper is SIGKILLed in child 0 right after the
 fork returns: that child must fail the alive gate, the other must stay valid).
 Without capture readiness, slow_exit fails the alive gate in every child; with it, every child is valid.
-Runs on the drums host (token from /etc/drums/token) with the SDK at --sdk."""
+Runs on the drums host (token from /etc/drums/token) with drums importable, or the SDK (wheel or source dir) at --sdk."""
 import argparse, json, sys, time
 
 ap = argparse.ArgumentParser()
@@ -18,10 +18,11 @@ ap.add_argument("--mode", required=True)
 ap.add_argument("--trials", type=int, default=20)
 ap.add_argument("--children", type=int, default=2)
 ap.add_argument("--out", required=True)
-ap.add_argument("--sdk", default="/opt/drums/src/drumsd/python")
+ap.add_argument("--sdk")
 ap.add_argument("--task", default="2ad9387a-65d8-4e33-ad5b-7580065a27ca")
 a = ap.parse_args()
-sys.path.insert(0, a.sdk)
+if a.sdk:
+    sys.path.insert(0, a.sdk)
 import drums  # noqa: E402
 
 HELPER = r"""
@@ -70,7 +71,7 @@ TRIGGER = {
 
 c = drums.connect("http://127.0.0.1:7070", open("/etc/drums/token").read().strip())
 h = c.health()
-out = {"mode": a.mode, "trials": [], "health": {"version": h.get("version"), "criu": h.get("criu")}, "sdk": a.sdk, "sdk_version": drums.__version__,
+out = {"mode": a.mode, "trials": [], "health": {"version": h.get("version"), "criu": h.get("criu")}, "sdk": drums.__file__, "sdk_version": drums.__version__,
        "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 for i in range(a.trials):
     rec = {"i": i}
