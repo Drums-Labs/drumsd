@@ -1,6 +1,9 @@
-"""Build the SDK wheel (drums-<version>-py3-none-any.whl) from python/ with the standard library only.
+"""Build the SDK wheel (drums-<version>-py3-none-any.whl) from a Drums-Labs/sdk source tree with the standard library
+only.
 
-    python3 install/build_wheel.py OUT_DIR        -> prints the wheel's path
+    python3 install/build_wheel.py SDK_DIR OUT_DIR        -> prints the wheel's path
+
+SDK_DIR holds pyproject.toml and the package (make-release.sh extracts the commit pinned in lock.json there).
 
 The SDK is pure Python with no dependencies, so the wheel is the package files plus METADATA, WHEEL and RECORD
 (PEP 427). Every entry gets a fixed timestamp and mode, so the same sources give the same bytes (the release's
@@ -17,14 +20,12 @@ import re
 import sys
 import zipfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PY = os.path.join(os.path.dirname(HERE), "python")
 EPOCH = (2026, 1, 1, 0, 0, 0)
 
 
-def project():
-    """name, version, description, requires-python, license from python/pyproject.toml (flat keys of [project])."""
-    text = open(os.path.join(PY, "pyproject.toml")).read()
+def project(src: str):
+    """name, version, description, requires-python, license from src/pyproject.toml (flat keys of [project])."""
+    text = open(os.path.join(src, "pyproject.toml")).read()
     sect = text.split("[project]", 1)[1].split("\n[", 1)[0]
     out = {}
     for k in ("name", "version", "description", "requires-python"):
@@ -37,20 +38,20 @@ def project():
     return out
 
 
-def build(out_dir: str) -> str:
-    p = project()
+def build(src: str, out_dir: str) -> str:
+    p = project(src)
     name, ver = p["name"], p["version"]
-    init = open(os.path.join(PY, name, "__init__.py")).read()
+    init = open(os.path.join(src, name, "__init__.py")).read()
     m = re.search(r'^__version__ = "([^"]+)"', init, re.M)
     if not m or m.group(1) != ver:
         raise SystemExit(f"version mismatch: pyproject {ver}, {name}/__init__.py {m.group(1) if m else None}")
     files = []
-    for root, dirs, fs in os.walk(os.path.join(PY, name)):
+    for root, dirs, fs in os.walk(os.path.join(src, name)):
         dirs[:] = sorted(d for d in dirs if d != "__pycache__")
         for f in sorted(fs):
             if f.endswith(".py"):
                 full = os.path.join(root, f)
-                files.append((os.path.relpath(full, PY).replace(os.sep, "/"), open(full, "rb").read()))
+                files.append((os.path.relpath(full, src).replace(os.sep, "/"), open(full, "rb").read()))
     di = f"{name}-{ver}.dist-info"
     meta = [f"Metadata-Version: 2.1", f"Name: {name}", f"Version: {ver}", f"Summary: {p['description']}",
             f"Requires-Python: {p['requires-python']}"] + ([f"License: {p['license']}"] if p["license"] else [])
@@ -76,4 +77,6 @@ def build(out_dir: str) -> str:
 
 
 if __name__ == "__main__":
-    print(build(sys.argv[1] if len(sys.argv) > 1 else "."))
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: build_wheel.py SDK_DIR OUT_DIR")
+    print(build(sys.argv[1], sys.argv[2]))
