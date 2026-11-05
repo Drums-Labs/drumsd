@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# make-release.sh OUT_DIR  -- on a machine with the three repos: a self-contained release for install.sh.
-#   DRUMS_CRIU=path/to/drums-criu (branch app-compat)  DRUMS_LAB=path/to/drums-lab
+# make-release.sh OUT_DIR  -- on a machine with the four repos: a self-contained release for install.sh.
+#   DRUMS_CRIU=path/to/drums-criu  DRUMS_LAB=path/to/drums-lab  DRUMS_SDK=path/to/sdk (Drums-Labs/sdk)
 # The release holds install.sh, install/ (lock, hashed Python lock, bring-up), git bundles of drumsd (this commit),
-# drums-criu and drums-lab (the commits pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl), the user docs
+# drums-criu and drums-lab (the commits pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl, built from the
+# Drums-Labs/sdk commit pinned in install/lock.json), the user docs
 # (README.md, QUICKSTART.md, CHANGELOG.md, docs/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$(mkdir -p "${1:?out dir}" && cd "$1" && pwd)"
-CRIU="${DRUMS_CRIU:?set DRUMS_CRIU}"; LAB="${DRUMS_LAB:?set DRUMS_LAB}"
+CRIU="${DRUMS_CRIU:?set DRUMS_CRIU}"; LAB="${DRUMS_LAB:?set DRUMS_LAB}"; SDK="${DRUMS_SDK:?set DRUMS_SDK}"
 [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ] || { echo "drumsd tree has uncommitted changes" >&2; exit 1; }
 C=$(git -C "$HERE" rev-parse HEAD)
 lk() { python3 -c "import json; print(json.load(open('$HERE/install/lock.json'))['sources']['$1']['commit'])"; }
-for pair in "$CRIU:$(lk drums-criu)" "$LAB:$(lk drums-lab)"; do
+for pair in "$CRIU:$(lk drums-criu)" "$LAB:$(lk drums-lab)" "$SDK:$(lk drums-sdk)"; do
   git -C "${pair%%:*}" cat-file -e "${pair#*:}^{commit}" || { echo "${pair%%:*} lacks ${pair#*:}" >&2; exit 1; }
 done
 R="$OUT/drums-release-${C:0:12}"
@@ -33,7 +34,10 @@ bundle() { # bundle REPO NAME COMMIT
 bundle "$HERE" drumsd "$C"
 bundle "$CRIU" drums-criu "$(lk drums-criu)"
 bundle "$LAB" drums-lab "$(lk drums-lab)"
-python3 "$HERE/install/build_wheel.py" "$R/sdk" > /dev/null
+# the wheel from the pinned SDK commit, not the clone's working tree
+S=$(mktemp -d); trap 'rm -rf "$S"' EXIT
+git -C "$SDK" archive --format=tar "$(lk drums-sdk)" | tar -x -C "$S"
+python3 "$HERE/install/build_wheel.py" "$S" "$R/sdk" > /dev/null
 (cd "$R" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
 sha256sum "$R.tar.gz"

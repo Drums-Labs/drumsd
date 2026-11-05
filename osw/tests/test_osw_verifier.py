@@ -11,7 +11,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location("drums_osw_v", os.path.join(HERE, "..", "..", "osw", "drums_osw.py"))
+spec = importlib.util.spec_from_file_location("drums_osw_v", os.path.join(HERE, "..", "drums_osw.py"))
 osw = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(osw)
 

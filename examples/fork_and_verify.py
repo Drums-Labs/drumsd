@@ -12,12 +12,10 @@ import argparse
 import base64
 import json
 import os
-import sys
 import time
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
-import drums  # noqa: E402
+import drums
 
 CHROME = "2ad9387a-65d8-4e33-ad5b-7580065a27ca"     # "make a new folder on the bookmarks bar ... call it 'Favorites'"
 CALC = "035f41ba-6653-43ab-aa63-c86d449d62e5"       # fill Gross profit, Sheet2 Year_Profit

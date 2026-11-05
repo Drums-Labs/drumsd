@@ -97,7 +97,9 @@ the API binds to 127.0.0.1 unless `allow_remote` is set. Main routes: `POST /v1/
 quarantine|release`, `GET /v1/slots/{id}/gates|screenshot|metrics`, `DELETE /v1/slots/{id}`, `GET /v1/health`,
 `GET /v1/metrics`, `GET /v1/tasks[/{id}]`, `GET /metrics` (Prometheus).
 
-The Python SDK (`python/drums`, 0.2) and the one-command install are in QUICKSTART.md. The user docs that ship in the
+The Python SDK (0.2) lives in [Drums-Labs/sdk](https://github.com/Drums-Labs/sdk); a release pins its commit in
+install/lock.json and ships it as `sdk/drums-*.whl` (`DRUMS_SDK=path/to/sdk install/make-release.sh OUT`, with
+DRUMS_CRIU and DRUMS_LAB). Using it and the one-command install are in QUICKSTART.md. The user docs that ship in the
 release tarball are QUICKSTART.md, CHANGELOG.md, docs/ (docs/README.md becomes the release's README.md), examples/ and
 api/openapi.json.
 
@@ -106,9 +108,12 @@ api/openapi.json.
 ```
 cargo build --release
 sudo cargo test --release          # 56 unit tests; the forwarder and nested-pidns tests need root
-python3 -m unittest python/tests/test_client.py
-sudo python3 python/tests/integration_host.py OUT    # against a running daemon on a host with an adopted checkpoint
-sudo python3 python/tests/recovery_host.py OUT       # installed host: drumsd killed idle/mid-reset, crashed restore, template server killed
+python3 -m unittest install/tests/test_build_wheel.py    # the SDK's own tests are in Drums-Labs/sdk
+python3 -m unittest discover -s osw/tests
+for t in install/tests/test_*.sh; do bash "$t"; done
+# installed host, against the running daemon, with the SDK from the release's wheel:
+sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/integration_host.py OUT    # adopted checkpoint `clean`
+sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/recovery_host.py OUT       # drumsd killed idle/mid-reset, crashed restore, template server killed
 ```
 
 Run: `sudo drumsd serve --config drumsd.json` (fields in `crates/drumsd/src/config.rs`). An installed host runs it as

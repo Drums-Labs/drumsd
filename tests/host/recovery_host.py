@@ -11,7 +11,7 @@
   D. template server SIGKILLed: the next reset finds it gone, starts a new one before restoring (or retries if it died
      mid-request), and the episode is valid.
 
-    sudo python3 recovery_host.py OUT.json
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/recovery_host.py OUT.json
 """
 import glob
 import json
@@ -22,8 +22,7 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import drums  # noqa: E402
+import drums
 
 URL = "http://127.0.0.1:7070"
 TOKEN = open("/etc/drums/token").read().strip()

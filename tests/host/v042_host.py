@@ -1,6 +1,6 @@
 """0.4.2 acceptance on an installed host (run as root, against the real drumsd): every fix the outside user needed.
 
-    sudo python3 python/tests/v042_host.py OUT.json [--only validity,gone,lease,fork_state,state_lease,kill9,template_logs]
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/v042_host.py OUT.json [--only validity,gone,lease,fork_state,state_lease,kill9,template_logs]
 
   validity       a quarantined env is invalid everywhere: verify(strict=False) valid=False with verdict "invalid" and the
                  failed gate not_quarantined; strict verify raises InvalidEpisode naming the quarantine; the checker
@@ -24,9 +24,7 @@ import textwrap
 import time
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, ".."))
-import drums  # noqa: E402
+import drums
 
 URL = "http://127.0.0.1:7070"
 TOKEN = open("/etc/drums/token").read().strip()
@@ -217,7 +215,6 @@ def t_state_lease():
 def t_kill9():
     code = textwrap.dedent(f"""
         import json, sys, time
-        sys.path.insert(0, {os.path.join(HERE, '..')!r})
         import drums
         c = drums.connect({URL!r}, {TOKEN!r})
         p = c.create(idle_timeout=30)

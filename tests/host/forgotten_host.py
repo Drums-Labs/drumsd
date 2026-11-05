@@ -1,13 +1,12 @@
 """Destroy many envs and show the state tmpfs does not grow: kept records go to forgotten_dir on disk.
 
-    sudo python3 python/tests/forgotten_host.py --n 200 --batch 8 --out forgotten.json
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/forgotten_host.py --n 200 --batch 8 --out forgotten.json
 
 Each round creates `batch` envs from the image, waits for their gates, closes them, then reads the state dir's free
 bytes (statvfs, host side) and drumsd's health. Pass: state-dir usage after the last round is within --slack-mib of
 the first round, and forgotten_dir grew by one record (a full archive or a summary) per closed env."""
 import argparse, json, os, sys, time
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import drums  # noqa: E402
+import drums
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--n", type=int, default=200)
