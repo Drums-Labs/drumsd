@@ -15,7 +15,7 @@ umount -l /mnt/osworld 2>/dev/null || true
 qemu-nbd --disconnect /dev/nbd0 >/dev/null 2>&1 || true
 rm -rf $D/journal/* $D/forgotten $D/state/* $D/image-mount.json $D/bringup.json
 rm -f /etc/drums-guard/hold /etc/drums-guard/config /run/drums-guard-idle-since
-systemctl disable -q drums-guard-idle.timer 2>/dev/null || true
+systemctl disable -q --now drums-guard-idle.timer 2>/dev/null || true
 rm -f /home/ubuntu/.ssh/authorized_keys.bak
 cloud-init clean --logs >/dev/null 2>&1 || true
 journalctl --rotate >/dev/null 2>&1; journalctl --vacuum-time=1s >/dev/null 2>&1 || true

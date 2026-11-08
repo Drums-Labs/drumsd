@@ -13,7 +13,9 @@ shutdown -P "+$CEILING_MIN" "drums-guard hard ceiling" || true
 cat > /usr/local/sbin/drums-guard-idle <<'IDLE'
 #!/bin/bash
 S=/run/drums-guard-idle-since
-IDLE_MIN=$(sed -n 's/.*idle_min=\([0-9]*\).*/\1/p' /etc/drums-guard/config)
+IDLE_MIN=$(sed -n 's/.*idle_min=\([0-9]*\).*/\1/p' /etc/drums-guard/config 2>/dev/null)
+# no (or a broken) config: never power off on the idle rule (the hard ceiling still holds)
+[ -n "$IDLE_MIN" ] && [ "$IDLE_MIN" -gt 0 ] 2>/dev/null || exit 0
 busy=0
 [ "$(who | wc -l)" -gt 0 ] && busy=1
 pgrep -x sshd-session >/dev/null 2>&1 && pgrep -fa 'sshd-session: [a-z]' >/dev/null 2>&1 && busy=1
