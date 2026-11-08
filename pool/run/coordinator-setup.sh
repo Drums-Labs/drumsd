@@ -7,7 +7,9 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 REL="${1:?release tarball (for the SDK wheel)}"
 O=/opt/drums-pool; mkdir -p $O/bin /etc/drums-pool /var/lib/drums-pool; chown -R "${SUDO_USER:-ubuntu}" /etc/drums-pool /var/lib/drums-pool
 # Rust at the workspace's pinned toolchain (install.sh pins the same one)
-RUST=$(python3 -c "import json; print(json.load(open('$REPO/install/lock.json'))['rust']['toolchain'])" 2>/dev/null || echo 1.96.1)
+RUST=$(python3 -c "import json; print(json.load(open('$REPO/install/lock.json'))['rust_toolchain'])" 2>/dev/null || echo 1.96.1)
+# the Drums image already has the pinned toolchain under /opt/drums/rust
+[ -x /opt/drums/rust/bin/cargo ] && export RUSTUP_HOME=/opt/drums/rust CARGO_HOME=/opt/drums/rust PATH=/opt/drums/rust/bin:$PATH
 if ! command -v cargo >/dev/null || ! cargo --version | grep -q "$RUST"; then
   export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
   [ -x /opt/cargo/bin/cargo ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain "$RUST" >/dev/null
