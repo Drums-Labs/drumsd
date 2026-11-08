@@ -265,6 +265,8 @@ pub struct Manager {
     server_start: StdMutex<()>,
     /// Exits by crash signal, attributed by cgroup (the `no_app_crash` gate). None only when `crash_watch` is off.
     pub crash: Option<drumsd_linux::crashwatch::CrashWatch>,
+    /// Task starts and exits per cgroup (capture readiness from events, see `quiesce.events`). None when off.
+    pub activity: Option<drumsd_linux::activity::ActivityWatch>,
     /// One-time provisioning capabilities: token -> the slot and (during a restore's task setup, before the slot record
     /// has them) its tree's init pid and cgroup; valid while one OSWorld helper call for that slot runs.
     provision_tokens: StdMutex<BTreeMap<String, ProvisionTarget>>,
@@ -409,6 +411,17 @@ impl Manager {
             tracing::warn!("crash_watch is off: an app that crashes in an env does not make its episode invalid");
             None
         };
+        let activity = if cfg.quiesce.events {
+            match drumsd_linux::activity::start() {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    tracing::warn!("activity watch (process events connector) not started: {e}; every capture samples its full quiescence window");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         metrics.counter("drumsd_app_crashes_total", "Processes of envs that died of a crash signal, by signal");
         let image_user = match read_image_user(&cfg.py_config) {
             Ok(u) => Some(u),
@@ -419,6 +432,7 @@ impl Manager {
         };
         let m = Manager {
             crash,
+            activity,
             provision_tokens: StdMutex::new(BTreeMap::new()),
             image_user,
             usage: StdMutex::new(u),
@@ -1707,7 +1721,8 @@ impl Manager {
         begin_op(&slot, Op::Step)?;
         let p = self.quiesce_params(&o);
         let cg = self.tree_cg(&slot);
-        let (rep, s) = tokio::task::spawn_blocking(move || quiesce::wait(&cg, &p)).await.map_err(e500)?.map_err(e500)?;
+        let aw = self.activity.clone();
+        let (rep, s) = tokio::task::spawn_blocking(move || quiesce::wait_with(&cg, &p, aw.as_ref())).await.map_err(e500)?.map_err(e500)?;
         let rv = serde_json::to_value(&rep).unwrap();
         self.account(Some(&slot), |l| l.op("wait_quiescent", rep.waited_s, s.is_some()));
         if s.is_none() {
@@ -1751,7 +1766,8 @@ impl Manager {
             p.timeout_s = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
             let cg2 = cg.clone();
             let tq = Instant::now();
-            let waited = tokio::task::spawn_blocking(move || quiesce::wait(&cg2, &p)).await.map_err(e500)?;
+            let aw = self.activity.clone();
+            let waited = tokio::task::spawn_blocking(move || quiesce::wait_with(&cg2, &p, aw.as_ref())).await.map_err(e500)?;
             let (rep, sample) = match waited {
                 Ok(x) => x,
                 Err(e) => {
@@ -2690,6 +2706,7 @@ impl Manager {
                "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed, "status": pv_status}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
                "criu": {"path": self.cfg.criu, "sha256": self.criu_sha256, "nested_pidns": self.cfg.nested_pidns},
                "crash_watch": self.crash.as_ref().map(|w| w.summary()),
+               "activity_watch": self.activity.as_ref().map(|w| w.summary()),
                "image_sha256": self.cfg.image_sha256, "provenance": self.provenance, "checkpoints": ck, "slots_by_state": states,
                "osworld": self.cfg.osw.as_ref().map(|o| json!({"dir": o.osworld_dir})),
                "state_dir_free_bytes": free(&self.cfg.state_dir), "warnings": warnings,

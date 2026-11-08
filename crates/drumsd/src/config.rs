@@ -261,11 +261,19 @@ pub struct QuiesceConfig {
     /// check runs as soon as the checkpoint is adopted.
     #[serde(default)]
     pub confirm_s: f64,
+    /// Prove the window from the kernel's process events (drumsd_linux::activity) when they cover it, so a tree that
+    /// has been quiet for the window already is captured at once; false = always sample the full window.
+    #[serde(default = "yes_q")]
+    pub events: bool,
+}
+
+fn yes_q() -> bool {
+    true
 }
 
 impl Default for QuiesceConfig {
     fn default() -> Self {
-        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0 }
+        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0, events: true }
     }
 }
 

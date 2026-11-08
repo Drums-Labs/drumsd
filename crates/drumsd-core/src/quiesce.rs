@@ -158,6 +158,17 @@ pub struct Report {
     pub seen: Vec<Unstable>,
     /// Mean milliseconds per sample (the cost of reading the tree).
     pub sample_ms_mean: f64,
+    /// What proved the window: None = consecutive samples (the sampler); "events" = the activity watch (no task of
+    /// the tree started or exited for the window, read from the kernel's process events) plus a sample showing no
+    /// task on its way out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// basis "events": how long the tree had been quiet when the window was proven (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_for_s: Option<f64>,
+    /// Why the activity watch could not vouch and the sampler ran instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_fallback: Option<String>,
 }
 
 /// Feed samples in time order; it says when the window is complete.
