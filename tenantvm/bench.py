@@ -56,7 +56,7 @@ def density(c, task, cap):
             envs.append(e)
             h = c.health()
             rows.append(dict(i=len(envs), create_s=round(time.time()-t0,3),
-                             mem_avail=h.get("admission",{}).get("available_bytes") or h.get("mem_available_bytes"),
+                             mem_avail=h.get("host_mem_available_bytes") or (h.get("admission",{}) or {}).get("available_bytes"),
                              state_free=h.get("state_dir_free_bytes")))
     finally:
         hN = c.health()
@@ -64,8 +64,8 @@ def density(c, task, cap):
             try: e.close()
             except Exception: pass
     # idle memory/env estimate from MemAvailable drop
-    a0 = (h0.get("admission",{}) or {}).get("available_bytes") or h0.get("mem_available_bytes")
-    aN = (hN.get("admission",{}) or {}).get("available_bytes") or hN.get("mem_available_bytes")
+    a0 = h0.get("host_mem_available_bytes") or (h0.get("admission",{}) or {}).get("available_bytes")
+    aN = hN.get("host_mem_available_bytes") or (hN.get("admission",{}) or {}).get("available_bytes")
     per = round((a0-aN)/len(envs)/1e6,1) if (a0 and aN and envs) else None
     return dict(max_envs=len(envs), mem_avail_start=a0, mem_avail_end=aN, mem_mb_per_env_est=per, rows=rows)
 

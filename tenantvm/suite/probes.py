@@ -61,28 +61,34 @@ def p_net_egress_policy(a, b):
                 detail="desktop outbound reachability (expected: none by default)", evidence=(out or err)[:200])
 
 def p_proc_table(a, b):
-    # B starts a uniquely named process; A lists all processes it can see.
-    b.sh(f"setsid bash -c 'exec -a {MARK}-sleeper sleep 600' >/dev/null 2>&1 &")
+    # B starts a uniquely named process (comm ZZSLEEPERMARK); A looks for it by EXACT comm with pgrep -x, whose own comm
+    # is "pgrep", so it never matches itself (the earlier grep-on-args test matched its own command line).
+    b.sh("setsid bash -c 'exec -a ZZSLEEPERMARK sleep 600' >/dev/null 2>&1 &")
     time.sleep(1.0)
-    rc, out, err = a.sh("ps -eo pid,user,comm,args 2>/dev/null | grep -c t4probe-7f3a; "
-                        "ls /proc | grep -E '^[0-9]+$' | wc -l")
-    cnt = (out or "0").strip().splitlines()[0] if out.strip() else "0"
-    leak = cnt.isdigit() and int(cnt) > 0
+    rc, out, err = a.sh("pgrep -x ZZSLEEPERMARK | wc -l")
+    seen = int((out or "0").strip() or 0)
+    leak = seen > 0
     return dict(name="proc.table", dim="process", verdict="FAIL" if leak else "PASS",
-                detail=f"A saw {cnt} of B's processes" if leak else "A sees only its own process table",
-                evidence=(out or err)[:300])
+                detail=f"A saw {seen} of B's named processes" if leak else "A cannot see B's processes",
+                evidence=(out or err)[:200])
 
-def p_proc_kill(a, b):
-    # A tries to signal every pid 2..5000 (B's init-near pids in a shared pid ns would be here).
-    rc, out, err = a.sh("k=0; for p in $(seq 2 5000); do kill -0 $p 2>/dev/null && k=$((k+1)); done; echo reachable=$k")
-    m = re.search(r"reachable=(\d+)", out or "")
-    n = int(m.group(1)) if m else 0
-    # In its own pid ns A can still see its own tree; the test is whether it can see MANY (a shared table). Compare to self.
-    rc2, out2, _ = a.sh("ls /proc | grep -Ec '^[0-9]+$'")
-    own = int((out2 or "0").strip() or 0)
-    leak = n > own + 5
-    return dict(name="proc.signal_reach", dim="process", verdict="FAIL" if leak else "PASS",
-                detail=f"A could signal {n} pids (own table {own})", evidence=(out or "")[:120])
+def p_proc_pidns(a, b):
+    # Whether A and B share a pid namespace. pid-ns inodes are only comparable within one kernel, so first check if A and
+    # B run on the same kernel (same boot_id). Different boot_id => different kernels (the VM arm) => separate pid
+    # namespaces by construction. Same boot_id (bare) => compare the pid-ns inode each sees for /proc/self.
+    _, ba, _ = a.sh("cat /proc/sys/kernel/random/boot_id")
+    _, bb, _ = b.sh("cat /proc/sys/kernel/random/boot_id")
+    ba, bb = ba.strip(), bb.strip()
+    if ba and bb and ba != bb:
+        return dict(name="proc.pidns", dim="process", verdict="PASS",
+                    detail="separate kernels (different boot_id) => separate pid namespaces", evidence=f"bootA={ba[:8]} bootB={bb[:8]}")
+    _, oa, _ = a.sh("readlink /proc/self/ns/pid")
+    _, ob, _ = b.sh("readlink /proc/self/ns/pid")
+    oa, ob = oa.strip(), ob.strip()
+    leak = bool(oa) and oa == ob
+    return dict(name="proc.pidns", dim="process", verdict="FAIL" if leak else "PASS",
+                detail=f"A and B share pid ns {oa}" if leak else f"same kernel, separate pid namespaces (A {oa}, B {ob})",
+                evidence=f"A={oa} B={ob}")
 
 def p_proc_global(a, b):
     rc, out, err = a.sh("ps -eo pid,comm 2>/dev/null | awk '$1<50' | wc -l; cat /proc/1/comm 2>/dev/null")
@@ -138,4 +144,4 @@ def p_timing_covert(a, b):
                 detail=f"A-latency spin/idle ratio={ratio}", evidence=str(rows))
 
 ALL = [p_fs_home, p_fs_hostroot, p_net_peer, p_net_metadata, p_net_egress_policy,
-       p_proc_table, p_proc_kill, p_proc_global, p_proc_sysinfo, p_cgroup, p_device, p_timing_covert]
+       p_proc_table, p_proc_pidns, p_proc_global, p_proc_sysinfo, p_cgroup, p_device, p_timing_covert]
