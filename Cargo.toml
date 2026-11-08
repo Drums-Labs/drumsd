@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/drumsd-core", "crates/drumsd-linux", "crates/drumsd"]
+members = ["crates/drumsd-core", "crates/drumsd-linux", "crates/drumsd-os", "crates/drumsd"]
 
 [workspace.package]
 version = "0.4.2"

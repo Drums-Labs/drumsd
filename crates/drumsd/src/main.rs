@@ -9,6 +9,7 @@
 mod api;
 mod config;
 mod manager;
+mod os_api;
 
 use std::sync::Arc;
 
@@ -21,6 +22,14 @@ fn main() {
         Some("procview") => std::process::exit(drumsd_linux::procview::main(&args[2..])),
         Some("openapi") => {
             print!("{}", api::OPENAPI);
+        }
+        Some("serve-os") => {
+            // Android and Windows pools only (no CRIU/Linux slots on this host); see crates/drumsd-os
+            let cfg_path = args.iter().position(|a| a == "--config").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "/etc/drumsd-os.json".into());
+            tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+            raise_nofile();
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().max_blocking_threads(1024).build().unwrap();
+            rt.block_on(os_api::serve(&cfg_path));
         }
         Some("serve") => {
             let cfg_path = args.iter().position(|a| a == "--config").and_then(|i| args.get(i + 1)).cloned().unwrap_or_else(|| "/etc/drumsd.json".into());
@@ -36,7 +45,7 @@ fn main() {
             rt.block_on(serve(cfg));
         }
         _ => {
-            eprintln!("usage: drumsd serve --config PATH | drumsd openapi");
+            eprintln!("usage: drumsd serve --config PATH | drumsd serve-os --config PATH | drumsd openapi");
             std::process::exit(2);
         }
     }
