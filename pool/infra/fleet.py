@@ -33,6 +33,9 @@ def b64(s: str) -> str:
 def user_data(role, guard, price):
     lines = ["#!/bin/bash", f"bash /opt/drums-t3/guard.sh {guard['ceiling_min']} {guard['idle_min']}"]
     if role == "host":
+        # the root volume comes from a snapshot: its blocks load lazily on first read, so read the 24 GB image once
+        # before the first desktop restores from it (timed in the log)
+        lines.append("( time cat /var/lib/drums/image/Ubuntu.qcow2 > /dev/null ) > /var/log/drums-prewarm.log 2>&1")
         lines.append(f"bash /opt/drums-t3/host-firstboot.sh {price} > /var/log/drums-firstboot.log 2>&1")
     return "\n".join(lines) + "\n"
 

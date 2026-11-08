@@ -50,5 +50,5 @@ panels = [
     ts("Errors by op and code", [q('sum by (op, code) (rate(pool_requests_total{code!~"2.."}[1m]))', "{{op}} {{code}}")], "reqps", 12, 52, w=12),
 ]
 d = {"title": "drums-pool SLOs", "uid": "drums-pool-slo", "schemaVersion": 39, "time": {"from": "now-2h", "to": "now"}, "refresh": "10s", "panels": panels}
-json.dump(d, open("drums-pool-dashboard.json", "w"), indent=1)
+json.dump(d, open("dashboards/drums-pool-dashboard.json", "w"), indent=1)
 print(len(panels), "panels")

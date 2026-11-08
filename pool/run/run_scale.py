@@ -253,7 +253,7 @@ def main():
     os.makedirs(f"{gp}/prov/datasources", exist_ok=True)
     os.makedirs(f"{gp}/prov/dashboards", exist_ok=True)
     open(f"{gp}/prov/datasources/prom.yml", "w").write("apiVersion: 1\ndatasources:\n- name: prom\n  uid: prom\n  type: prometheus\n  url: http://127.0.0.1:9090\n  isDefault: true\n")
-    open(f"{gp}/prov/dashboards/d.yml", "w").write(f"apiVersion: 1\nproviders:\n- name: drums\n  type: file\n  options: {{path: {d}}}\n")
+    open(f"{gp}/prov/dashboards/d.yml", "w").write(f"apiVersion: 1\nproviders:\n- name: drums\n  type: file\n  options: {{path: {d}/dashboards}}\n")
     genv = dict(os.environ, GF_PATHS_PROVISIONING=f"{gp}/prov", GF_PATHS_DATA=f"{gp}/data", GF_SERVER_HTTP_ADDR="127.0.0.1", GF_SERVER_HTTP_PORT="3000",
                 GF_AUTH_ANONYMOUS_ENABLED="true", GF_AUTH_ANONYMOUS_ORG_ROLE="Viewer", GF_ANALYTICS_REPORTING_ENABLED="false", GF_ANALYTICS_CHECK_FOR_UPDATES="false")
     run.bg([f"{O}/grafana/bin/grafana", "server", f"--homepath={O}/grafana"], os.path.join(run.out, "grafana.log"), env=genv)
