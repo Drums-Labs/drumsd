@@ -1,0 +1,53 @@
+# drums-pool SLO alerts (Prometheus rules). Thresholds are the T3 SLOs; Alertmanager routes them (alertmanager.yml).
+groups:
+- name: drums-pool-slo
+  rules:
+  - alert: PoolHostDown
+    expr: pool_host_up == 0
+    for: 15s
+    labels: {severity: page}
+    annotations: {summary: "pool host {{ $labels.host }} ({{ $labels.region }}) is not healthy"}
+  - alert: PoolHealthyHostsLow
+    expr: sum(pool_host_up) < 2
+    for: 30s
+    labels: {severity: page}
+    annotations: {summary: "fewer than 2 healthy hosts in the pool"}
+  - alert: PoolValidRewardRateBelowSLO
+    # rewards drumsd marked valid (all gates passed, no checker error) over all rewards, 5 min window; SLO 99.9 %
+    expr: (sum(rate(pool_verify_total{valid="true",checker_error="false"}[5m])) / sum(rate(pool_verify_total[5m]))) < 0.999
+    for: 2m
+    labels: {severity: page}
+    annotations: {summary: "valid-reward rate {{ $value | humanizePercentage }} is below the 99.9 % SLO"}
+  - alert: PoolStepLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le) (rate(pool_request_seconds_bucket{op="step"}[5m]))) > 10
+    for: 5m
+    labels: {severity: ticket}
+    annotations: {summary: "step p99 {{ $value }} s through the pool"}
+  - alert: PoolResetLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le) (rate(pool_request_seconds_bucket{op="reset"}[5m]))) > 60
+    for: 5m
+    labels: {severity: ticket}
+    annotations: {summary: "reset p99 {{ $value }} s"}
+  - alert: PoolControlPlaneOverheadHigh
+    expr: histogram_quantile(0.99, sum by (le) (rate(pool_overhead_seconds_bucket{op="step"}[5m]))) > 0.05
+    for: 5m
+    labels: {severity: ticket}
+    annotations: {summary: "pool's own time per step p99 {{ $value }} s (SLO 50 ms)"}
+  - alert: PoolQueueWaitHigh
+    expr: histogram_quantile(0.99, sum by (le) (rate(pool_queue_wait_seconds_bucket[5m]))) > 120
+    for: 5m
+    labels: {severity: ticket}
+    annotations: {summary: "creates wait {{ $value }} s for capacity (p99): add hosts"}
+  - alert: PoolHostSaturated
+    expr: max by (host, resource) (pool_host_saturation) > 0.95
+    for: 5m
+    labels: {severity: ticket}
+    annotations: {summary: "host {{ $labels.host }} {{ $labels.resource }} saturation {{ $value }}"}
+  - alert: PoolEpisodesLost
+    expr: increase(pool_episodes_lost_total[5m]) > 0
+    labels: {severity: info}
+    annotations: {summary: "{{ $value }} episodes lost to a host failure on {{ $labels.host }}"}
+  - alert: PoolFailoverFailures
+    expr: increase(pool_failover_total{outcome="failed"}[5m]) > 0
+    labels: {severity: page}
+    annotations: {summary: "envs could not be replaced after a host failure"}

@@ -523,7 +523,7 @@ async fn env_op(p: &P, m: &Method, id: &str, op: &str, query: &str, body: Option
     let r = p.upstream(&e.host, m.as_str().parse().unwrap(), &path, body.as_ref(), timeout).await;
     let ut = t.elapsed().as_secs_f64();
     *up += ut;
-    p.metrics.observe("pool_upstream_seconds", &[("op", if op.is_empty() { m.as_str() } else { op })], ut);
+    p.metrics.observe("pool_upstream_seconds", &[("op", if op.is_empty() { m.as_str() } else { op }), ("host", &e.host)], ut);
     let (st, b, ct) = match r {
         Ok(x) => x,
         Err(err) if err == "host_dead" => {
