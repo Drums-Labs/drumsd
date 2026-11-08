@@ -114,6 +114,11 @@ cat > /etc/sysctl.d/60-drums-slots.conf <<'EOF'
 # creating task's memory cgroup (the slot's), so memory.max still bounds them (drums-info oom-inotify 20261030T0344Z).
 fs.inotify.max_user_instances = 131072
 fs.inotify.max_user_watches = 4194304
+# Pipe buffers are charged per host user, and the slots of one origin share its uid range, so every slot counts against
+# one user's pipe pages. Past the soft limit (16384 pages) a new pipe gets one page and CRIU cannot restore a larger pipe
+# (F_SETPIPE_SZ: EPERM, "Can't restore pipe size"): fork children of LibreOffice desktops failed at 12 concurrent forks
+# (drums-info sota/t6 20261108T0659Z). Pipe pages are still charged to the slot's memory cgroup.
+fs.pipe-user-pages-soft = 0
 EOF
 sysctl -q --system
 # the hardened slot profile: root (the launcher) may map the slots' host uid/gid ranges (newuidmap enforces this even for
