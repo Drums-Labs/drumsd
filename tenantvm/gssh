@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# gssh INDEX CMD...: run CMD in tenant guest 10.200.INDEX.2 as ubuntu (sudo available there).
+I=${1:?index}; shift
+exec ssh -q -i /root/.ssh/t4_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes ubuntu@10.200.$I.2 "$@"
