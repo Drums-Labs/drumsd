@@ -937,6 +937,7 @@ impl Manager {
                 socket: &c.socket,
                 port: me.cfg.port_base as u32 + num,
             })?;
+            drumsd_linux::idrange::assign(&me.cfg.state_dir, &sp.dir, &me.cfg.lower)?; // its own host uid range (hardened)
             cgroup::ensure_slot_cg(&slotfs::marker_for(&me.cfg.state_dir, num), &me.limits)?;
             if me.cfg.warm_upper {
                 let _ = slotfs::prepare_spare(&sp);
@@ -1345,6 +1346,7 @@ impl Manager {
         };
         // the lower layer the checkpoint ran on: the idmapped view of the image for a hardened slot (own user namespace)
         let (lower, userxattr) = slotfs::restore_lower(&sp.dir, &self.cfg.lower, is_mounted).map_err(|e| fail(FailureClass::Infra, format!("restore lower: {e}"), &gates, &t))?;
+        let ids = drumsd_linux::idrange::restore_args(&sp.dir, &slotfs::paths(&self.cfg.state_dir, c.slot).dir).map_err(|e| fail(FailureClass::Infra, format!("uid range: {e}"), &gates, &t))?;
         let spec = restore::RestoreSpec {
             images: sp.images.clone(),
             croot: sp.croot.clone(),
@@ -1361,7 +1363,7 @@ impl Manager {
             out: sp.dir.join(format!("restore-drumsd-{gen}-{stamp}.out")),
             empty_net: self.cfg.netns_fast,
             nested_pidns: self.cfg.nested_pidns,
-            externals: [slot_dev_externals(&sp.dir), view_externals(&sp.dir, &self.cfg.procview_dir)].concat(),
+            externals: [slot_dev_externals(&sp.dir), view_externals(&sp.dir, &self.cfg.procview_dir), ids].concat(),
             userxattr,
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
@@ -1990,6 +1992,8 @@ impl Manager {
         if !o.status.success() {
             return Err(format!("capture verb rc {:?}: {}", o.status.code(), String::from_utf8_lossy(&o.stderr).chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()));
         }
+        // a saved state of the hardened profile: only root may enter it (the env it was captured from keeps its range)
+        drumsd_linux::idrange::seal_checkpoint(&slotfs::paths(&self.cfg.state_dir, into).dir).map_err(|e| format!("seal the saved state: {e}"))?;
         Ok(out.lines().rev().find(|l| l.starts_with('{')).and_then(|l| serde_json::from_str(l).ok()).unwrap_or(json!({"stdout": out})))
     }
 
