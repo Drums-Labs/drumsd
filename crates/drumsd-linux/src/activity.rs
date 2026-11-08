@@ -104,38 +104,34 @@ impl ActivityWatch {
         let cached = |g: &Inner, tg: i32| g.tg_cg.get(&tg).cloned();
         let mut g = self.inner.lock().unwrap();
         g.events += 1;
+        // attribution order: the group's cached cgroup, /proc of the task, then its parent's (a task starts in its
+        // parent's cgroup; a short-lived child and its parent can both be gone before this reads them)
         let cg = match *e {
             Event::Fork { parent_tgid, child_pid, child_tgid } => {
-                if child_pid == child_tgid {
-                    // a new process: its own cgroup (it may already have moved), else its parent's (they start in it)
-                    drop(g);
-                    let c = read_cgroup(child_tgid).or_else(|| read_cgroup(parent_tgid));
-                    g = self.inner.lock().unwrap();
-                    if let Some(c) = &c {
-                        g.tg_cg.insert(child_tgid, c.clone());
+                let fresh = child_pid == child_tgid;
+                let c0 = if fresh { None } else { cached(&g, child_tgid) };
+                let pc = cached(&g, parent_tgid);
+                let c = match c0 {
+                    Some(c) => Some(c),
+                    None => {
+                        drop(g);
+                        let c = read_cgroup(child_tgid).or(pc).or_else(|| read_cgroup(parent_tgid));
+                        g = self.inner.lock().unwrap();
+                        c
                     }
-                    c
-                } else {
-                    match cached(&g, child_tgid) {
-                        Some(c) => Some(c),
-                        None => {
-                            drop(g);
-                            let c = read_cgroup(child_tgid);
-                            g = self.inner.lock().unwrap();
-                            if let Some(c) = &c {
-                                g.tg_cg.insert(child_tgid, c.clone());
-                            }
-                            c
-                        }
-                    }
+                };
+                if let Some(c) = &c {
+                    g.tg_cg.insert(child_tgid, c.clone());
                 }
+                c
             }
             Event::Exit { pid, tgid, parent_tgid } => {
                 let c = match cached(&g, tgid) {
                     Some(c) => Some(c),
                     None => {
+                        let pc = cached(&g, parent_tgid);
                         drop(g);
-                        let c = read_cgroup(tgid).or_else(|| read_cgroup(pid)).or_else(|| read_cgroup(parent_tgid));
+                        let c = read_cgroup(tgid).or_else(|| read_cgroup(pid)).or(pc).or_else(|| read_cgroup(parent_tgid));
                         g = self.inner.lock().unwrap();
                         c
                     }
@@ -163,6 +159,19 @@ impl ActivityWatch {
             let cut = epoch - 3600.0;
             g.last.retain(|_, t| *t >= cut);
         }
+    }
+
+    /// Remember the cgroup of every thread group running now (the watch's start), so the exit of a process that
+    /// started before the watch is attributed even when it is reaped before the event is read.
+    pub fn seed(&self, read_cgroup: impl Fn(i32) -> Option<String>) -> usize {
+        let pids: Vec<i32> = std::fs::read_dir("/proc").map(|d| d.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok())).collect()).unwrap_or_default();
+        let found: Vec<(i32, String)> = pids.into_iter().filter_map(|p| read_cgroup(p).map(|c| (p, c))).collect();
+        let n = found.len();
+        let mut g = self.inner.lock().unwrap();
+        for (p, c) in found {
+            g.tg_cg.entry(p).or_insert(c);
+        }
+        n
     }
 
     pub fn record_overflow(&self, epoch: f64) {
@@ -258,6 +267,9 @@ pub fn start() -> io::Result<ActivityWatch> {
 }
 
 fn reader(fd: i32, w: ActivityWatch) {
+    // events queue in the socket meanwhile
+    let n = w.seed(crate::procfs::cgroup_path);
+    tracing::info!("activity watch: {n} running thread groups seeded");
     let mut buf = vec![0u8; 1 << 16];
     loop {
         let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
@@ -341,6 +353,17 @@ mod tests {
         assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(1.0));
         w.record(&Event::Exit { pid: 20, tgid: 20, parent_tgid: 1 }, 12.5, cg_of(&[]));
         assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(0.5));
+    }
+
+    #[test]
+    fn a_short_lived_child_is_attributed_to_its_known_parent() {
+        let w = ActivityWatch::new_for_test(0.0);
+        w.record(&Event::Fork { parent_tgid: 1, child_pid: 20, child_tgid: 20 }, 10.0, cg_of(&[(20, "/a")]));
+        // 20 forks 30, and both are gone before the watch reads /proc
+        w.record(&Event::Fork { parent_tgid: 20, child_pid: 30, child_tgid: 30 }, 11.0, cg_of(&[]));
+        w.record(&Event::Exit { pid: 30, tgid: 30, parent_tgid: 20 }, 11.5, cg_of(&[]));
+        assert_eq!(w.quiet_for("/a", 12.0, 1.0), Ok(0.5));
+        assert_eq!(w.summary()["unattributed"], 0);
     }
 
     #[test]

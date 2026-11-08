@@ -88,6 +88,11 @@ pub struct Config {
     /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.
     #[serde(default)]
     pub nested_pidns: bool,
+    /// CRIU log level for dumps (the capture verb's --dump-log-level), restores and template servers. 3 (default)
+    /// keeps every pr_info line, which is all the gates read; 4 adds the debug lines (~250k per desktop dump, about
+    /// 0.1 s of each dump and each restore). The verb refuses below 3.
+    #[serde(default = "d_criu_log")]
+    pub criu_log_level: u8,
     /// The `no_app_crash` gate: watch the kernel's process events for exits by crash signal (SIGSEGV, SIGILL, ...) in
     /// env trees. On by default; drumsd refuses to start when it cannot open the watch. Turn it off only on a host
     /// whose rewards nobody trains on: without it, an env whose app crashed can return a valid reward.
@@ -275,6 +280,10 @@ impl Default for QuiesceConfig {
     fn default() -> Self {
         QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0, events: true }
     }
+}
+
+fn d_criu_log() -> u8 {
+    3
 }
 
 fn d_q_window() -> f64 {

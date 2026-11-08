@@ -674,6 +674,12 @@ impl Manager {
     /// Adopt a checkpoint slot made by the existing desktop setup (`candidate snapshot`, `capture`), and keep a
     /// template server warm for it.
     pub async fn adopt_checkpoint(self: &Arc<Self>, id: String, slot: u32, expected_hash: Option<String>, captured_from: Option<String>) -> R<CheckpointRecord> {
+        self.adopt_checkpoint_from(id, slot, expected_hash, None, captured_from).await
+    }
+
+    /// adopt_checkpoint; `hash_port`: read the state-hash reference from the guest server on that port (the captured
+    /// parent's) while the template server loads the images, instead of before it.
+    pub async fn adopt_checkpoint_from(self: &Arc<Self>, id: String, slot: u32, expected_hash: Option<String>, hash_port: Option<u16>, captured_from: Option<String>) -> R<CheckpointRecord> {
         if self.ckpts.read().unwrap().contains_key(&id) {
             return Err(ApiError::new(409, format!("checkpoint {id} exists")));
         }
@@ -692,7 +698,13 @@ impl Manager {
             let sock = me.cfg.state_dir.join(format!("ps-{slot}.sock"));
             // the server's logs live in the checkpoint's own directory, so deleting the state takes them off the
             // state tmpfs with its other records (they used to pile up in the state dir: 318 pairs, 91 MB in 7 h)
-            let srv = template::start(&me.cfg.criu, &sock, &sp.images, &sp.dir).map_err(e500)?;
+            let (srv, port_hash) = std::thread::scope(|sc| {
+                let hh = hash_port.map(|p| sc.spawn(move || state_hash(&Guest::new(p, Duration::from_secs(30))).ok()));
+                let srv = template::start(&me.cfg.criu, &sock, &sp.images, &sp.dir, me.cfg.criu_log_level);
+                (srv, hh.and_then(|h| h.join().ok().flatten()))
+            });
+            let srv = srv.map_err(e500)?;
+            let expected_hash = expected_hash.or(port_hash);
             let (expected, reference) = match expected_hash {
                 Some(h) => (Some(h), "given".to_string()),
                 None => {
@@ -799,7 +811,7 @@ impl Manager {
         if let Some(pid) = template::adopt(&c.socket, &sp.images) {
             return Ok(pid);
         }
-        let srv = template::start(&self.cfg.criu, &c.socket, &sp.images, &sp.dir).map_err(|e| e.to_string())?;
+        let srv = template::start(&self.cfg.criu, &c.socket, &sp.images, &sp.dir, self.cfg.criu_log_level).map_err(|e| e.to_string())?;
         let mut c2 = c.clone();
         c2.server_pid = Some(srv.pid);
         self.put_ckpt(&c2);
@@ -1377,6 +1389,7 @@ impl Manager {
             nested_pidns: self.cfg.nested_pidns,
             externals: [slot_dev_externals(&sp.dir), view_externals(&sp.dir, &self.cfg.procview_dir)].concat(),
             userxattr,
+            log_level: self.cfg.criu_log_level,
         };
         t.insert("prepare".into(), round3(ts.elapsed().as_secs_f64()));
 
@@ -1846,9 +1859,9 @@ impl Manager {
             let dumped = dumped.unwrap();
             // 4. adopt (template server, the children's state-hash reference from the parent's desktop now)
             let cid = ckpt_id.clone().unwrap_or_else(|| format!("{}-c{}", id, into));
+            //    The parent's state hash is read while the template server loads the images (both after the dump).
             let port = slot.view.read().unwrap().port;
-            let h = tokio::task::spawn_blocking(move || state_hash(&Guest::new(port, Duration::from_secs(30)))).await.map_err(e500)?.ok();
-            let c = self.adopt_checkpoint(cid.clone(), into, h, Some(id.to_string())).await;
+            let c = self.adopt_checkpoint_from(cid.clone(), into, None, Some(port), Some(id.to_string())).await;
             // 5. every dumped process still runs in the source (no action was applied to it since the dump)
             let hold = Duration::from_secs_f64(self.cfg.quiesce.confirm_s.clamp(0.0, 60.0)).saturating_sub(td.elapsed());
             if !hold.is_zero() {
@@ -1994,7 +2007,8 @@ impl Manager {
         let py = self.cfg.python.clone().unwrap_or_else(|| PathBuf::from("/usr/bin/python3"));
         let criu_dir = self.cfg.criu.parent().map(|p| p.display().to_string()).unwrap_or_default();
         let o = std::process::Command::new(py)
-            .args(["-m", "sharedos_rootfs.capture", "capture", "--slot", &slot.to_string(), "--into", &into.to_string(), "--leave-running", "--no-continue"])
+            .args(["-m", "sharedos_rootfs.capture", "capture", "--slot", &slot.to_string(), "--into", &into.to_string(), "--leave-running", "--no-continue",
+                   "--dump-log-level", &self.cfg.criu_log_level.clamp(3, 4).to_string()])
             .current_dir(&self.cfg.py_src)
             .env("SHAREDOS_ROOTFS_CONFIG", &self.cfg.py_config)
             .env("PYTHONPATH", &self.cfg.py_src)
