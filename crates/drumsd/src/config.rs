@@ -77,12 +77,15 @@ pub struct Config {
     /// Two leaf cgroups per slot: a reset kills the old tree without waiting and restores into the other leaf.
     #[serde(default = "yes")]
     pub async_kill: bool,
-    /// Labelled variant: `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore.
-    #[serde(default)]
+    /// `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore (which execs ip and
+    /// iptables-restore for every network namespace of the tree, ~70 ms of a Chrome desktop restore). The netns gate
+    /// still compares links, addresses and routes with the dump. Default on since sota/t2; false = CRIU's restore.
+    #[serde(default = "yes")]
     pub netns_fast: bool,
-    /// Labelled variant: lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the
-    /// pre-resume action, before any restored task runs. The cgroup gate proves the limits afterwards.
-    #[serde(default)]
+    /// Lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the pre-resume action,
+    /// before any restored task runs; the cgroup gate proves the limits afterwards. Default on since sota/t2: the
+    /// restore is no longer throttled to the env's own 4 vCPU.
+    #[serde(default = "yes")]
     pub restore_cpu_boost: bool,
     /// drums-criu app-compat build: name `--nested-pidns` on restore (dump side is the capture verb's), so sandboxed
     /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.

@@ -114,6 +114,12 @@ cat > /etc/sysctl.d/60-drums-slots.conf <<'EOF'
 # creating task's memory cgroup (the slot's), so memory.max still bounds them (drums-info oom-inotify 20261030T0344Z).
 fs.inotify.max_user_instances = 131072
 fs.inotify.max_user_watches = 4194304
+# Pipe buffers are counted per host uid too, and every env restored from one image runs as the same host uids
+# (hardened: 100000+). Past the soft limit (16384 pages = 64 MiB for the whole host) the kernel gives new pipes one
+# page and refuses F_SETPIPE_SZ to an unprivileged user, so CRIU's pipe restore fails ("Can't restore pipe size:
+# Operation not permitted"): 79 of 1,972 resets and 74 of 176 creates at 128 desktops (drums-info sota/t2). Pipe
+# buffers are charged to the writer's memory cgroup (the env's), so memory.max still bounds them; 0 = no soft limit.
+fs.pipe-user-pages-soft = 0
 EOF
 sysctl -q --system
 # the hardened slot profile: root (the launcher) may map the slots' host uid/gid ranges (newuidmap enforces this even for
