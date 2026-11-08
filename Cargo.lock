@@ -207,6 +207,7 @@ dependencies = [
  "axum",
  "drumsd-core",
  "drumsd-linux",
+ "drumsd-os",
  "hex",
  "libc",
  "serde",
@@ -239,6 +240,21 @@ dependencies = [
  "drumsd-core",
  "hex",
  "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "drumsd-os"
+version = "0.4.2"
+dependencies = [
+ "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
