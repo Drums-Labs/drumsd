@@ -1,6 +1,6 @@
 {
   "lock_version": 1,
-  "written_utc": "2026-10-31",
+  "written_utc": "2026-11-08",
   "host": {
     "os": "Ubuntu 24.04",
     "arch": "x86_64",
@@ -82,11 +82,11 @@
   "rust_toolchain": "1.96.1",
   "sources": {
     "drums-criu": {
-      "repo": "sahiljagtap08/drums-criu",
-      "branch": "rc1",
-      "commit": "b4fbfddf15b91997288c628abad2756e6368291e",
+      "repo": "Drums-Labs/drums-criu",
+      "branch": "sota/t2",
+      "commit": "d4a05d1e1042fa00db8053535ec1439789f27cce",
       "tag": null,
-      "note": "rc1 = fix/pkeys-userns b4fbfddf1: drums-main 358380f66 + fix/ip6tables fbbd7c20a (a dump unlocks only the network lock it took) + fix/userns-slot (dump/restore of a slot in its own user namespace: 549eedbc4, 7cb53173f, tests 9ab683f62, a17b78241) + memory protection keys across C/R (dfb7ae3fa, ad88c44d2, f100f93c0, 52ac59456; tests b8859f65e, b4fbfddf1; the restored-Chrome crash in fork children). Gates: runbooks/userns-appcompat, fork-chrome-crash, rc1",
+      "note": "sota/t2 = rc1 b4fbfddf1 + parallel template fill (9bc7812a9), per-VMA log lines at debug level (faac1aad7), template mark tracking and forked-subtree unmap (d4a05d1e1). Gates: runbooks/sota/t2. rc1 note: rc1 = fix/pkeys-userns b4fbfddf1: drums-main 358380f66 + fix/ip6tables fbbd7c20a (a dump unlocks only the network lock it took) + fix/userns-slot (dump/restore of a slot in its own user namespace: 549eedbc4, 7cb53173f, tests 9ab683f62, a17b78241) + memory protection keys across C/R (dfb7ae3fa, ad88c44d2, f100f93c0, 52ac59456; tests b8859f65e, b4fbfddf1; the restored-Chrome crash in fork children). Gates: runbooks/userns-appcompat, fork-chrome-crash, rc1",
       "reference_binary_sha256": "informational only",
       "reference_binary_note": "CRIU builds are not byte-reproducible; the installer prints its own build's sha256"
     },
@@ -122,6 +122,7 @@
     "c8i.4xlarge": 0.74968,
     "c8i.2xlarge": 0.37484,
     "source": "AWS Price List API, us-east-1 Linux on-demand, effective 2026-10-01 (as in the app-compat and drumsd reports)",
-    "r8i.16xlarge": 4.44544
+    "r8i.16xlarge": 4.44544,
+    "m8i.16xlarge": 3.38688
   }
 }
