@@ -8,6 +8,9 @@ pub struct Adb {
     pub serial: String,
     /// TCP devices (redroid) must be `adb connect`ed; emulators register themselves.
     pub tcp: bool,
+    /// Run shell commands as root through `su 0` (userdebug images; AndroidWorld runs `adb root` for the same reason:
+    /// checkers read app databases).
+    pub su: bool,
 }
 
 impl Adb {
@@ -30,6 +33,10 @@ impl Adb {
     }
     /// `adb shell CMD` (one string, run by the device's sh). Exit status is the command's (adb v2 protocol).
     pub async fn shell(&self, cmd: &str, timeout_s: f64) -> Out {
+        if self.su {
+            let c = format!("su 0 sh -c {}", sh_quote(cmd));
+            return self.raw(&["shell", &c], timeout_s).await;
+        }
         self.raw(&["shell", cmd], timeout_s).await
     }
     pub async fn screencap(&self) -> Result<Vec<u8>, String> {

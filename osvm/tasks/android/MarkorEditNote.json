@@ -1,0 +1,28 @@
+{
+ "id": "android/MarkorEditNote",
+ "os": "android",
+ "instruction": "In Markor, add the line 'pay rent' to the end of the note tasks.md.",
+ "source": "android_world@55ddaf5 task_evals/single/markor.py MarkorEditNote",
+ "setup": [
+  "mkdir -p /sdcard/Documents/Markor",
+  "rm -rf /sdcard/Documents/Markor/*",
+  "printf 'buy stamps\\n' > /sdcard/Documents/Markor/tasks.md"
+ ],
+ "check": [
+  {
+   "cmd": "cat /sdcard/Documents/Markor/tasks.md",
+   "regex": "buy stamps\\s*\\npay rent\\s*$"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "printf 'pay rent\\n' >> /sdcard/Documents/Markor/tasks.md"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "net.gsantner.markor"
+ ],
+ "max_steps": 10
+}

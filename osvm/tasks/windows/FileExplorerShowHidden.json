@@ -1,0 +1,24 @@
+{
+ "id": "windows/FileExplorerShowHidden",
+ "os": "windows",
+ "instruction": "Make File Explorer show hidden files.",
+ "source": "WindowsAgentArena-style, domain file_explorer (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced' Hidden 2"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced').Hidden",
+   "equals": "1"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced' Hidden 1"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

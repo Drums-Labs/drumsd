@@ -1,0 +1,24 @@
+{
+ "id": "android/FontSizeLargest",
+ "os": "android",
+ "instruction": "Make the font size as large as possible.",
+ "source": "AndroidWorld-style (system settings)",
+ "setup": [
+  "settings put system font_scale 1.0"
+ ],
+ "check": [
+  {
+   "cmd": "settings get system font_scale",
+   "min": 1.29
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "settings put system font_scale 1.3"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

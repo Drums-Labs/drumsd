@@ -30,6 +30,9 @@ fn d_docker() -> String {
 fn d_boot() -> f64 {
     180.0
 }
+fn d_true() -> bool {
+    true
+}
 fn d_snap() -> String {
     "clean".into()
 }
@@ -71,6 +74,9 @@ pub struct AndroidCfg {
     pub emulator_args: Vec<String>,
     #[serde(default = "d_boot")]
     pub boot_timeout_s: f64,
+    /// Run desktop shell commands as root via `su 0` (default true).
+    #[serde(default = "d_true")]
+    pub su: bool,
     /// Where per-desktop state lives (redroid overlays, emulator logs).
     pub work_dir: PathBuf,
 }
@@ -90,7 +96,7 @@ impl AndroidDesk {
             AndroidMode::Redroid => (format!("127.0.0.1:{port}"), true),
             AndroidMode::Emulator => (format!("emulator-{port}"), false),
         };
-        let adb = Adb { bin: cfg.adb.clone(), serial, tcp };
+        let adb = Adb { bin: cfg.adb.clone(), serial, tcp, su: cfg.su };
         AndroidDesk { cfg, name, port, adb, child: None }
     }
     fn dir(&self) -> PathBuf {
@@ -108,6 +114,10 @@ impl AndroidDesk {
     async fn redroid_mount(&self) -> Result<(), String> {
         let d = self.dir();
         let (upper, work, merged) = (d.join("upper"), d.join("work"), d.join("data"));
+        // never reuse an upper layer (a desktop of the same name from an earlier daemon may have left one)
+        if upper.exists() || work.exists() {
+            self.redroid_unmount().await?;
+        }
         for p in [&upper, &work, &merged] {
             std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
         }
@@ -310,7 +320,8 @@ impl AndroidDesk {
             "key" => format!("input keyevent {}", a.get("key").and_then(|v| v.as_str().map(String::from).or(v.as_i64().map(|i| i.to_string()))).ok_or("key missing")?),
             "open_app" => {
                 let p = a.get("app_name").or_else(|| a.get("package")).and_then(|v| v.as_str()).ok_or("app_name missing")?;
-                format!("monkey -p {} -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1", sh_quote(p))
+                // the package's launcher activity, started like a tap on its icon (monkey does not launch on these images)
+                format!("am start -n \"$(cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {} | tail -1)\"", sh_quote(p))
             }
             "wait" | "sleep" => {
                 let s = a.get("seconds").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.0, 60.0);

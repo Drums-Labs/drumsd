@@ -1,7 +1,8 @@
 #!/bin/bash
 # Drums SOTA host guard: hard ceiling + idle rule. Installed at first boot.
 # HARD_CEILING_H: power off this many hours after boot, always.
-# Idle rule: power off after IDLE_MIN minutes with no ssh session AND 1-min load < 1.0,
+# Idle rule: power off after IDLE_MIN minutes with no established ssh connection (ss, port 22; `who` misses
+# non-interactive ssh) AND 1-min load < 1.0,
 # unless /run/drums-busy exists (a measurement in progress touches it) and is fresher than 30 min.
 HARD_CEILING_H=${HARD_CEILING_H:-16}
 IDLE_MIN=${IDLE_MIN:-40}
@@ -11,7 +12,7 @@ idle=0
 while true; do
   up=\$(cut -d. -f1 /proc/uptime)
   if [ "\$up" -gt \$(( $HARD_CEILING_H*3600 )) ]; then logger drums-guard hard ceiling; /sbin/poweroff; fi
-  ssh_n=\$(who | wc -l); load=\$(cut -d' ' -f1 /proc/loadavg)
+  ssh_n=\$(ss -Htn state established '( sport = :22 )' | wc -l); load=\$(cut -d' ' -f1 /proc/loadavg)
   busy=0; [ -f /run/drums-busy ] && [ \$(( \$(date +%s) - \$(stat -c %Y /run/drums-busy) )) -lt 1800 ] && busy=1
   if [ "\$ssh_n" -eq 0 ] && [ "\$busy" -eq 0 ] && awk "BEGIN{exit !(\$load < 1.0)}"; then idle=\$((idle+1)); else idle=0; fi
   if [ "\$idle" -ge $IDLE_MIN ]; then logger drums-guard idle; /sbin/poweroff; fi

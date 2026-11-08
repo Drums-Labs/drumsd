@@ -1,0 +1,25 @@
+{
+ "id": "android/SystemBrightnessMax",
+ "os": "android",
+ "instruction": "Turn brightness to the max value.",
+ "source": "android_world@55ddaf5 task_evals/single/system.py SystemBrightnessMax",
+ "setup": [
+  "settings put system screen_brightness_mode 0",
+  "settings put system screen_brightness 102"
+ ],
+ "check": [
+  {
+   "cmd": "settings get system screen_brightness",
+   "equals": "255"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "settings put system screen_brightness 255"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

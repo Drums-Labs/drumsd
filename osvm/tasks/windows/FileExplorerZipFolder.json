@@ -1,0 +1,27 @@
+{
+ "id": "windows/FileExplorerZipFolder",
+ "os": "windows",
+ "instruction": "Compress the folder 'project' on the Desktop into project.zip on the Desktop.",
+ "source": "WindowsAgentArena-style, domain file_explorer (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Remove-Item -Force (Join-Path ([Environment]::GetFolderPath('Desktop')) 'project.zip') -ErrorAction SilentlyContinue; exit 0",
+  "New-Item -Force -ItemType Directory (Join-Path ([Environment]::GetFolderPath('Desktop')) 'project') | Out-Null",
+  "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'project\\a.txt') 'a'",
+  "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'project\\b.txt') 'b'"
+ ],
+ "check": [
+  {
+   "cmd": "Add-Type -A System.IO.Compression.FileSystem; ([IO.Compression.ZipFile]::OpenRead((Join-Path ([Environment]::GetFolderPath('Desktop')) 'project.zip')).Entries | Where-Object { $_.Name -ne '' }).Count",
+   "equals": "2"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Compress-Archive -Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'project') -DestinationPath (Join-Path ([Environment]::GetFolderPath('Desktop')) 'project.zip')"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

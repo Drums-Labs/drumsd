@@ -233,6 +233,17 @@ impl OsPools {
                 }
                 let _ = crate::exec::run("sh", &["-c", &format!("grep ' {}/' /proc/mounts | cut -d' ' -f2 | xargs -r -n1 umount -l", a.work_dir.display())], None, crate::exec::secs(30.0)).await;
             }
+            // per-desktop state of an earlier daemon (overlay uppers, emulator logs, VM overlays) is never reused
+            let wd = p.cfg.android.as_ref().map(|a| a.work_dir.clone()).or(p.cfg.windows.as_ref().map(|w| w.work_dir.clone()));
+            if let Some(wd) = wd {
+                if let Ok(rd) = std::fs::read_dir(&wd) {
+                    for e in rd.flatten() {
+                        if e.file_name().to_string_lossy().starts_with("drums-os-") {
+                            let _ = crate::exec::run("rm", &["-rf", &e.path().to_string_lossy()], None, crate::exec::secs(600.0)).await;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -330,6 +341,7 @@ impl OsPools {
         };
         let slot = Arc::new(Slot { id: id.clone(), pool: pool.clone(), desk: tokio::sync::Mutex::new(desk), view: RwLock::new(view), task: RwLock::new(task), index });
         self.slots.write().unwrap().insert(id.clone(), slot.clone());
+        let op_t0 = std::time::Instant::now();
         let mut desk = slot.desk.lock().await;
         let r = {
             let _permit = pool.starts.acquire().await.unwrap();
@@ -339,11 +351,11 @@ impl OsPools {
             }
         };
         self.event("create", json!({"slot": id, "pool": pool.cfg.name, "image": image, "ok": r.is_ok(), "timing": r.as_ref().ok(), "error": r.as_ref().err()}));
-        self.begin_episode(&slot, &mut desk, r, "create").await
+        self.begin_episode(&slot, &mut desk, r, "create", op_t0).await
     }
 
     /// After a start or reset: run the gates and the task setup; returns the view.
-    async fn begin_episode(self: &Arc<Self>, slot: &Arc<Slot>, desk: &mut Desk, started: Result<Value, String>, op: &str) -> R<SlotView> {
+    async fn begin_episode(self: &Arc<Self>, slot: &Arc<Slot>, desk: &mut Desk, started: Result<Value, String>, op: &str, op_t0: std::time::Instant) -> R<SlotView> {
         let mut gates = vec![];
         let timing = match started {
             Ok(t) => t,
@@ -368,38 +380,47 @@ impl OsPools {
         };
         gates.push(Gate { name: "process".into(), ok: Some(alive), detail: if alive { "running".into() } else { "not running".into() }, seconds: t.elapsed().as_secs_f64() });
         gates.push(Gate { name: "guest_ready".into(), ok: Some(true), detail: "answered during start".into(), seconds: timing["total_s"].as_f64().unwrap_or(0.0) });
-        // state hash
+        // state hash and canary in one desktop command (the probe's output is taken before the canary is written)
         let t = std::time::Instant::now();
-        let probe = self.probe(slot, desk).await;
+        let canary = format!("drums_canary_{}_{}", slot.id, episode);
+        let probe = self.probe(slot, desk, Some(&canary)).await;
+        let probe_s = t.elapsed().as_secs_f64();
+        let (probe, canary_ok) = match probe {
+            Ok(text) => match text.trim_end().strip_suffix(CANARY_OK) {
+                Some(rest) => (Ok(rest.to_string()), true),
+                None => (Ok(text), false),
+            },
+            Err(e) => (Err(e), false),
+        };
         let g = match probe {
             Ok(text) => {
                 let h = sha(&text);
                 let want = slot.pool.clean_hash.read().unwrap().clone();
                 match want {
-                    Some(w) if w == h => Gate { name: "state_hash".into(), ok: Some(true), detail: h, seconds: t.elapsed().as_secs_f64() },
+                    Some(w) if w == h => Gate { name: "state_hash".into(), ok: Some(true), detail: h, seconds: probe_s },
                     Some(w) => {
                         let p = self.cfg.journal_dir.join(format!("probe-{}-{}.txt", slot.id, episode));
                         let _ = std::fs::write(&p, &text);
-                        Gate { name: "state_hash".into(), ok: Some(false), detail: format!("{h} != clean {w} (probe saved to {})", p.display()), seconds: t.elapsed().as_secs_f64() }
+                        Gate { name: "state_hash".into(), ok: Some(false), detail: format!("{h} != clean {w} (probe saved to {})", p.display()), seconds: probe_s }
                     }
                     None => {
                         *slot.pool.clean_hash.write().unwrap() = Some(h.clone());
                         let p = self.cfg.journal_dir.join(format!("clean-probe-{}.txt", slot.pool.cfg.name));
                         let _ = std::fs::write(&p, &text);
                         self.event("clean_hash_adopted", json!({"pool": slot.pool.cfg.name, "slot": slot.id, "hash": h, "probe": p}));
-                        Gate { name: "state_hash".into(), ok: Some(true), detail: format!("{h} (adopted as the pool's clean hash)"), seconds: t.elapsed().as_secs_f64() }
+                        Gate { name: "state_hash".into(), ok: Some(true), detail: format!("{h} (adopted as the pool's clean hash)"), seconds: probe_s }
                     }
                 }
             }
-            Err(e) => Gate { name: "state_hash".into(), ok: Some(false), detail: format!("probe failed: {e}"), seconds: t.elapsed().as_secs_f64() },
+            Err(e) => Gate { name: "state_hash".into(), ok: Some(false), detail: format!("probe failed: {e}"), seconds: probe_s },
         };
         gates.push(g);
-        // isolation: write this episode's canary (the clean hash already proved no other canary is present)
-        let t = std::time::Instant::now();
-        let canary = format!("drums_canary_{}_{}", slot.id, episode);
-        let w = self.run_cmd(desk, &canary_write(desk, &canary), 30.0).await;
-        gates.push(Gate { name: "isolation".into(), ok: Some(w.as_ref().is_ok_and(|(rc, _)| *rc == 0)), detail: match &w { Ok((rc, o)) => format!("canary {canary} written (rc {rc}) {}", o.trim()), Err(e) => format!("canary write failed: {e}") }, seconds: t.elapsed().as_secs_f64() });
+        // isolation: the clean hash proved no other canary is present; this episode's canary was written after the probe
+        gates.push(Gate { name: "isolation".into(), ok: Some(canary_ok), detail: if canary_ok { format!("canary {canary} written") } else { format!("canary {canary} not confirmed") }, seconds: 0.0 });
+        // the desktop is back and proven clean: everything up to here is the reset (or create) latency
+        let ready_s = op_t0.elapsed().as_secs_f64();
         // task setup
+        let t_setup = std::time::Instant::now();
         let task = slot.task.read().unwrap().clone();
         if let Some(task) = &task {
             let t = std::time::Instant::now();
@@ -427,7 +448,7 @@ impl OsPools {
         {
             let mut v = slot.view.write().unwrap();
             v.gates = gates;
-            v.cost = json!({"op": op, "timing": timing});
+            v.cost = json!({"op": op, "timing": timing, "ready_s": ready_s, "setup_s": t_setup.elapsed().as_secs_f64(), "total_s": op_t0.elapsed().as_secs_f64()});
             if failed.is_empty() {
                 v.state = "ready".into();
                 v.reason = None;
@@ -482,13 +503,19 @@ impl OsPools {
         }
     }
 
-    async fn probe(&self, slot: &Slot, desk: &Desk) -> Result<String, String> {
+    async fn probe(&self, slot: &Slot, desk: &Desk, canary: Option<&str>) -> Result<String, String> {
         let pc = &slot.pool.cfg;
         let p = pc.probe.clone().unwrap_or_else(|| match desk {
             Desk::A(_) => AndroidDesk::PROBE.to_string(),
             Desk::W(_) => WinDesk::PROBE.to_string(),
         });
-        let cmd = p.replace("{EXCLUDE}", &pc.probe_exclude);
+        let mut cmd = p.replace("{EXCLUDE}", &pc.probe_exclude);
+        if let Some(c) = canary {
+            cmd = match desk {
+                Desk::A(_) => format!("{cmd}; {} && echo {CANARY_OK}", canary_write(desk, c)),
+                Desk::W(_) => format!("{cmd}; {}; if ($?) {{ '{CANARY_OK}' }}", canary_write(desk, c)),
+            };
+        }
         let (rc, out) = self.run_cmd(desk, &cmd, 60.0).await?;
         if rc != 0 && out.trim().is_empty() {
             return Err(format!("probe exit {rc}"));
@@ -512,6 +539,7 @@ impl OsPools {
 
     pub async fn reset(self: &Arc<Self>, id: &str) -> R<SlotView> {
         let slot = self.slot(id)?;
+        let op_t0 = std::time::Instant::now();
         let mut desk = slot.desk.lock().await;
         {
             let mut v = slot.view.write().unwrap();
@@ -525,7 +553,7 @@ impl OsPools {
             Desk::W(d) => d.reset().await,
         };
         self.event("reset", json!({"slot": id, "ok": r.is_ok(), "timing": r.as_ref().ok(), "error": r.as_ref().err()}));
-        self.begin_episode(&slot, &mut desk, r, "reset").await
+        self.begin_episode(&slot, &mut desk, r, "reset", op_t0).await
     }
 
     pub async fn step(self: &Arc<Self>, id: &str, action: Value, screenshot: bool) -> R<Value> {
@@ -769,6 +797,8 @@ impl OsPools {
                "live_desktops": live, "host_usd_per_hour": self.cfg.host_usd_per_hour, "usd_per_desktop_hour": if live > 0 { self.cfg.host_usd_per_hour / live as f64 } else { 0.0 }})
     }
 }
+
+const CANARY_OK: &str = "DRUMS_CANARY_OK";
 
 fn canary_write(desk: &Desk, name: &str) -> String {
     match desk {

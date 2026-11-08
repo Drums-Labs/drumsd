@@ -1,0 +1,27 @@
+{
+ "id": "android/MarkorCreateFolder",
+ "os": "android",
+ "instruction": "Create a folder named receipts in Markor.",
+ "source": "android_world@55ddaf5 task_evals/single/markor.py MarkorCreateFolder",
+ "setup": [
+  "mkdir -p /sdcard/Documents/Markor",
+  "rm -rf /sdcard/Documents/Markor/*"
+ ],
+ "check": [
+  {
+   "cmd": "test -d /sdcard/Documents/Markor/receipts && echo dir || echo nodir",
+   "equals": "dir"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "mkdir /sdcard/Documents/Markor/receipts"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "net.gsantner.markor"
+ ],
+ "max_steps": 10
+}

@@ -1,0 +1,24 @@
+{
+ "id": "android/LocationOff",
+ "os": "android",
+ "instruction": "Turn off location.",
+ "source": "AndroidWorld-style (system settings)",
+ "setup": [
+  "cmd location set-location-enabled true"
+ ],
+ "check": [
+  {
+   "cmd": "cmd location is-location-enabled",
+   "equals": "false"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "cmd location set-location-enabled false"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

@@ -1,0 +1,27 @@
+{
+ "id": "android/SimpleCalendarAddOneEvent",
+ "os": "android",
+ "instruction": "In Simple Calendar Pro, create an event titled 'Dentist'.",
+ "source": "android_world@55ddaf5 task_evals/single/calendar/calendar.py SimpleCalendarAddOneEvent",
+ "setup": [
+  "am force-stop com.simplemobiletools.calendar.pro",
+  "sqlite3 /data/data/com.simplemobiletools.calendar.pro/databases/events.db \"delete from events where title='Dentist';\""
+ ],
+ "check": [
+  {
+   "cmd": "sqlite3 /data/data/com.simplemobiletools.calendar.pro/databases/events.db \"select count(*) from events where title='Dentist';\"",
+   "equals": "1"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "am force-stop com.simplemobiletools.calendar.pro; sqlite3 /data/data/com.simplemobiletools.calendar.pro/databases/events.db \"insert into events(start_ts,end_ts,title,location,description,reminder_1_minutes,reminder_2_minutes,reminder_3_minutes,reminder_1_type,reminder_2_type,reminder_3_type,repeat_interval,repeat_rule,repeat_limit,repetition_exceptions,attendees,import_id,time_zone,flags,event_type,parent_id,last_updated,source,availability,color,type) values(1700000000,1700003600,'Dentist','','',-1,-1,-1,0,0,0,0,0,0,'[]','[]','','',0,1,0,0,'simple-calendar',0,0,0);\""
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "com.simplemobiletools.calendar.pro"
+ ],
+ "max_steps": 10
+}

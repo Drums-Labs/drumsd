@@ -1,0 +1,59 @@
+{
+ "listen": "127.0.0.1:7070",
+ "token_file": "/etc/drumsd-os.token",
+ "journal_dir": "/var/lib/drumsd-os/journal",
+ "host_usd_per_hour": 0.0,
+ "pools": [
+  {
+   "name": "android-redroid",
+   "port_base": 6100,
+   "max_desktops": 256,
+   "max_concurrent_starts": 16,
+   "alive_after_s": 5.0,
+   "probe": "(settings list system; settings list secure; settings list global) | grep -vE '{EXCLUDE}' | sort; find /sdcard/ -type f 2>/dev/null | sort; pm list packages | sort; content query --uri content://com.android.contacts/raw_contacts --projection display_name 2>/dev/null | sort; content query --uri content://com.android.calendar/events --projection title 2>/dev/null | sort; ls /data/local/tmp 2>/dev/null | sort",
+   "probe_exclude": "^$",
+   "tasks_dir": "/home/ubuntu/drumsd/osvm/tasks/android",
+   "android": {
+    "mode": "redroid",
+    "adb": "/opt/t5/android-sdk/platform-tools/adb",
+    "image": "redroid/redroid@sha256:5a42a569ee1d7c71796c0385e906cbaa4c3e0a162a56d9f26b29bdb1befac13b",
+    "golden_data": "/srv/t5/redroid-golden/data",
+    "boot_args": [
+     "androidboot.redroid_width=1080",
+     "androidboot.redroid_height=2400",
+     "androidboot.redroid_dpi=420",
+     "androidboot.redroid_gpu_mode=guest"
+    ],
+    "work_dir": "/srv/t5/drums-redroid",
+    "boot_timeout_s": 180
+   }
+  },
+  {
+   "name": "android-emulator",
+   "port_base": 5560,
+   "max_desktops": 60,
+   "max_concurrent_starts": 8,
+   "alive_after_s": 5.0,
+   "probe": "(settings list system; settings list secure; settings list global) | grep -vE '{EXCLUDE}' | sort; find /sdcard/ -type f 2>/dev/null | sort; pm list packages | sort; content query --uri content://com.android.contacts/raw_contacts --projection display_name 2>/dev/null | sort; content query --uri content://com.android.calendar/events --projection title 2>/dev/null | sort; ls /data/local/tmp 2>/dev/null | sort",
+   "probe_exclude": "^$",
+   "tasks_dir": "/home/ubuntu/drumsd/osvm/tasks/android",
+   "android": {
+    "mode": "emulator",
+    "adb": "/opt/t5/android-sdk/platform-tools/adb",
+    "emulator": "/opt/t5/android-sdk/emulator/emulator",
+    "avd": "AndroidWorldAvd",
+    "sdk_root": "/opt/t5/android-sdk",
+    "avd_home": "/opt/t5/avd",
+    "snapshot": "clean",
+    "emulator_args": [
+     "-gpu",
+     "swiftshader_indirect",
+     "-memory",
+     "2048"
+    ],
+    "work_dir": "/srv/t5/drums-emu",
+    "boot_timeout_s": 300
+   }
+  }
+ ]
+}

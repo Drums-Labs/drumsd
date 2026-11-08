@@ -1,0 +1,24 @@
+{
+ "id": "android/ScreenTimeout10Min",
+ "os": "android",
+ "instruction": "Set the screen timeout to 10 minutes.",
+ "source": "AndroidWorld-style (system settings)",
+ "setup": [
+  "settings put system screen_off_timeout 1800000"
+ ],
+ "check": [
+  {
+   "cmd": "settings get system screen_off_timeout",
+   "equals": "600000"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "settings put system screen_off_timeout 600000"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

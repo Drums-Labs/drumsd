@@ -47,6 +47,10 @@ pub struct WindowsCfg {
     pub vm_args: Vec<String>,
     /// NIC model for the user-mode network (the guest server is forwarded from 127.0.0.1:<port>).
     pub nic: String,
+    /// Extra user-mode network options (e.g. "net=20.20.20.0/24,host=20.20.20.1,dhcpstart=20.20.20.21", the addresses
+    /// WindowsAgentArena's container gives the guest).
+    #[serde(default)]
+    pub user_net: String,
     #[serde(default = "d_gport")]
     pub guest_port: u16,
     #[serde(default = "d_ready")]
@@ -115,7 +119,7 @@ impl WinDesk {
             "-name".into(),
             self.name.clone(),
             "-netdev".into(),
-            format!("user,id=n0,hostfwd=tcp:127.0.0.1:{}-:{}", self.port, self.cfg.guest_port),
+            format!("user,id=n0,hostfwd=tcp:127.0.0.1:{}-:{}{}{}", self.port, self.cfg.guest_port, if self.cfg.user_net.is_empty() { "" } else { "," }, self.cfg.user_net),
             "-device".into(),
             format!("{},netdev=n0", self.cfg.nic),
             "-qmp".into(),

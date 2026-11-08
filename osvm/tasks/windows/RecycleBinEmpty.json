@@ -1,0 +1,25 @@
+{
+ "id": "windows/RecycleBinEmpty",
+ "os": "windows",
+ "instruction": "Empty the Recycle Bin.",
+ "source": "WindowsAgentArena-style, domain file_explorer (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'trash_me.txt') 'x'",
+  "Add-Type -A Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile((Join-Path ([Environment]::GetFolderPath('Desktop')) 'trash_me.txt'),'OnlyErrorDialogs','SendToRecycleBin')"
+ ],
+ "check": [
+  {
+   "cmd": "(New-Object -ComObject Shell.Application).NameSpace(10).Items().Count",
+   "equals": "0"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Clear-RecycleBin -Force -ErrorAction SilentlyContinue; exit 0"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}
