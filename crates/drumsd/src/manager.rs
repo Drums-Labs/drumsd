@@ -404,7 +404,7 @@ impl Manager {
         // the crash watch starts before any env is adopted or made: an episode it did not see from its start is never
         // vouched for (judge() reports it incomplete)
         let crash = if cfg.crash_watch {
-            Some(drumsd_linux::crashwatch::start().map_err(|e| format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on"))?)
+            Some(drumsd_linux::crashwatch::start(vec![cgroup::pool()]).map_err(|e| format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on"))?)
         } else {
             tracing::warn!("crash_watch is off: an app that crashes in an env does not make its episode invalid");
             None
@@ -2489,9 +2489,12 @@ impl Manager {
                 }
             }
         });
+        // unattributed crashes the watch did not count against this episode (its tree ran no Chrome then): reported, so a
+        // valid verdict next to a crash elsewhere on the host is never silent
+        let crash_not_counted = self.crash_judgment(&slot).map(|(_, j)| j.excused).unwrap_or_default();
         let out = json!({
             "slot": v.id, "episode": v.episode, "task_id": tid, "score": score, "valid": valid,
-            "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "checker_skipped": detail.get("skipped"),
+            "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "crash_not_counted": crash_not_counted, "checker_skipped": detail.get("skipped"),
             "state": v.state.name(), "gates": v.gates, "checker_error": err,
             "checker": {"func": task["evaluator"]["func"], "osworld_commit": detail["osworld_commit"], "seconds": detail["seconds"],
                         "postconfig_ran": detail["postconfig_ran"], "verifier": detail.get("verifier"), "info": detail.get("info")},

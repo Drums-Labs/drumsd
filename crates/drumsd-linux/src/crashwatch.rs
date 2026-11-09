@@ -8,12 +8,22 @@
 //! parent's: the parent of a crashed renderer is Chrome's zygote, still alive in the same slot), so the manager can ask
 //! "did anything of this episode's tree crash since it started?" (`no_app_crash`).
 //!
-//! An exit the watch could not attribute (task and parent both gone before it read them), or a stretch of events the
-//! kernel dropped (the socket's buffer overflowed: `ENOBUFS`), is kept as such; the manager treats both as a possible
-//! crash of every episode that was running at the time (fail closed).
+//! The connector reports an exit after the task is already a zombie, and the reader gets to it later; by then the
+//! parent may have reaped it, and a whole tree that dies at once (a Chrome browser with its zygote and renderers) takes
+//! the parent with it, so /proc can no longer answer. A census thread therefore reads every slot cgroup's
+//! `cgroup.procs` every [`CENSUS_EVERY_MS`] and remembers which tgid lived in which cgroup (and its comm) for
+//! [`CENSUS_KEEP_S`] after it was last seen; an exit /proc cannot place is attributed from the census (the task, else
+//! its parent).
+//!
+//! An exit that neither /proc nor the census can place counts against every episode whose tree ran Chrome in the
+//! last fresh census pass (the crash signals seen are Chrome's), and is recorded as not counted for the others. With no
+//! fresh census, or no Chrome anywhere, it counts against every episode running at the time; so does a stretch of
+//! events the kernel dropped (the socket's buffer overflowed: `ENOBUFS`). Fail closed: a crash is never silently
+//! treated as nobody's.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const NETLINK_CONNECTOR: i32 = 11;
@@ -60,8 +70,34 @@ pub struct CrashEvent {
     /// The unified cgroup path (as in /proc/PID/cgroup, e.g. `/system.slice/.../drumsbench-...-r1.scope`), or None
     /// when neither the task nor its parent could be read (unattributed).
     pub cgroup: Option<String>,
-    /// Which process the cgroup was read from: "task" or "parent".
+    /// Where the cgroup came from: "task" or "parent" (read from /proc at once), "census" or "census-parent" (the
+    /// census pass that last saw the task or its parent).
     pub cgroup_from: Option<String>,
+    /// Only for an unattributed crash: the cgroups that ran Chrome in the last census pass, or None when there was no
+    /// fresh pass (then the crash counts against every episode).
+    pub chrome_cgroups: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct CensusEntry {
+    cgroup: String,
+    comm: Option<String>,
+    seen: f64,
+}
+
+#[derive(Default)]
+struct Census {
+    procs: HashMap<i32, CensusEntry>,
+    /// The cgroups with a Chrome process in the last pass.
+    chrome: BTreeSet<String>,
+    last_pass: Option<f64>,
+    passes: u64,
+}
+
+/// A Chrome (or Chromium) process by comm: the browser, its zygotes, renderers, GPU and utility processes are all
+/// `chrome`; crashpad's handler is `chrome_crashpad` (comm is cut at 15 bytes).
+pub fn is_chrome(comm: &str) -> bool {
+    comm == "chrome" || comm.starts_with("chrome_") || comm.starts_with("chromium")
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -78,12 +114,15 @@ struct Inner {
     /// When the watch stopped (a fatal socket error): every episode since then is unjudgeable.
     stopped: Option<(f64, String)>,
     exits_seen: u64,
+    /// How each kept crash was attributed: task, parent, census, census-parent, chrome-fallback, none.
+    attributed: std::collections::BTreeMap<String, u64>,
 }
 
 /// Shared state of the watch. Cheap to clone (Arc).
 #[derive(Clone, Default)]
 pub struct CrashWatch {
     inner: Arc<Mutex<Inner>>,
+    census: Arc<Mutex<Census>>,
     pub started_epoch: f64,
 }
 
@@ -158,7 +197,7 @@ pub fn parse_datagram(buf: &[u8]) -> Vec<ExitRecord> {
 
 impl CrashWatch {
     pub fn new_for_test() -> CrashWatch {
-        CrashWatch { inner: Arc::default(), started_epoch: crate::now_epoch() }
+        CrashWatch { inner: Arc::default(), census: Arc::default(), started_epoch: crate::now_epoch() }
     }
 
     /// Record an exit (the watch thread, and tests). Only crash signals are kept.
@@ -171,12 +210,28 @@ impl CrashWatch {
             return;
         }
         drop(g);
+        let (census_task, census_parent, chrome, fresh) = {
+            let c = self.census.lock().unwrap();
+            let known = |p: i32| c.procs.get(&p).filter(|e| epoch - e.seen <= CENSUS_KEEP_S).cloned();
+            let fresh = c.last_pass.map(|t| epoch - t <= CENSUS_FRESH_S).unwrap_or(false);
+            (known(r.tgid), known(r.parent_tgid), c.chrome.iter().cloned().collect::<Vec<_>>(), fresh)
+        };
         let (cgroup, from) = match read_cgroup(r.tgid).or_else(|| read_cgroup(r.pid)) {
             Some(c) => (Some(c), Some("task".to_string())),
             None => match read_cgroup(r.parent_tgid).or_else(|| read_cgroup(r.parent_pid)) {
                 Some(c) => (Some(c), Some("parent".to_string())),
-                None => (None, None),
+                None => match (&census_task, &census_parent) {
+                    (Some(e), _) => (Some(e.cgroup.clone()), Some("census".to_string())),
+                    (None, Some(e)) => (Some(e.cgroup.clone()), Some("census-parent".to_string())),
+                    _ => (None, None),
+                },
             },
+        };
+        let chrome_cgroups = if cgroup.is_none() && fresh { Some(chrome) } else { None };
+        let how = match (&from, &chrome_cgroups) {
+            (Some(f), _) => f.clone(),
+            (None, Some(c)) if !c.is_empty() => "chrome-fallback".to_string(),
+            _ => "none".to_string(),
         };
         let ev = CrashEvent {
             epoch,
@@ -186,13 +241,15 @@ impl CrashWatch {
             signal: sig,
             signal_name: signal_name(sig),
             core_dumped: core,
-            comm: read_comm(r.tgid).or_else(|| read_comm(r.pid)),
-            parent_comm: read_comm(r.parent_tgid),
+            comm: read_comm(r.tgid).or_else(|| read_comm(r.pid)).or_else(|| census_task.as_ref().and_then(|e| e.comm.clone())),
+            parent_comm: read_comm(r.parent_tgid).or_else(|| census_parent.as_ref().and_then(|e| e.comm.clone())),
             cgroup,
             cgroup_from: from,
+            chrome_cgroups,
         };
-        tracing::warn!("crash: {} pid {} ({:?}, parent {:?}) died of {} in {:?}", ev.tgid, ev.pid, ev.comm, ev.parent_comm, ev.signal_name, ev.cgroup);
+        tracing::warn!("crash: {} pid {} ({:?}, parent {:?}) died of {} in {:?} (attributed: {how})", ev.tgid, ev.pid, ev.comm, ev.parent_comm, ev.signal_name, ev.cgroup);
         let mut g = self.inner.lock().unwrap();
+        *g.attributed.entry(how).or_default() += 1;
         g.events.push_back(ev);
         while g.events.len() > KEEP {
             g.events.pop_front();
@@ -200,8 +257,34 @@ impl CrashWatch {
         }
     }
 
-    /// One census pass: every (cgroup, tgids) read below the census roots at `epoch` (skeleton: not kept yet).
-    pub fn record_census(&self, _observed: &[(String, Vec<i32>)], _epoch: f64, _read_comm: impl Fn(i32) -> Option<String>) {}
+    /// One census pass: every (cgroup, tgids) read below the census roots at `epoch`. A tgid new to the census, or
+    /// seen in another cgroup than before, has its comm read once; tgids not seen for [`CENSUS_KEEP_S`] are forgotten.
+    pub fn record_census(&self, observed: &[(String, Vec<i32>)], epoch: f64, read_comm: impl Fn(i32) -> Option<String>) {
+        let mut c = self.census.lock().unwrap();
+        let mut chrome = BTreeSet::new();
+        for (cg, tgids) in observed {
+            for &t in tgids {
+                let e = match c.procs.get_mut(&t) {
+                    Some(e) if e.cgroup == *cg => {
+                        e.seen = epoch;
+                        e.clone()
+                    }
+                    _ => {
+                        let e = CensusEntry { cgroup: cg.clone(), comm: read_comm(t), seen: epoch };
+                        c.procs.insert(t, e.clone());
+                        e
+                    }
+                };
+                if e.comm.as_deref().map(is_chrome).unwrap_or(false) {
+                    chrome.insert(cg.clone());
+                }
+            }
+        }
+        c.procs.retain(|_, e| epoch - e.seen <= CENSUS_KEEP_S);
+        c.chrome = chrome;
+        c.last_pass = Some(epoch);
+        c.passes += 1;
+    }
 
     pub fn record_overflow(&self, epoch: f64) {
         let mut g = self.inner.lock().unwrap();
@@ -237,18 +320,33 @@ impl CrashWatch {
         for t in &overflows {
             incomplete.push(format!("the kernel dropped process events at {t:.3} (socket overflow)"));
         }
+        let mut excused = vec![];
         for e in &unattributed {
-            incomplete.push(format!("{} (pid {}) died of {} at {:.3} and could not be attributed to a cgroup", e.comm.as_deref().unwrap_or("?"), e.tgid, e.signal_name, e.epoch));
+            let what = format!("{} (pid {}) died of {} at {:.3} and could not be attributed to a cgroup", e.comm.as_deref().unwrap_or("?"), e.tgid, e.signal_name, e.epoch);
+            match &e.chrome_cgroups {
+                Some(c) if !c.is_empty() => {
+                    if c.iter().any(|x| mine(x)) {
+                        incomplete.push(format!("{what}; counted against this episode: its tree ran Chrome at that moment"));
+                    } else {
+                        excused.push(format!("{what}; not counted: this episode's tree ran no Chrome at that moment"));
+                    }
+                }
+                // no fresh census, or no Chrome anywhere: it may have been anyone's
+                _ => incomplete.push(what),
+            }
         }
         if aged_out {
             incomplete.push("crash events of this episode were dropped from the watch's buffer".into());
         }
-        Judgment { crashes, incomplete, excused: vec![] }
+        Judgment { crashes, incomplete, excused }
     }
 
     pub fn summary(&self) -> serde_json::Value {
+        let c = self.census.lock().unwrap();
+        let census = serde_json::json!({"passes": c.passes, "last_pass_epoch": c.last_pass, "procs": c.procs.len(), "chrome_cgroups": c.chrome.len()});
+        drop(c);
         let g = self.inner.lock().unwrap();
-        serde_json::json!({"running": g.stopped.is_none(), "stopped": g.stopped.as_ref().map(|(t, w)| serde_json::json!({"epoch": t, "why": w})),
+        serde_json::json!({"census": census, "attributed": g.attributed, "running": g.stopped.is_none(), "stopped": g.stopped.as_ref().map(|(t, w)| serde_json::json!({"epoch": t, "why": w})),
                            "crash_events": g.events.len() as u64 + g.dropped_by_age, "unattributed": g.events.iter().filter(|e| e.cgroup.is_none()).count(),
                            "overflows": g.overflows.len(), "exits_seen": g.exits_seen, "started_epoch": self.started_epoch})
     }
@@ -269,9 +367,24 @@ impl Judgment {
 }
 
 /// Every cgroup at or below `roots` with the tgids in its cgroup.procs, as paths relative to `cg_root` (the
-/// /proc/PID/cgroup form). Skeleton: reads nothing yet.
-pub fn census_scan(_roots: &[std::path::PathBuf], _cg_root: &std::path::Path) -> Vec<(String, Vec<i32>)> {
-    vec![]
+/// /proc/PID/cgroup form). A root that does not exist (yet) gives nothing.
+pub fn census_scan(roots: &[PathBuf], cg_root: &Path) -> Vec<(String, Vec<i32>)> {
+    let mut out = vec![];
+    let mut todo: Vec<PathBuf> = roots.to_vec();
+    while let Some(d) = todo.pop() {
+        let Ok(procs) = std::fs::read_to_string(d.join("cgroup.procs")) else { continue };
+        let rel = d.strip_prefix(cg_root).map(|p| format!("/{}", p.display())).unwrap_or_else(|_| d.display().to_string());
+        out.push((rel, procs.split_whitespace().filter_map(|x| x.parse().ok()).collect()));
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    todo.push(e.path());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn check(r: libc::c_int, what: &str) -> io::Result<()> {
@@ -282,9 +395,10 @@ fn check(r: libc::c_int, what: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Open the connector socket, subscribe to non-zero exits, and start the reader thread. Fails when the kernel has no
-/// process events connector or refuses the subscription (drumsd must be root in the initial user namespace).
-pub fn start() -> io::Result<CrashWatch> {
+/// Open the connector socket, subscribe to non-zero exits, and start the reader thread and the census of the cgroups
+/// at or below `census_roots` (the slots' pool). Fails when the kernel has no process events connector or refuses the
+/// subscription (drumsd must be root in the initial user namespace).
+pub fn start(census_roots: Vec<PathBuf>) -> io::Result<CrashWatch> {
     let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, NETLINK_CONNECTOR) };
     check(fd, "socket(NETLINK_CONNECTOR)")?;
     // a large receive buffer: a reset of many envs ends thousands of processes at once (SIGKILL exits are non-zero
@@ -320,9 +434,17 @@ pub fn start() -> io::Result<CrashWatch> {
         unsafe { libc::close(fd) };
         return Err(io::Error::new(e.kind(), format!("PROC_CN_MCAST_LISTEN: {e}")));
     }
-    let w = CrashWatch { inner: Arc::default(), started_epoch: crate::now_epoch() };
+    let w = CrashWatch { inner: Arc::default(), census: Arc::default(), started_epoch: crate::now_epoch() };
+    // the first pass before the first exit is read
+    w.record_census(&census_scan(&census_roots, Path::new(crate::cgroup::CG_ROOT)), crate::now_epoch(), crate::procfs::comm);
     let w2 = w.clone();
     std::thread::Builder::new().name("crashwatch".into()).spawn(move || reader(fd, w2))?;
+    let w3 = w.clone();
+    std::thread::Builder::new().name("crashcensus".into()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(CENSUS_EVERY_MS));
+        let seen = census_scan(&census_roots, Path::new(crate::cgroup::CG_ROOT));
+        w3.record_census(&seen, crate::now_epoch(), crate::procfs::comm);
+    })?;
     Ok(w)
 }
 
