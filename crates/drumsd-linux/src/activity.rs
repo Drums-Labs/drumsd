@@ -70,6 +70,10 @@ struct Inner {
     last: HashMap<String, f64>,
     /// thread group -> its cgroup, read when the group's first task was seen (threads share it)
     tg_cg: HashMap<i32, String>,
+    /// groups whose leader exited, forgotten only after LINGER_S: the other threads of a group that is torn down (an
+    /// exit_group, a cgroup.kill of a whole tree at a reset) report their exits after the leader's, when /proc of the
+    /// group and of its parent may be gone already
+    gone: std::collections::VecDeque<(f64, i32, String)>,
     /// epochs of events the watch could not attribute to any cgroup
     unattributed: Vec<f64>,
     /// epochs at which the kernel reported lost events (ENOBUFS)
@@ -86,6 +90,7 @@ pub struct ActivityWatch {
 }
 
 const KEEP_MARKS: usize = 1024;
+const LINGER_S: f64 = 10.0;
 
 fn push_mark(v: &mut Vec<f64>, t: f64) {
     v.push(t);
@@ -137,11 +142,20 @@ impl ActivityWatch {
                     }
                 };
                 if pid == tgid {
-                    g.tg_cg.remove(&tgid);
+                    if let Some(cc) = &c {
+                        g.gone.push_back((epoch, tgid, cc.clone()));
+                    }
                 }
                 c
             }
         };
+        // forget the groups whose leader exited more than LINGER_S ago (unless the pid was reused meanwhile)
+        while g.gone.front().map(|(t, _, _)| *t < epoch - LINGER_S).unwrap_or(false) {
+            let (_, tg, cc) = g.gone.pop_front().unwrap();
+            if g.tg_cg.get(&tg) == Some(&cc) {
+                g.tg_cg.remove(&tg);
+            }
+        }
         match cg {
             Some(c) => {
                 let slot = g.last.entry(c).or_insert(epoch);
@@ -353,6 +367,13 @@ mod tests {
         assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(1.0));
         w.record(&Event::Exit { pid: 20, tgid: 20, parent_tgid: 1 }, 12.5, cg_of(&[]));
         assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(0.5));
+        // the leader is gone; a thread of the group reports its exit after it (a whole tree killed at once)
+        w.record(&Event::Exit { pid: 22, tgid: 20, parent_tgid: 1 }, 12.6, cg_of(&[]));
+        assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(0.4));
+        assert_eq!(w.summary()["unattributed"], 0);
+        // and is forgotten LINGER_S later
+        w.record(&Event::Fork { parent_tgid: 1, child_pid: 99, child_tgid: 99 }, 30.0, cg_of(&[(99, "/b")]));
+        assert!(w.summary()["groups_cached"].as_u64().unwrap() <= 2);
     }
 
     #[test]
