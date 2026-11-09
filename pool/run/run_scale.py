@@ -153,6 +153,7 @@ def main():
     ap.add_argument("--kill-at-s", type=float, default=1800, help="seconds after the window start; <0 = no kill")
     ap.add_argument("--kill-region", default="")
     ap.add_argument("--max-envs", type=int, default=280)
+    ap.add_argument("--max-envs-per-vcpu", type=float, default=0.0, help="if > 0: max_envs = this x the host's vCPUs (mixed fleets)")
     ap.add_argument("--warm-per-host", type=int, default=0)
     ap.add_argument("--max-load-per-cpu", type=float, default=4.0)
     ap.add_argument("--release", default=os.path.expanduser("~/drums-release.tar.gz"))
@@ -209,7 +210,8 @@ def main():
         # the host sampler (5 s) starts now and runs until the host stops
         run.ssh(h["ssh_ip"], "sudo systemd-run --unit t3-sampler --collect python3 -c " + shlex.quote(HOST_SAMPLER) + " || true", timeout=30, check=False)
         by_name[h["name"]] = h
-        specs.append({"name": h["name"], "url": h["url"], "token_file": tf, "region": h["region"], "cpus": h["firstboot"]["nproc"], "max_envs": a.max_envs})
+        specs.append({"name": h["name"], "url": h["url"], "token_file": tf, "region": h["region"], "cpus": h["firstboot"]["nproc"],
+                      "max_envs": int(round(a.max_envs_per_vcpu * h["firstboot"]["nproc"])) if a.max_envs_per_vcpu > 0 else a.max_envs})
     # wait for every drumsd (tunnels included) to answer health with its origin serving
     for h in hosts:
         t = now()
