@@ -223,8 +223,10 @@ pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, P
             set_limits(l, want)?;
         }
     }
-    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back
+    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back; a kill that
+    // drumsd did not see through (a restart) can leave a cgroup frozen
     for l in [&d, &a, &b] {
+        thaw(l)?;
         if read_limits(l)? != *want {
             set_limits(l, want)?;
         }
@@ -232,9 +234,28 @@ pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, P
     Ok((d, a, b))
 }
 
-/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting.
+/// Freeze the tree before it is killed. cgroup.kill sends SIGKILL to one task after another, and a Chrome thread
+/// that sees its peer die first (a broken IPC channel) hits a CHECK and dies of SIGTRAP before its own SIGKILL lands:
+/// an app crash during a teardown, with its whole tree reaped before anyone can read which cgroup it was in (T6).
+/// A frozen task runs no user code, and a fatal signal still ends it. Best effort: the kill does not depend on it.
+fn freeze_for_kill(d: &Path) {
+    let _ = write(&d.join("cgroup.freeze"), "1");
+}
+
+/// Undo [`freeze_for_kill`] once the cgroup is empty: the leaf is the next restore's target, and a frozen cgroup
+/// would freeze the restored tree.
+pub fn thaw(d: &Path) -> io::Result<()> {
+    let f = d.join("cgroup.freeze");
+    if f.exists() && read(&f)? != "0" {
+        write(&f, "0")?;
+    }
+    Ok(())
+}
+
+/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting; the tree is frozen first.
 pub fn kill_nowait(d: &Path) -> io::Result<bool> {
     if d.is_dir() && populated(d)? {
+        freeze_for_kill(d);
         write(&d.join("cgroup.kill"), "1")?;
         return Ok(true);
     }
@@ -249,6 +270,9 @@ pub fn wait_empty(d: &Path, timeout: Duration) -> io::Result<f64> {
             return kill_and_wait(d, Duration::from_secs(5)).map(|r| r.seconds + t0.elapsed().as_secs_f64());
         }
         std::thread::sleep(Duration::from_millis(2));
+    }
+    if d.is_dir() {
+        thaw(d)?;
     }
     Ok(t0.elapsed().as_secs_f64())
 }
@@ -278,6 +302,7 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
     let had = procs(d)?.len();
     let mut killed = false;
     if populated(d)? {
+        freeze_for_kill(d);
         write(&d.join("cgroup.kill"), "1")?;
         killed = true;
     }
@@ -287,6 +312,7 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+    thaw(d)?;
     Ok(KillReport { had_procs: had, killed, seconds: t0.elapsed().as_secs_f64() })
 }
 
@@ -312,6 +338,7 @@ mod tests {
         fs::write(d.join("cgroup.events"), format!("populated {}\nfrozen {}\n", populated as u8, frozen as u8)).unwrap();
         fs::write(d.join("cgroup.freeze"), if frozen { "1" } else { "0" }).unwrap();
         fs::write(d.join("cgroup.kill"), "").unwrap();
+        fs::write(d.join("cgroup.procs"), "").unwrap();
         d
     }
 
