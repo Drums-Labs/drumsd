@@ -155,14 +155,26 @@ class AwArm(_AuditMixin):
         def one(i):
             d = f"aw-{i}"
             t = time.time()
-            run(["docker", "rm", "-f", d])
-            rc, o, e, _ = run(["docker", "run", "-d", "--privileged", "--name", d, "-p", f"127.0.0.1:{self.port_base + i}:5000", self.image], timeout=120)
+            attempts = []
             ok = False
-            for _ in range(900):
-                st, v = http("GET", self._url(d) + "/health", timeout=5) if rc == 0 else (0, None)
-                if st == 200:
-                    ok = True; break
-                time.sleep(1)
+            # an operator restarts a container whose server failed to start: one retry, every attempt recorded
+            for attempt in range(2):
+                run(["docker", "rm", "-f", d])
+                rc, o, e, _ = run(["docker", "run", "-d", "--privileged", "--name", d, "-p", f"127.0.0.1:{self.port_base + i}:5000", self.image], timeout=120)
+                ta = time.time()
+                why = "timeout"
+                for _ in range(900):
+                    st, v = http("GET", self._url(d) + "/health", timeout=5) if rc == 0 else (0, None)
+                    if st == 200:
+                        ok = True; break
+                    state = run(["docker", "inspect", "-f", "{{.State.Status}}", d])[1].strip()
+                    if state in ("exited", "dead"):
+                        why = "container " + state + ": " + run(["docker", "logs", "--tail", "3", d])[2][-300:]
+                        break
+                    time.sleep(1)
+                attempts.append({"ok": ok, "s": time.time() - ta, "why": None if ok else why})
+                if ok:
+                    break
             boot = time.time() - t
             # same apps and settings as the Drums golden images (osvm/hosts/android-golden.sh configure())
             for a in self.apks:
@@ -172,7 +184,7 @@ class AwArm(_AuditMixin):
                 self.shell(d, c)
                 if c.startswith("monkey"):
                     time.sleep(6)
-            out.append({"id": d, "ok": ok, "boot_s": boot, "ready_s": time.time() - t})
+            out.append({"id": d, "ok": ok, "boot_s": boot, "ready_s": time.time() - t, "attempts": attempts})
         ths = []
         for i in range(n):
             th = threading.Thread(target=one, args=(i,)); th.start(); ths.append(th)
