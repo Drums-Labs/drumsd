@@ -28,8 +28,10 @@ fi
 SDK=$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager
 yes | $SDK --licenses >/dev/null || true
 $SDK "platform-tools" "emulator" "platforms;android-33" "system-images;android-33;google_apis;x86_64"
-# AndroidWorld's AVD: Pixel 6, API 33 (Tiramisu), name AndroidWorldAvd (android_world README)
+# AndroidWorld's AVD: Pixel 6, API 33 (Tiramisu), name AndroidWorldAvd (android_world README), in a shared AVD home
+export ANDROID_AVD_HOME=/opt/t5/avd; mkdir -p $ANDROID_AVD_HOME
 echo no | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -f -n AndroidWorldAvd -k "system-images;android-33;google_apis;x86_64" -d pixel_6
+chown -R ubuntu:ubuntu $ANDROID_AVD_HOME
 chown -R ubuntu:ubuntu /opt/t5 /home/ubuntu/.android 2>/dev/null || true
 # AndroidWorld, pinned
 [ -d android_world ] || git clone -q https://github.com/google-research/android_world.git

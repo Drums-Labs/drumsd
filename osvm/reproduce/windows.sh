@@ -35,7 +35,9 @@ sudo bash osvm/hosts/windows-clean-state.sh > ~/repro-clean-state.log 2>&1
 mkdir -p ~/t5runs
 bash osvm/hosts/redeploy.sh windows-host.json windows
 bash osvm/harness/run_measured.sh windows latency
-bash osvm/harness/run_measured.sh windows ladder w1 4 8 12 16 24 32 40 48
-bash osvm/harness/run_measured.sh windows ladder w0 4 8 12 16 24 32 40 48
+[ -f ~/repro-ladders.env ] && . ~/repro-ladders.env
+for arm in ${LADDER_ARMS:-w1 w0}; do
+  v=LADDER_$arm; bash osvm/harness/run_measured.sh windows ladder $arm ${!v:-4 8 12 16 24 32 40 48}
+done
 python3 osvm/harness/analyze.py ~/t5runs/measured --md ~/t5runs/measured/TABLES.md --json ~/t5runs/measured/summary.json
 echo REPRODUCE_WINDOWS_DONE

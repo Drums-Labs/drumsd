@@ -209,6 +209,9 @@ class AwArm(_AuditMixin):
         t = time.time()
         if action.get("action_type") == "shell":
             rc, o = self.shell(d, action["command"]); st = 200 if rc == 0 else 500
+        elif action.get("action_type") == "wait":
+            # a harness-side wait (AndroidWorld's JSONAction "wait" has no duration; sending one is a 500)
+            time.sleep(float(action.get("seconds", 1))); st = 200
         else:
             st, v = http("POST", self._url(d) + "/execute_action", action, timeout=300)
         act_s = time.time() - t

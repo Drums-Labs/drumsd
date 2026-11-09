@@ -25,7 +25,11 @@ mkdir -p ~/t5runs
 bash osvm/hosts/redeploy.sh android-host.json android
 # measured runs (PLAN.md): latency phase, then the headline ladders
 bash osvm/harness/run_measured.sh android latency
-bash osvm/harness/run_measured.sh android ladder ${CHOSEN:-a3} 8 16 32 48 64 96 128
-bash osvm/harness/run_measured.sh android ladder a0 8 16 32 48 64 96 128
+# ladders: full pre-registered ladders by default; a replication may list rungs per arm in ~/repro-ladders.env
+# (e.g. LADDER_a3="64 96"), read when the ladder phase starts
+[ -f ~/repro-ladders.env ] && . ~/repro-ladders.env
+for arm in ${LADDER_ARMS:-a3 a1 a0}; do
+  v=LADDER_$arm; bash osvm/harness/run_measured.sh android ladder $arm ${!v:-8 16 32 48 64 96 128}
+done
 python3 osvm/harness/analyze.py ~/t5runs/measured --md ~/t5runs/measured/TABLES.md --json ~/t5runs/measured/summary.json
 echo REPRODUCE_ANDROID_DONE

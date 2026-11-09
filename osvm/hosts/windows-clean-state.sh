@@ -26,7 +26,16 @@ t0=$(date +%s)
 until curl -s -m 2 127.0.0.1:7999/probe >/dev/null; do sleep 2; [ $(( $(date +%s) - t0 )) -lt 900 ] || { echo "guest server never answered"; kill $QPID; exit 1; }; done
 echo "guest server up after $(( $(date +%s) - t0 )) s; settling ${SETTLE_S}s"
 sleep $SETTLE_S
-curl -s -m 30 -X POST -H 'Content-Type: application/json' -d '{"command": "python -c \"import pyautogui; print(pyautogui.size())\"", "shell": true}' 127.0.0.1:7999/execute | tee $W/clean-pyautogui.json
+# warm the paths every episode uses (WAA's Python 3.10 + pyautogui, the probe's modules, PowerShell), so their files
+# are in the guest's cache inside the saved state. WARM=0 skips it (the state the frozen T5 runs used).
+PY='C:\\Users\\Docker\\AppData\\Local\\Programs\\Python\\Python310\\python.exe'
+if [ "${WARM:-1}" = 1 ]; then
+  for i in 1 2 3; do
+    curl -s -m 60 -X POST -H 'Content-Type: application/json' -d "{\"command\": [\"$PY\", \"-c\", \"import pyautogui, os, re, winreg; print(pyautogui.size(), pyautogui.position())\"], \"shell\": false}" 127.0.0.1:7999/execute
+    curl -s -m 60 -X POST -H 'Content-Type: application/json' -d '{"command": ["powershell", "-NoProfile", "-Command", "Get-Date"], "shell": false}' 127.0.0.1:7999/execute
+  done | tee $W/clean-warmup.json
+  sleep 20
+fi
 qmp() { printf '{"execute":"qmp_capabilities"}\n%s\n' "$1" | socat - UNIX-CONNECT:$W/qmp.sock; }
 qmp '{"execute":"stop"}'
 qmp "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"exec:cat > $W/clean.state\"}}"
