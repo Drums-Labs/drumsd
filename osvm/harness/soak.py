@@ -91,7 +91,11 @@ def main():
                 ksm = int(open("/sys/kernel/mm/ksm/pages_sharing").read())
             except Exception:
                 pass
-            rec({"kind": "host", "mem_total_mib": mi["MemTotal"] // 1024, "mem_available_mib": mi["MemAvailable"] // 1024, "load1": float(open("/proc/loadavg").read().split()[0]), "ksm_pages_sharing": ksm})
+            try:
+                wsf = int(open("/proc/sys/vm/watermark_scale_factor").read())
+            except Exception:
+                wsf = None
+            rec({"kind": "host", "watermark_scale_factor": wsf, "mem_total_mib": mi["MemTotal"] // 1024, "mem_available_mib": mi["MemAvailable"] // 1024, "load1": float(open("/proc/loadavg").read().split()[0]), "ksm_pages_sharing": ksm})
             stop_sampler.wait(10)
     def oom_count():
         try:

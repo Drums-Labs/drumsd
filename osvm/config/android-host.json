@@ -25,7 +25,10 @@
      "androidboot.redroid_gpu_mode=guest"
     ],
     "work_dir": "/srv/t5/drums-redroid",
-    "boot_timeout_s": 180
+    "boot_timeout_s": 180,
+    "pin_host_sysctl": {
+     "vm/watermark_scale_factor": "10"
+    }
    }
   },
   {
@@ -52,7 +55,10 @@
      "2048"
     ],
     "work_dir": "/srv/t5/drums-emu",
-    "boot_timeout_s": 300
+    "boot_timeout_s": 300,
+    "pin_host_sysctl": {
+     "vm/watermark_scale_factor": "10"
+    }
    }
   },
   {
@@ -81,7 +87,10 @@
     "work_dir": "/srv/t5/drums-emu-cow",
     "boot_timeout_s": 300,
     "clone_root": "/srv/t5/xfs/clones",
-    "template_avd": "/srv/t5/xfs/avd-template/AndroidWorldAvd.avd"
+    "template_avd": "/srv/t5/xfs/avd-template/AndroidWorldAvd.avd",
+    "pin_host_sysctl": {
+     "vm/watermark_scale_factor": "10"
+    }
    }
   }
  ]

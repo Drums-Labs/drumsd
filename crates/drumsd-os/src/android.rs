@@ -83,6 +83,12 @@ pub struct AndroidCfg {
     pub emulator_args: Vec<String>,
     #[serde(default = "d_boot")]
     pub boot_timeout_s: f64,
+    /// Host-global sysctls (paths under /proc/sys) a privileged redroid container must not change, with their values.
+    /// Android's boot raises vm/watermark_scale_factor by one on every boot; it is not namespaced, so each redroid
+    /// reset raised the HOST's free-memory watermarks (T5: 10 -> 60 in 200 boots; MemAvailable lost hundreds of GiB
+    /// over a ladder). drumsd restores these after every boot and before every reset, and reports each restore.
+    #[serde(default)]
+    pub pin_host_sysctl: std::collections::BTreeMap<String, String>,
     /// Run desktop shell commands as root via `su 0` (default true).
     #[serde(default = "d_true")]
     pub su: bool,
@@ -230,11 +236,27 @@ impl AndroidDesk {
         let t_run = t0.elapsed().as_secs_f64();
         self.adb.wait_boot(self.cfg.boot_timeout_s, 0.1).await?;
         let t_boot = t0.elapsed().as_secs_f64();
+        let restored = self.restore_host_sysctl();
         Ok(
-            json!({"mount_s": t_mount, "container_s": t_run - t_mount, "boot_s": t_boot - t_run, "total_s": t_boot}),
+            json!({"mount_s": t_mount, "container_s": t_run - t_mount, "boot_s": t_boot - t_run, "total_s": t_boot, "host_sysctl_restored": restored}),
         )
     }
+
+    /// Put pinned host sysctls back; returns what was changed ("path: found -> pinned").
+    pub fn restore_host_sysctl(&self) -> Vec<String> {
+        let mut out = vec![];
+        for (k, want) in &self.cfg.pin_host_sysctl {
+            let p = std::path::Path::new("/proc/sys").join(k);
+            let cur = std::fs::read_to_string(&p).unwrap_or_default().trim().to_string();
+            if cur != want.trim() {
+                let ok = std::fs::write(&p, want.trim()).is_ok();
+                out.push(format!("{k}: {cur} -> {}{}", want.trim(), if ok { "" } else { " (write failed)" }));
+            }
+        }
+        out
+    }
     async fn redroid_down(&mut self) -> Result<(), String> {
+        let _ = self.restore_host_sysctl();
         let o = run(
             &self.cfg.docker,
             &["rm", "-f", &self.name],
