@@ -1,5 +1,17 @@
 # Changelog
 
+## sota/t6-crash-attr, 2026-11-09
+
+**Correctness**
+- **One unattributed crash no longer invalidates every running episode.** The crash watch read the dead process's
+  cgroup from /proc after the kernel's exit event. When the process and its parent had both been reaped by then, it
+  called the crash unattributed and failed `no_app_crash` for every episode on the host. In T6 checker validation that
+  invalidated 279 child episodes in one run, Chrome-less tasks included, and made acceptance depend on concurrency.
+  A census of the slots' cgroups (every 200 ms, kept 10 s) now attributes such a crash to the slot it ran in. A crash
+  that still cannot be placed counts only against episodes whose tree ran Chrome at that moment. Verify reports it to
+  the others in `crash_not_counted`. With no fresh census, or no Chrome anywhere, it still fails every running
+  episode. `/v1/health` `crash_watch.attributed` counts how each crash was placed.
+
 ## RC1, 2026-10-31
 
 Release candidate 1: one build of the pieces that were on separate branches (CHANGES-RC1.md lists every commit), and

@@ -43,7 +43,8 @@ A desktop can look alive while an app in it is broken: when a Chrome renderer di
 "Can't open this page", so the process gates and the checker do not see it, and the checker scores the broken page
 (a valid 0.0). drumsd watches the kernel's process events (the process events connector, filtered to exits with a
 non-zero status) for every exit by a crash signal, attributes it to the cgroup of the dead process (or of its parent,
-when the process was already reaped), and fails `no_app_crash` for the episode whose tree it was in:
+when the process was already reaped; when both are gone, from a census of the slots' cgroups that drumsd takes every
+200 ms), and fails `no_app_crash` for the episode whose tree it was in, and for no other episode:
 
 ```python
 r = env.verify(strict=False)
@@ -55,9 +56,13 @@ r.invalid_reasons  # ["no_app_crash: chrome (pid 15003) died of SIGILL; a child 
 - It covers the restore, the task setup, every action and the checker's own steps.
 - A fork or save of an env whose app crashed carries the crash: the saved state is marked, and every env made from it
   starts with `no_app_crash` failed ("made from saved state ... captured after an app crash").
+- **A crash no one can place.** A process that lived less than one census pass and died together with its parent
+  cannot be attributed. Such a crash counts against every episode whose tree ran Chrome at that moment (the reason
+  says "counted against this episode: its tree ran Chrome at that moment"); for the others, verify reports it in
+  `crash_not_counted` and the episode stays valid.
 - **Fail closed.** The episode is also invalid when drumsd cannot vouch for it: the kernel dropped process events
-  (socket overflow), a crash could not be attributed to any cgroup, the watch stopped, or the episode started before
-  the watch did. The last one means: **after a restart of drumsd, the envs it adopts finish their current episode
+  (socket overflow), a crash could not be attributed while no census pass was fresh or no slot ran Chrome, the watch
+  stopped, or the episode started before the watch did. The last one means: **after a restart of drumsd, the envs it adopts finish their current episode
   invalid** (a crash while drumsd was down would be unseen); their next reset is a new, judged episode.
 - An app that exits normally, or is killed (SIGKILL, SIGTERM: what a reset does), is not a crash. A crash that is part
   of what an app does on purpose is still a crash here: drumsd cannot tell it apart.
