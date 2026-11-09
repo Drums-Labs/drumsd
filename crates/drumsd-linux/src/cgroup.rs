@@ -305,6 +305,40 @@ pub fn memory_current(d: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fake_cg(name: &str, populated: bool, frozen: bool) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("drumsd-cg-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("cgroup.events"), format!("populated {}\nfrozen {}\n", populated as u8, frozen as u8)).unwrap();
+        fs::write(d.join("cgroup.freeze"), if frozen { "1" } else { "0" }).unwrap();
+        fs::write(d.join("cgroup.kill"), "").unwrap();
+        d
+    }
+
+    #[test]
+    fn a_kill_freezes_the_tree_first_so_no_app_sees_its_peers_die() {
+        // T6: cgroup.kill SIGKILLs one task after another; a Chrome thread that saw its peer die hit a CHECK and died
+        // of SIGTRAP before its own SIGKILL, a crash during teardown that no one could attribute
+        let d = fake_cg("kill", true, false);
+        assert!(kill_nowait(&d).unwrap());
+        assert_eq!(read(&d.join("cgroup.freeze")).unwrap(), "1", "frozen before the kill");
+        assert_eq!(read(&d.join("cgroup.kill")).unwrap(), "1");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_emptied_leaf_is_thawed_before_anything_is_restored_into_it() {
+        // the leaf that was frozen and killed is the next restore's target: a frozen leaf would freeze the new tree
+        let d = fake_cg("thaw", false, true);
+        wait_empty(&d, Duration::from_secs(1)).unwrap();
+        assert_eq!(read(&d.join("cgroup.freeze")).unwrap(), "0");
+        let e = fake_cg("thaw2", false, true);
+        kill_and_wait(&e, Duration::from_secs(1)).unwrap();
+        assert_eq!(read(&e.join("cgroup.freeze")).unwrap(), "0");
+        for x in [d, e] {
+            let _ = fs::remove_dir_all(&x);
+        }
+    }
     #[test]
     fn limits_match_launch_py() {
         assert_eq!(
