@@ -64,7 +64,8 @@ r.invalid_reasons  # ["no_app_crash: chrome (pid 15003) died of SIGILL; a child 
   (socket overflow), a crash could not be attributed while no census pass was fresh or no slot ran Chrome, the watch
   stopped, or the episode started before the watch did. The last one means: **after a restart of drumsd, the envs it adopts finish their current episode
   invalid** (a crash while drumsd was down would be unseen); their next reset is a new, judged episode.
-- An app that exits normally, or is killed (SIGKILL, SIGTERM: what a reset does), is not a crash. A crash that is part
+- An app that exits normally, or is killed (SIGKILL, SIGTERM: what a reset does), is not a crash. A reset or
+  destroy freezes the env's cgroup before it kills it, so an app cannot see its peers die and crash on the way out. A crash that is part
   of what an app does on purpose is still a crash here: drumsd cannot tell it apart.
 - drumsd refuses to start when it cannot open the watch (it needs root in the host's initial user namespace).
   `"crash_watch": false` in drumsd.json turns it off; `/v1/health` then warns that an env whose app crashed can return

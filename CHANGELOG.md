@@ -11,6 +11,12 @@
   that still cannot be placed counts only against episodes whose tree ran Chrome at that moment. Verify reports it to
   the others in `crash_not_counted`. With no fresh census, or no Chrome anywhere, it still fails every running
   episode. `/v1/health` `crash_watch.attributed` counts how each crash was placed.
+- **Fewer crashes to attribute: a teardown freezes the tree before `cgroup.kill`.** `cgroup.kill` sends SIGKILL to
+  one task after another. A Chrome thread that saw its peer die first hit a CHECK and died of SIGTRAP before its own
+  SIGKILL arrived, and its whole tree was reaped within milliseconds. In T6 this was the source of the crashes that no
+  one could attribute. drumsd now writes `cgroup.freeze` = 1 before the kill (a frozen task runs no user code; a fatal
+  signal still ends it). It thaws the cgroup once it is empty, and again in `ensure_slot_leaves`, so a restore never
+  lands in a frozen leaf.
 
 ## RC1, 2026-10-31
 
