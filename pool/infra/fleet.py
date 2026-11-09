@@ -152,7 +152,7 @@ async def up(call, plan):
         r = {"ami": ami, "sg": gid, "subnets": subnets}
         if region == cr:
             c = plan["coordinator"]
-            r["coordinator"] = await launch(call, region, ami, plan["key_name"], gid, subnets, c["types"], 1, c.get("market", "on-demand"), run, "coordinator", guard, f"t3-{run}-coord")
+            r["coordinator"] = await launch(call, region, ami, plan["key_name"], gid, subnets, c["types"], 1, c.get("market", "on-demand"), run, "coordinator", c.get("guard", guard), f"t3-{run}-coord")
         if spec["hosts"]:
             r["hosts"] = await launch(call, region, ami, plan["key_name"], gid, subnets, plan["host_types"], spec["hosts"], "spot", run, "host", guard, f"t3-{run}-host")
         out["regions"][region] = r
