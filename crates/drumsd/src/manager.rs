@@ -1891,6 +1891,11 @@ impl Manager {
             let taint = slot.view.read().unwrap().gates.get(Gate::NoAppCrash).filter(|g| g.status == GateStatus::Fail).map(|g| app_crash_words(&g.detail));
             let quiescence = json!({"attempts": attempts, "params": params, "seconds": round3(t0.elapsed().as_secs_f64()),
                                     "wait_s_total": round3(attempts.iter().filter_map(|a| a["wait_s"].as_f64()).sum::<f64>())});
+            // a fork's state (delete_with_children) is pinned before it is marked so: the reaper deletes such a state
+            // as soon as no env uses it, and its children do not exist yet (branch_leased unpins it after them)
+            if delete_with_children && c.is_ok() {
+                self.pinned_states.lock().unwrap().insert(cid.clone());
+            }
             let c = c.map(|mut c| {
                 // slots made from this checkpoint inherit the task, whose setup is already in the captured state
                 c.task = slot.view.read().unwrap().task.clone().map(|mut t| {
