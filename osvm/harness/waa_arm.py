@@ -28,6 +28,12 @@ class WaaArm(_AuditMixin):
     def execute(self, d, command, shell=False, timeout=130):
         st, v = http("POST", self._u(d) + "/execute", {"command": command, "shell": shell}, timeout=timeout)
         return st, v
+    def probe_text(self, d):
+        """The Drums Windows pool's probe (Python in the guest, probe_kind python), without a canary."""
+        st, v = self.execute(d, [PY, "-c", self.probe.replace("{CANARY}", "")])
+        if st != 200 or not isinstance(v, dict):
+            return -1, ""
+        return int(v.get("returncode", -1)), (v.get("output") or "").replace("\r\n", "\n")
     def shell(self, d, cmd, timeout=130):
         st, v = self.execute(d, ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd], timeout=timeout)
         if st != 200 or not isinstance(v, dict):
@@ -41,11 +47,13 @@ class WaaArm(_AuditMixin):
             run(["docker", "rm", "-f", d])
             sd = f"{STORE}/{i}"
             run(["rm", "-rf", sd]); os.makedirs(sd, exist_ok=True)
-            rc, o, e, cps = run(["sh", "-c", f"cp --sparse=always {GOLDEN}/* {sd}/"], timeout=3600)
+            rc, o, e, cps = run(["sh", "-c", f"cp --sparse=always {GOLDEN}/* {sd}/ && chmod -R u+w {sd}"], timeout=3600)
             copy_s = time.time() - t
-            rc, o, e, _ = run(["docker", "run", "-d", "--name", d, "--device=/dev/kvm", "-e", f"RAM_SIZE={self.ram}", "-e", f"CPU_CORES={self.cpus}",
-                               "-v", f"{sd}:/storage", "--entrypoint", "/bin/bash", self.image, "-c", "./entry.sh --prepare-image false --start-client false"], timeout=120)
-            ip = run(["docker", "inspect", "-f", "{{.NetworkSettings.IPAddress}}", d])[1].strip()
+            # the flags of WAA's scripts/run.sh (minus -it, --rm and the 8006/3389 port publications, unused here)
+            rc, o, e, _ = run(["docker", "run", "-d", "--name", d, "--platform", "linux/amd64", "--device=/dev/kvm", "-e", f"RAM_SIZE={self.ram}", "-e", f"CPU_CORES={self.cpus}",
+                               "-v", f"{sd}:/storage", "--cap-add", "NET_ADMIN", "--stop-timeout", "120", "--entrypoint", "/bin/bash", self.image,
+                               "-c", "./entry.sh --prepare-image false --start-client false"], timeout=120)
+            ip = run(["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", d])[1].strip()
             with lock:
                 self.ip[d] = ip
             ok = False

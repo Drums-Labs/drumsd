@@ -58,6 +58,8 @@ def main():
         cfg = json.load(open(a.pool_config))
         p = [p for p in cfg["pools"] if p["name"] == a.pool][0]
         probe = p["probe"].replace("{EXCLUDE}", p.get("probe_exclude", "^$"))
+        if p.get("probe_kind") == "python" and a.arm != "waa":
+            raise SystemExit("a python probe is only supported for the waa arm")
     if a.arm == "drums":
         arm = DrumsArm(a.url, open(a.token_file).read().strip(), a.image)
     elif a.arm == "aw":

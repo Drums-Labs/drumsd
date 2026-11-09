@@ -448,7 +448,10 @@ impl AndroidDesk {
                     let load_s = t0.elapsed().as_secs_f64();
                     match o {
                         Ok(text) if !text.contains("KO") => {
-                            if self.adb.wait_boot(30.0, 0.02).await.is_ok() {
+                            // the guest's adbd comes back with the snapshot's connection state: drop the host-side
+                            // TCP transport and open a new one (an old transport stayed offline in 11 of 304 loads)
+                            self.adb.disconnect().await;
+                            if self.adb.wait_boot(15.0, 0.02).await.is_ok() {
                                 return Ok(
                                     json!({"kind": "snapshot_load", "load_s": load_s, "total_s": t0.elapsed().as_secs_f64()}),
                                 );

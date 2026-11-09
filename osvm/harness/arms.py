@@ -24,7 +24,12 @@ def http(method, url, body=None, token=None, timeout=600, raw=False):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             b = r.read()
-            return r.status, (b if raw else (json.loads(b) if b else None))
+            if raw or not b:
+                return r.status, (b if raw else None)
+            try:
+                return r.status, json.loads(b)
+            except ValueError:
+                return r.status, {"text": b.decode(errors="replace")[:500]}
     except urllib.error.HTTPError as e:
         b = e.read()
         try:
@@ -106,9 +111,13 @@ class DrumsArm:
 
 class _AuditMixin:
     """State probe + canary for arms whose reset has no gate of its own (our audit; not counted in their latency)."""
+    def probe_text(self, d):
+        return self.shell(d, self.probe)
     def audit_after_reset(self, d, ep):
         t = time.time()
-        rc, out = self.shell(d, self.probe)
+        rc, out = self.probe_text(d)
+        if rc != 0 and not out.strip():
+            return {"state_hash_ok": False, "state_hash": None, "clean_hash": self.clean_hash.get(d), "canary_written": False, "audit_s": time.time() - t, "probe_error": f"probe exit {rc}"}
         h = sha(out)
         clean = self.clean_hash.get(d)
         if clean is None:
