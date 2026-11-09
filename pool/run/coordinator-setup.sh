@@ -20,8 +20,9 @@ apt-get install -y -q build-essential pkg-config >/dev/null 2>&1 || true
 install -m 0755 "$REPO/target/release/drums-pool" $O/bin/drums-pool
 # SDK wheel from the release (the same wheel customers get)
 T=$(mktemp -d); tar -xzf "$REL" -C "$T"; W=$(ls "$T"/*/sdk/*.whl | head -1)
-python3 -m pip install -q --break-system-packages --force-reinstall "$W"
-python3 -c "import drums; print('sdk', drums.__file__)"
+python3 -m venv $O/venv && $O/venv/bin/pip install -q --force-reinstall "$W"
+$O/venv/bin/python -c "import drums; print('sdk', drums.__version__, drums.__file__)"
+chown -R "${SUDO_USER:-ubuntu}" $O/venv
 # observability, pinned
 LOCK="$REPO/pool/deploy/obs-lock.json"
 fetch() { # name url sha256 dest

@@ -35,7 +35,7 @@ the release tarball (as ~/drums-release.tar.gz), hosts.json and the coordinator 
 ## 3. Run (coordinator) -- the one command
 ```
 sudo bash pool/run/coordinator-setup.sh ~/drums-release.tar.gz && \
-python3 pool/run/run_scale.py --hosts hosts.json --out raw/run --workers 2100 --procs 12 --warmup-s 900 --measure-s 3600 \
+/opt/drums-pool/venv/bin/python pool/run/run_scale.py --hosts hosts.json --out raw/run --workers 2100 --procs 12 --warmup-s 900 --measure-s 3600 \
     --kill-at-s 1800 --kill-region us-east-2 --warm-per-host 4 --max-envs 280 --seed 20261108
 python3 pool/analysis/analyze.py raw/run            # tables.md, summary.json, fig-*.svg from raw/run only
 ```
