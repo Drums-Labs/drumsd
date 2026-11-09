@@ -358,7 +358,8 @@ def main():
         run.phase("kill_skipped", why="trainer ended before the kill time", rc=tr.returncode)
     elif a.kill_at_s >= 0:
         hs = get("http://127.0.0.1:7080/pool/v1/hosts", token)["hosts"]
-        cands = [x for x in hs if x["state"] == "healthy" and (not a.kill_region or by_name[x["name"]]["region"] == a.kill_region)]
+        # hosts added to the pool after the start (POST /pool/v1/hosts) are candidates too: the pool's view has their region
+        cands = [x for x in hs if x["state"] == "healthy" and x["name"] in by_name and (not a.kill_region or x.get("region") == a.kill_region)]
         victim = max(cands, key=lambda x: (x["owned"], x["name"]))
         vh = by_name[victim["name"]]
         run.phase("kill", host=victim["name"], instance=vh["id"], region=vh["region"], owned=victim["owned"], warm=victim["warm"])

@@ -1,5 +1,37 @@
-{"run": "m2", "ami_region": "us-east-2", "ami": "ami-04da8ed660348fe4f", "key_name": "drums-sota-t3", "ssh_cidr": "192.5.215.208/32",
- "coordinator": {"region": "us-east-2", "types": ["c8i.8xlarge"], "market": "on-demand", "guard": {"ceiling_min": 720, "idle_min": 240}},
- "regions": {"us-east-2": {"hosts": 5}, "us-west-2": {"hosts": 5}},
- "host_types": ["r8i.16xlarge", "r7i.16xlarge", "r6i.16xlarge"],
- "guard": {"ceiling_min": 300, "idle_min": 30}}
+{
+ "run": "m2",
+ "ami_region": "us-east-1",
+ "ami": "ami-05d4c50387f38e3cf",
+ "key_name": "drums-sota-t3",
+ "ssh_cidr": "192.5.215.208/32",
+ "coordinator": {
+  "region": "us-east-1",
+  "types": [
+   "c8i.8xlarge"
+  ],
+  "market": "on-demand",
+  "guard": {
+   "ceiling_min": 720,
+   "idle_min": 240
+  }
+ },
+ "regions": {
+  "us-east-1": {
+   "hosts": 5
+  },
+  "us-west-2": {
+   "hosts": 5
+  }
+ },
+ "host_types": [
+  "r8i.16xlarge",
+  "r7i.16xlarge",
+  "r6i.16xlarge",
+  "m8i.16xlarge",
+  "m7i.16xlarge"
+ ],
+ "guard": {
+  "ceiling_min": 300,
+  "idle_min": 30
+ }
+}
