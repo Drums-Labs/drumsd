@@ -231,6 +231,21 @@ class PoolSDK(unittest.TestCase):
         m = self.c.metrics()
         self.assertIn('pool_failover_total{outcome="replaced"} %d' % len(victims), m)
 
+    def test_refused_connections_wait_for_the_verdict(self):
+        # a host that is gone (connection refused, like a powered-off instance's port) answers 409 episode_lost once the
+        # pool declares it dead, not 503 "outcome unknown"
+        self.c = Cluster(2, 10, pool_cfg={"dead_after_s": 1.0})
+        cl = self.c.client()
+        envs = [cl.create("osworld-ubuntu") for _ in range(6)]
+        v = [e for e in envs if e.record["pool"]["host"] == "h0"]
+        self.c.hosts[0][2].kill()
+        t0 = time.time()
+        with self.assertRaises(drums.Conflict):
+            v[0].step("pass")
+        self.assertLess(time.time() - t0, 8)
+        v[0].reset()
+        self.assertEqual(v[0].record["pool"]["host"], "h1")
+
     def test_dead_host_rejoins_after_orphan_sweep(self):
         self.c = Cluster(2, 10, pool_cfg={"dead_after_s": 0.8})
         cl = self.c.client()

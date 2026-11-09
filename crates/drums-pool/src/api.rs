@@ -535,7 +535,19 @@ async fn env_op(p: &P, m: &Method, id: &str, op: &str, query: &str, body: Option
             // the failover task owns the env now; the client learns its episode is gone
             return jerr(409, lost_msg(id, &e.host), json!({"code": "episode_lost", "from_host": e.host}));
         }
-        Err(err) => return jerr(503, format!("host {} unreachable on {} {}: {err} (the outcome is unknown; GET the env)", e.host, m, op), json!({"code": "host_unreachable"})),
+        Err(err) => {
+            // the host did not answer: hold the request until the pool has judged the host (dead -> the episode is lost
+            // and the env fails over; healthy again -> the outcome is unknown, as before), so a client sees one signal
+            if p.await_host_verdict(&e.host).await {
+                if is_close {
+                    p.envs.lock().unwrap().remove(id);
+                    p.bury(id, "host_lost");
+                    return jok(json!({"id": id, "state": "destroyed", "closed_reason": "host died"}));
+                }
+                return jerr(409, lost_msg(id, &e.host), json!({"code": "episode_lost", "from_host": e.host}));
+            }
+            return jerr(503, format!("host {} unreachable on {} {}: {err} (the outcome is unknown; GET the env)", e.host, m, op), json!({"code": "host_unreachable"}));
+        }
     };
     if is_close && (st < 300 || st == 404 || st == 410) {
         if p.envs.lock().unwrap().remove(id).is_some() {

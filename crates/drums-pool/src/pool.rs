@@ -467,6 +467,28 @@ impl Pool {
         }
     }
 
+    /// After a failed request to `host`: wait (at most dead_after_s plus two polls) until the health loop judges it.
+    /// true = declared dead (its envs fail over); false = it answered a poll again (or is gone from the pool).
+    pub async fn await_host_verdict(&self, host: &str) -> bool {
+        let t0 = Instant::now();
+        let limit = self.cfg.dead_after_s + 3.0 * self.cfg.health_interval_s + self.cfg.health_timeout_s;
+        loop {
+            {
+                let hs = self.hosts.lock().unwrap();
+                match hs.get(host) {
+                    None => return false,
+                    Some(h) if h.state == HostState::Dead => return true,
+                    Some(h) if h.state == HostState::Healthy && h.fails == 0 && h.last_ok.is_some_and(|t| t > t0) => return false,
+                    _ => {}
+                }
+            }
+            if t0.elapsed().as_secs_f64() > limit {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------- health loop
     pub async fn poll_host(self: &P, name: String) {
         let t0 = Instant::now();
