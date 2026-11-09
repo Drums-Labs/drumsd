@@ -34,6 +34,15 @@ pub const CRASH_SIGNALS: [i32; 7] = [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT,
 /// are the newest; the count of dropped-by-age events is kept so a judgment can never miss one silently.
 pub const KEEP: usize = 4096;
 
+/// How often the census reads the slots' cgroups (which process lives in which cgroup).
+pub const CENSUS_EVERY_MS: u64 = 200;
+/// How long the census still knows a process after it stopped appearing in a pass (it may have crashed and been reaped
+/// between two passes). Far below the time the kernel takes to hand the same pid out again: pids are allocated
+/// cyclically up to pid_max, so reuse needs a full cycle of forks.
+pub const CENSUS_KEEP_S: f64 = 10.0;
+/// A census pass older than this when a crash is read cannot say which slots ran Chrome at that moment.
+pub const CENSUS_FRESH_S: f64 = 2.0;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct CrashEvent {
     /// Seconds since the epoch, when the watch read the event.
@@ -191,6 +200,9 @@ impl CrashWatch {
         }
     }
 
+    /// One census pass: every (cgroup, tgids) read below the census roots at `epoch` (skeleton: not kept yet).
+    pub fn record_census(&self, _observed: &[(String, Vec<i32>)], _epoch: f64, _read_comm: impl Fn(i32) -> Option<String>) {}
+
     pub fn record_overflow(&self, epoch: f64) {
         let mut g = self.inner.lock().unwrap();
         g.overflows.push(epoch);
@@ -231,7 +243,7 @@ impl CrashWatch {
         if aged_out {
             incomplete.push("crash events of this episode were dropped from the watch's buffer".into());
         }
-        Judgment { crashes, incomplete }
+        Judgment { crashes, incomplete, excused: vec![] }
     }
 
     pub fn summary(&self) -> serde_json::Value {
@@ -246,12 +258,20 @@ impl CrashWatch {
 pub struct Judgment {
     pub crashes: Vec<CrashEvent>,
     pub incomplete: Vec<String>,
+    /// Unattributed crashes that were not counted against this episode, in words (its tree ran no Chrome then).
+    pub excused: Vec<String>,
 }
 
 impl Judgment {
     pub fn clean(&self) -> bool {
         self.crashes.is_empty() && self.incomplete.is_empty()
     }
+}
+
+/// Every cgroup at or below `roots` with the tgids in its cgroup.procs, as paths relative to `cg_root` (the
+/// /proc/PID/cgroup form). Skeleton: reads nothing yet.
+pub fn census_scan(_roots: &[std::path::PathBuf], _cg_root: &std::path::Path) -> Vec<(String, Vec<i32>)> {
+    vec![]
 }
 
 fn check(r: libc::c_int, what: &str) -> io::Result<()> {
@@ -414,5 +434,111 @@ mod tests {
         w.record_stop(t0 + 4.0, "EBADF".into());
         assert!(w.judge("/x", t0 + 5.0).incomplete.iter().any(|s| s.contains("stopped")));
         assert!(w.judge("/x", t0 - 10.0).incomplete.iter().any(|s| s.contains("before the crash watch")));
+    }
+    const A: &str = "/system.slice/drumsbench-pool.scope/drumsbench-m-1-pool.scope/drumsbench-m-1-r1.scope";
+    const B: &str = "/system.slice/drumsbench-pool.scope/drumsbench-m-2-pool.scope/drumsbench-m-2-r1.scope";
+    fn comm_of(p: i32) -> Option<String> {
+        Some(match p { 40..=49 => "chrome", _ => "soffice.bin" }.to_string())
+    }
+
+    #[test]
+    fn a_crash_reaped_with_its_parent_is_attributed_by_the_census_to_its_own_slot_only() {
+        // T6: a Chrome process died of SIGTRAP and it and its parent were gone from /proc before the watch read them;
+        // the old watch called it unattributed and failed every running episode, Chrome-less ones included
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        w.record_census(&[(A.to_string(), vec![40, 41]), (B.to_string(), vec![50])], t0 + 0.5, comm_of);
+        w.record_exit(&ExitRecord { pid: 40, tgid: 40, exit_code: 5, parent_pid: 41, parent_tgid: 41 }, t0 + 1.0, |_| None, |_| None);
+        let a = w.judge(A, t0);
+        assert_eq!(a.crashes.len(), 1, "{a:?}");
+        assert_eq!(a.crashes[0].signal_name, "SIGTRAP");
+        assert_eq!(a.crashes[0].cgroup_from.as_deref(), Some("census"));
+        assert_eq!(a.crashes[0].comm.as_deref(), Some("chrome"), "the census remembers the comm the dead task had");
+        assert!(a.incomplete.is_empty(), "{:?}", a.incomplete);
+        let b = w.judge(B, t0);
+        assert!(b.clean(), "a crash attributed to slot 1 must not touch slot 2: {b:?}");
+        assert_eq!(w.summary()["unattributed"], 0);
+    }
+
+    #[test]
+    fn a_crash_of_a_task_the_census_never_saw_is_attributed_through_its_parent_in_the_census() {
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        w.record_census(&[(A.to_string(), vec![41]), (B.to_string(), vec![50])], t0 + 0.5, comm_of);
+        // a renderer forked after the last pass, reaped together with its zygote (41)
+        w.record_exit(&ExitRecord { pid: 77, tgid: 77, exit_code: 5, parent_pid: 41, parent_tgid: 41 }, t0 + 0.6, |_| None, |_| None);
+        let a = w.judge(A, t0);
+        assert_eq!(a.crashes.len(), 1);
+        assert_eq!(a.crashes[0].cgroup_from.as_deref(), Some("census-parent"));
+        assert_eq!(a.crashes[0].parent_comm.as_deref(), Some("chrome"));
+        assert!(w.judge(B, t0).clean());
+    }
+
+    #[test]
+    fn an_unattributed_crash_counts_only_against_episodes_that_ran_chrome_and_says_so() {
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        // slot 1 runs Chrome, slot 2 only LibreOffice; the crashed task and its parent were never seen by any pass
+        w.record_census(&[(A.to_string(), vec![40]), (B.to_string(), vec![50])], t0 + 0.5, comm_of);
+        w.record_exit(&ExitRecord { pid: 99, tgid: 99, exit_code: 5, parent_pid: 98, parent_tgid: 98 }, t0 + 0.7, |_| None, |_| None);
+        let a = w.judge(A, t0);
+        assert!(!a.clean(), "never silently valid: the Chrome slot cannot be vouched for");
+        assert!(a.incomplete[0].contains("could not be attributed") && a.incomplete[0].contains("Chrome"), "{:?}", a.incomplete);
+        let b = w.judge(B, t0);
+        assert!(b.clean(), "a slot with no Chrome is not invalidated by an unattributed Chrome-era crash: {b:?}");
+        assert_eq!(b.excused.len(), 1, "the episode's report still records the unattributed crash");
+        assert!(b.excused[0].contains("not counted"), "{:?}", b.excused);
+    }
+
+    #[test]
+    fn an_unattributed_crash_without_a_fresh_census_or_any_chrome_fails_every_episode_closed() {
+        // no census at all
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        w.record_exit(&ExitRecord { pid: 99, tgid: 99, exit_code: 5, parent_pid: 98, parent_tgid: 98 }, t0 + 1.0, |_| None, |_| None);
+        assert!(!w.judge(B, t0).clean());
+        // a stale census (the census thread stalled): cannot say which slots ran Chrome
+        let w = CrashWatch::new_for_test();
+        w.record_census(&[(A.to_string(), vec![40]), (B.to_string(), vec![50])], t0, comm_of);
+        w.record_exit(&ExitRecord { pid: 99, tgid: 99, exit_code: 5, parent_pid: 98, parent_tgid: 98 }, t0 + CENSUS_FRESH_S + 1.0, |_| None, |_| None);
+        assert!(!w.judge(B, t0).clean());
+        // a fresh census but no Chrome anywhere: the crash is not Chrome's, so no slot can be excused
+        let w = CrashWatch::new_for_test();
+        w.record_census(&[(A.to_string(), vec![50]), (B.to_string(), vec![51])], t0 + 0.5, comm_of);
+        w.record_exit(&ExitRecord { pid: 99, tgid: 99, exit_code: 5, parent_pid: 98, parent_tgid: 98 }, t0 + 0.7, |_| None, |_| None);
+        assert!(!w.judge(A, t0).clean() && !w.judge(B, t0).clean());
+    }
+
+    #[test]
+    fn the_census_follows_moves_and_forgets_gone_processes_after_the_keep_window() {
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        w.record_census(&[(A.to_string(), vec![40])], t0, comm_of);
+        // 40 moved to slot 2 (a restore into the other leaf keeps no pid, but a cgroup move must win)
+        w.record_census(&[(B.to_string(), vec![40])], t0 + 0.2, comm_of);
+        w.record_exit(&ExitRecord { pid: 40, tgid: 40, exit_code: 5, parent_pid: 1, parent_tgid: 1 }, t0 + 0.3, |_| None, |_| None);
+        assert!(w.judge(A, t0).clean() && w.judge(B, t0).crashes.len() == 1);
+        // a process last seen longer ago than CENSUS_KEEP_S is forgotten (its pid could be reused)
+        let w = CrashWatch::new_for_test();
+        w.record_census(&[(A.to_string(), vec![60])], t0, comm_of);
+        w.record_census(&[(A.to_string(), vec![])], t0 + CENSUS_KEEP_S + 1.0, comm_of);
+        w.record_exit(&ExitRecord { pid: 60, tgid: 60, exit_code: 11, parent_pid: 1, parent_tgid: 1 }, t0 + CENSUS_KEEP_S + 1.1, |_| None, |_| None);
+        assert!(w.judge(A, t0).crashes.is_empty());
+    }
+
+    #[test]
+    fn census_scan_reads_every_cgroup_procs_below_the_roots() {
+        let d = std::env::temp_dir().join(format!("crashwatch-census-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let pool = d.join("system.slice/drumsbench-pool.scope");
+        std::fs::create_dir_all(pool.join("drumsbench-m-1-pool.scope/drumsbench-m-1-r1.scope")).unwrap();
+        std::fs::write(pool.join("cgroup.procs"), "").unwrap();
+        std::fs::write(pool.join("drumsbench-m-1-pool.scope/cgroup.procs"), "").unwrap();
+        std::fs::write(pool.join("drumsbench-m-1-pool.scope/drumsbench-m-1-r1.scope/cgroup.procs"), "40\n41\n").unwrap();
+        let mut got = census_scan(&[pool.clone()], &d);
+        got.retain(|(_, p)| !p.is_empty());
+        assert_eq!(got, vec![(A.to_string(), vec![40, 41])]);
+        assert!(census_scan(&[d.join("missing")], &d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
