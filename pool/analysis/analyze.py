@@ -201,6 +201,21 @@ def main():
                         "max": max((v for _, v in lt), default=None), "min_outside_recovery": min((v for _, v in outside), default=None),
                         "samples_below_2000_outside_recovery": sum(1 for _, v in outside if v < 2000)}
     S["concurrency"]["pass"] = bool(lt) and S["concurrency"]["median"] >= 2000 and S["concurrency"]["samples_below_2000_outside_recovery"] == 0
+    # every host death in the window (the planned kill and any unplanned loss such as a spot reclaim), for the labelled view
+    deaths = [e for e in pev if e.get("ev") == "host_dead" and W0 <= e["t"] <= W1]
+    S["host_deaths_in_window"] = [{"host": e["host"], "t_from_window_s": round(e["t"] - W0, 1), "planned": e["host"] == killed} for e in deaths]
+    below = [(t, v) for t, v in lt if v < 2000]
+    S["concurrency"]["samples_below_2000"] = len(below)
+    S["concurrency"]["below_2000_intervals_from_window_s"] = []
+    for t, v in below:
+        x = round(t - W0)
+        iv = S["concurrency"]["below_2000_intervals_from_window_s"]
+        if iv and x - iv[-1][1] <= 20:
+            iv[-1][1] = x
+        else:
+            iv.append([x, x])
+    S["concurrency"]["min_live"] = min((v for _, v in lt), default=None)
+    S["concurrency"]["time_weighted_mean"] = statistics.mean([v for _, v in lt]) if lt else None
 
     # rule 4: latency from the trainer (client side) and the pool (overhead)
     ops = collections.defaultdict(list)
@@ -254,6 +269,12 @@ def main():
     S["saturation_mid_window"] = hs
     est = prom_series(os.path.join(raw, "prom", "env_mib_est.json"))
     S["mem_per_desktop_mib_mid_window"] = {dict(x.split("=", 1) for x in k3.split(","))["host"]: round(statistics.median([y for t, y in s if abs(t - mid) <= 60] or [0]), 1) for k3, s in est.items()}
+    ups = prom_series(os.path.join(raw, "prom", "up_step_p50_by_host.json"))
+    reg = collections.defaultdict(list)
+    for k3, ser in ups.items():
+        hn = dict(x.split("=", 1) for x in k3.split(",")).get("host")
+        reg[(hosts.get(hn, {}).get("region") or ("us-east-2" if (hn or "").startswith("east2") else "us-west-2"))] += [v for t, v in ser if W0 <= t <= W1]
+    S["step_upstream_p50_by_region_s"] = {r: {"median_of_1m_p50": statistics.median(v), "n": len(v)} for r, v in reg.items() if v}
     S["blocked_placements"] = {k3: sum(v for t, v in s if W0 <= t <= W1) * 10 for k3, s in prom_series(os.path.join(raw, "prom", "blocked_rate.json")).items()}
     S["pass"] = {"1_concurrency": S["concurrency"]["pass"], "2_valid_rewards": S["rewards"]["pass"], "3a_detection": F.get("detection_pass"),
                  "3b_no_stall": F.get("no_stall_pass"), "3c_recovery": F.get("recovery_pass"), "5_hosts": S["hosts"]["pass"]}
