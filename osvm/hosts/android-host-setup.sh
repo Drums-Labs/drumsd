@@ -3,8 +3,8 @@
 # Installs: docker + redroid image (Drums android backend), Android SDK emulator + AndroidWorld AVD (incumbent arm),
 # AndroidWorld at a pinned commit. Idempotent. Writes versions to /opt/t5/versions.json.
 set -euxo pipefail
-REDROID_IMAGE=${REDROID_IMAGE:-redroid/redroid:13.0.0_64only-latest}
-AW_COMMIT=${AW_COMMIT:-main}
+REDROID_IMAGE=${REDROID_IMAGE:-redroid/redroid@sha256:5a42a569ee1d7c71796c0385e906cbaa4c3e0a162a56d9f26b29bdb1befac13b}
+AW_COMMIT=${AW_COMMIT:-55ddaf5edc6f6c25673aed343907d5b9dca66f84}
 mkdir -p /opt/t5 && cd /opt/t5
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q

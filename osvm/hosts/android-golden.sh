@@ -8,7 +8,7 @@
 set -euxo pipefail
 export ANDROID_HOME=/opt/t5/android-sdk ANDROID_SDK_ROOT=/opt/t5/android-sdk ANDROID_AVD_HOME=/opt/t5/avd
 A=$ANDROID_HOME/platform-tools/adb
-REDROID_IMAGE=${REDROID_IMAGE:-redroid/redroid:13.0.0_64only-latest}
+REDROID_IMAGE=${REDROID_IMAGE:-redroid/redroid@sha256:5a42a569ee1d7c71796c0385e906cbaa4c3e0a162a56d9f26b29bdb1befac13b}
 APKS="net.gsantner.markor_146.apk com.arduia.expense_11.apk com.simplemobiletools.calendar.pro_238.apk"
 if [ -z "${ONLY_EMU:-}" ]; then
 mkdir -p /opt/t5/apks && cd /opt/t5/apks

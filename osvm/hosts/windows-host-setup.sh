@@ -4,8 +4,8 @@
 # commit and image digest, and downloads the Windows 11 Enterprise Evaluation ISO (research use only; see LICENSING).
 set -euxo pipefail
 WIN_ISO_URL=${WIN_ISO_URL:-https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/26100.1742.240906-0331.ge_release_svc_refresh_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso}
-WAA_COMMIT=${WAA_COMMIT:-main}
-WAA_IMAGE=${WAA_IMAGE:-windowsarena/winarena:latest}
+WAA_COMMIT=${WAA_COMMIT:-eb220c4dcf64babefc1bfc287edda91ab04132ed}
+WAA_IMAGE=${WAA_IMAGE:-windowsarena/winarena@sha256:869afffe384f0e0356dbfcdf78486611e31d62e692544cbfd9a6c08606f07440}
 mkdir -p /opt/t5 && cd /opt/t5
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
