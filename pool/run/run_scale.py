@@ -154,9 +154,13 @@ def main():
     ap.add_argument("--kill-region", default="")
     ap.add_argument("--max-envs", type=int, default=280)
     ap.add_argument("--warm-per-host", type=int, default=0)
-    ap.add_argument("--max-load-per-cpu", type=float, default=6.0)
+    ap.add_argument("--max-load-per-cpu", type=float, default=4.0)
     ap.add_argument("--release", default=os.path.expanduser("~/drums-release.tar.gz"))
     ap.add_argument("--seed", type=int, default=20261108)
+    ap.add_argument("--steps", type=int, default=15)
+    ap.add_argument("--think-min-s", type=float, default=4.0)
+    ap.add_argument("--think-max-s", type=float, default=8.0)
+    ap.add_argument("--max-inflight-per-host", type=int, default=16)
     a = ap.parse_args()
     run = Run(a)
     hosts = [h for h in json.load(open(a.hosts)) if h.get("role") == "host" and h.get("state") == "running"]
@@ -229,7 +233,7 @@ def main():
         os.write(fd, secrets.token_urlsafe(32).encode())
         os.close(fd)
     token = open(tokf).read().strip()
-    cfg = {"listen": "127.0.0.1:7080", "token_file": tokf, "hosts": specs, "warm_per_host": a.warm_per_host, "max_load_per_cpu": a.max_load_per_cpu,
+    cfg = {"listen": "127.0.0.1:7080", "token_file": tokf, "hosts": specs, "warm_per_host": a.warm_per_host, "max_load_per_cpu": a.max_load_per_cpu, "max_inflight_per_host": a.max_inflight_per_host,
            "event_log": os.path.join(run.out, "pool-events.jsonl"), "default_idle_timeout_s": 900}
     json.dump(cfg, open("/etc/drums-pool/pool.json", "w"), indent=1)
     json.dump(cfg, open(os.path.join(run.out, "pool-config.json"), "w"), indent=1)
@@ -307,6 +311,7 @@ def main():
     run.phase("trainer_start", workers=a.workers, window_start_utc=utc(window[0]), window_end_utc=utc(window[1]), window=window)
     tr = run.bg([sys.executable, os.path.join(REPO, "pool", "loadgen", "replay_trainer.py"), "--url", "http://127.0.0.1:7080", "--token-file", tokf,
                  "--workers", str(a.workers), "--procs", str(a.procs), "--duration-s", str(total), "--ramp-s", str(a.ramp_s), "--seed", str(a.seed),
+                 "--steps", str(a.steps), "--think-min-s", str(a.think_min_s), "--think-max-s", str(a.think_max_s),
                  "--out", tdir], os.path.join(run.out, "trainer.log"))
 
     # ---------------------------------------------------------------- 4. kill
@@ -315,6 +320,9 @@ def main():
         t_kill = window[0] + a.kill_at_s
         while now() < t_kill and tr.poll() is None:
             time.sleep(1)
+    if a.kill_at_s >= 0 and tr.poll() is not None:
+        run.phase("kill_skipped", why="trainer ended before the kill time", rc=tr.returncode)
+    elif a.kill_at_s >= 0:
         hs = get("http://127.0.0.1:7080/pool/v1/hosts", token)["hosts"]
         cands = [x for x in hs if x["state"] == "healthy" and (not a.kill_region or by_name[x["name"]]["region"] == a.kill_region)]
         victim = max(cands, key=lambda x: (x["owned"], x["name"]))

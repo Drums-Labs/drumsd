@@ -161,6 +161,7 @@ pub enum Blocked {
     Memory,
     Cpu,
     MemoryPressure,
+    Inflight,
 }
 
 impl Blocked {
@@ -172,6 +173,7 @@ impl Blocked {
             Blocked::Memory => "memory",
             Blocked::Cpu => "cpu",
             Blocked::MemoryPressure => "memory_pressure",
+            Blocked::Inflight => "inflight",
         }
     }
 }
@@ -189,6 +191,9 @@ pub fn headroom(cfg: &Config, h: &Host, now: Instant) -> Result<f64, Blocked> {
         None => return Err(Blocked::NotHealthy),
     };
     let young = h.young.iter().filter(|t| now.duration_since(**t).as_secs_f64() < cfg.young_env_s).count() as f64;
+    if h.inflight + h.warm_inflight >= cfg.max_inflight_per_host {
+        return Err(Blocked::Inflight);
+    }
     let pending = (h.inflight + h.warm_inflight) as f64;
     let live = ((h.owned + h.warm.len() as u32) as f64).max(s.live_slots as f64) + pending;
     let max = h.spec.max_envs as f64;

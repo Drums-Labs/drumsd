@@ -51,6 +51,9 @@ pub struct Config {
     pub warm_per_host: u32,
     pub warm_image: String,
     pub warm_concurrency_per_host: u32,
+    /// A host gets no new env while this many creates (warm ones included) are already in flight on it: drumsd runs a
+    /// few restores at a time (max_concurrent_restores), so more only queue there while load1 catches up.
+    pub max_inflight_per_host: u32,
     /// Placement limits: a host gets no new env while load1/cpus is at or above this ...
     pub max_load_per_cpu: f64,
     /// ... or while MemAvailable minus expected memory of envs in flight would drop below this percent of RAM.
@@ -94,7 +97,8 @@ impl Default for Config {
             warm_per_host: 0,
             warm_image: "osworld-ubuntu".into(),
             warm_concurrency_per_host: 2,
-            max_load_per_cpu: 6.0,
+            max_inflight_per_host: 16,
+            max_load_per_cpu: 4.0,
             mem_floor_pct: 10.0,
             env_mib_default: 1024.0,
             young_env_s: 30.0,
