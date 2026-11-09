@@ -33,6 +33,10 @@ def b64(s: str) -> str:
 def user_data(role, guard, price):
     lines = ["#!/bin/bash", f"bash /opt/drums-t3/guard.sh {guard['ceiling_min']} {guard['idle_min']}"]
     if role == "host":
+        # no package activity during first boot: in m1 a D-Bus disruption at ~1 min after boot broke first boot on 9 of 14
+        # hosts (candidate: apt-daily / unattended-upgrades restarting services); these hosts are disposable
+        lines.append("systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null; "
+                     "systemctl mask --now apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null")
         # images built before install.sh set it: lift the shared per-user pipe-buffer cap (see install.sh, kernel settings)
         lines.append("sysctl -q -w fs.pipe-user-pages-soft=0; echo fs.pipe-user-pages-soft = 0 > /etc/sysctl.d/61-drums-pipes.conf")
         # the root volume comes from a snapshot: its blocks load lazily on first read, so read the 24 GB image once
