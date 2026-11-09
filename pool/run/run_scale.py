@@ -225,6 +225,38 @@ def main():
                 pass
             time.sleep(5)
     run.phase("hosts_healthy", hosts={h["name"]: (h["region"], h["type"], h.get("health0") is not None) for h in hosts})
+
+    # acceptance: every host must make one real desktop with a task, pass its gates and return the designed no-op reward;
+    # a host that cannot is left out of the pool (and named), so a broken origin never takes part in the measurement
+    def accept(h):
+        tok = open(h["token_file"]).read().strip()
+        t0 = time.time()
+        try:
+            task = get(h["url"] + "/v1/tasks/93eabf48-6a27-4cb6-b963-7d5fe1e0d3a9", tok, timeout=30)
+            rec = post(h["url"] + "/v1/slots", tok, {"checkpoint": "osworld-ubuntu", "task": task, "idle_timeout_s": 600}, timeout=300)
+            sid = rec.get("id")
+            ok = rec.get("state") == "ready"
+            verdict = None
+            for _ in range(60):
+                g = get(h["url"] + f"/v1/slots/{sid}/gates", tok, timeout=30)
+                verdict = g["validity"]["verdict"]
+                if verdict != "pending":
+                    break
+                time.sleep(1)
+            rw = post(h["url"] + f"/v1/slots/{sid}/verify", tok, {}, timeout=300) if ok and verdict == "valid" else {}
+            urllib.request.urlopen(urllib.request.Request(h["url"] + f"/v1/slots/{sid}", method="DELETE", headers={"Authorization": f"Bearer {tok}"}), timeout=60).read()
+            h["acceptance"] = {"state": rec.get("state"), "verdict": verdict, "valid": rw.get("valid"), "score": rw.get("score"), "s": round(time.time() - t0, 1)}
+            h["accepted"] = bool(ok and verdict == "valid" and rw.get("valid") and rw.get("score") == 0.0)
+        except Exception as e:  # noqa: BLE001
+            h["acceptance"] = {"error": str(e)[:300], "s": round(time.time() - t0, 1)}
+            h["accepted"] = False
+    ths = [threading.Thread(target=accept, args=(h,)) for h in hosts]
+    [t.start() for t in ths]
+    [t.join() for t in ths]
+    run.phase("hosts_accepted", accepted=[h["name"] for h in hosts if h["accepted"]],
+              rejected={h["name"]: h["acceptance"] for h in hosts if not h["accepted"]}, timings={h["name"]: h["acceptance"].get("s") for h in hosts})
+    hosts = [h for h in hosts if h["accepted"]]
+    specs = [sp for sp in specs if sp["name"] in {h["name"] for h in hosts}]
     json.dump(hosts, open(os.path.join(run.out, "hosts.json"), "w"), indent=1)
 
     # ---------------------------------------------------------------- 2. control plane + observability
