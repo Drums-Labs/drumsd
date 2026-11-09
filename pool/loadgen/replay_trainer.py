@@ -169,6 +169,14 @@ def worker(a, drums, client, out, wid, stop_at, state):
                 timed("reset", env.reset)
         except Exception as e:  # noqa: BLE001
             out.w(k="error", w=wid, env=getattr(env, "id", None), phase=state.get(wid), err=errinfo(e))
+            rec = getattr(e, "record", None)
+            if env is None and isinstance(rec, dict) and rec.get("id"):
+                # a create that came up down/quarantined still exists on the server (SDK contract): close it
+                try:
+                    client.call("DELETE", f"/v1/slots/{rec['id']}", timeout=60)
+                    out.w(k="closed_failed_create", w=wid, env=rec["id"], state=rec.get("state"))
+                except Exception:  # noqa: BLE001
+                    pass
             if isinstance(e, drums.Conflict) and (getattr(e, "body", None) or {}).get("code") == "episode_lost":
                 # the pool already recreated this env on a healthy host: a reset continues there
                 try:

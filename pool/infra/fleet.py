@@ -33,6 +33,8 @@ def b64(s: str) -> str:
 def user_data(role, guard, price):
     lines = ["#!/bin/bash", f"bash /opt/drums-t3/guard.sh {guard['ceiling_min']} {guard['idle_min']}"]
     if role == "host":
+        # images built before install.sh set it: lift the shared per-user pipe-buffer cap (see install.sh, kernel settings)
+        lines.append("sysctl -q -w fs.pipe-user-pages-soft=0; echo fs.pipe-user-pages-soft = 0 > /etc/sysctl.d/61-drums-pipes.conf")
         # the root volume comes from a snapshot: its blocks load lazily on first read, so read the 24 GB image once
         # before the first desktop restores from it (timed in the log)
         # 32 parallel readers: a snapshot-restored volume loads much faster with many requests in flight than with one
