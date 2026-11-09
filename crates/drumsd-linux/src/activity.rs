@@ -368,8 +368,8 @@ mod tests {
         w.record(&Event::Exit { pid: 20, tgid: 20, parent_tgid: 1 }, 12.5, cg_of(&[]));
         assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(0.5));
         // the leader is gone; a thread of the group reports its exit after it (a whole tree killed at once)
-        w.record(&Event::Exit { pid: 22, tgid: 20, parent_tgid: 1 }, 12.6, cg_of(&[]));
-        assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(0.4));
+        w.record(&Event::Exit { pid: 22, tgid: 20, parent_tgid: 1 }, 12.75, cg_of(&[]));
+        assert_eq!(w.quiet_for("/a", 13.0, 1.0), Ok(0.25));
         assert_eq!(w.summary()["unattributed"], 0);
         // and is forgotten LINGER_S later
         w.record(&Event::Fork { parent_tgid: 1, child_pid: 99, child_tgid: 99 }, 30.0, cg_of(&[(99, "/b")]));
