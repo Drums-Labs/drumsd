@@ -10,7 +10,7 @@
    "max_desktops": 128,
    "max_concurrent_starts": 16,
    "alive_after_s": 5.0,
-   "probe": "$ErrorActionPreference='SilentlyContinue'; $h=$env:USERPROFILE; foreach($d in 'Desktop','Documents','Downloads','Pictures','Music','Videos'){ Get-ChildItem -Recurse -Force (Join-Path $h $d) | Sort-Object FullName | ForEach-Object { '{0}|{1}' -f $_.FullName.Substring($h.Length), $(if($_.PSIsContainer){'d'}else{$_.Length}) } }; Get-ChildItem -Force C:\\Users\\Public\\Desktop | ForEach-Object { 'pub|'+$_.Name }; foreach($k in 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize','HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced','HKCU:\\Control Panel\\Desktop','HKCU:\\Environment','HKCU:\\Control Panel\\Mouse','HKCU:\\Control Panel\\International'){ $p=Get-ItemProperty $k; if($p){ $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' -and $_.Name -notmatch '{EXCLUDE}' } | Sort-Object Name | ForEach-Object { $k+'|'+$_.Name+'='+$_.Value } } }; (Get-TimeZone).Id; Get-ChildItem -Force C:\\Users\\Public\\drums_canary_* | ForEach-Object { 'canary|'+$_.Name }",
+   "probe": "import os,re,winreg\nh=os.environ['USERPROFILE'];o=[];x=re.compile(r'{EXCLUDE}')\nfor d in ['Desktop','Documents','Downloads','Pictures','Music','Videos']:\n    for r,ds,fs in sorted(os.walk(os.path.join(h,d))):\n        for n in sorted(ds):o.append(os.path.join(r,n)[len(h):]+'|d')\n        for n in sorted(fs):\n            p=os.path.join(r,n)\n            try:o.append(p[len(h):]+'|'+str(os.path.getsize(p)))\n            except OSError:o.append(p[len(h):]+'|?')\no+=['pub|'+n for n in sorted(os.listdir(r'C:\\Users\\Public\\Desktop'))]\nfor k in [r'Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize',r'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced',r'Control Panel\\Desktop',r'Environment',r'Control Panel\\Mouse',r'Control Panel\\International']:\n    try:\n        kh=winreg.OpenKey(winreg.HKEY_CURRENT_USER,k);i=0;v=[]\n        while True:\n            try:n,val,t=winreg.EnumValue(kh,i)\n            except OSError:break\n            i+=1\n            if not x.search(n):v.append(k+'|'+n+'='+str(val))\n        o+=sorted(v)\n    except OSError:pass\nkh=winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation');o.append('tz|'+winreg.QueryValueEx(kh,'TimeZoneKeyName')[0])\no+=['canary|'+n for n in sorted(os.listdir(r'C:\\Users\\Public')) if n.startswith('drums_canary_')]\nprint('\\n'.join(o))\nc='{CANARY}'\nif c:\n    open(os.path.join(r'C:\\Users\\Public',c),'w').close();print('DRUMS_CANARY_OK')\n",
    "probe_exclude": "^$",
    "tasks_dir": "/home/ubuntu/drumsd/osvm/tasks/windows",
    "windows": {
@@ -64,7 +64,8 @@
     "ready_timeout_s": 120,
     "python": "C:\\Users\\Docker\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
     "work_dir": "/srv/t5/drums-win"
-   }
+   },
+   "probe_kind": "python"
   }
  ]
 }

@@ -7,7 +7,7 @@ a screenshot) -> the oracle's actions (mode oracle) or nothing (mode noop) -> ve
 the task list alternate oracle/noop so every checker is seen passing and failing. Task order is deterministic: desktop i,
 episode k runs task (i + k) mod T (sorted ids), so arms see the same task sequence.
 """
-import argparse, json, os, sys, threading, time
+import argparse, json, os, subprocess, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arms import DrumsArm, AwArm, http
 from checker import load_tasks
@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--reuse", default="", help="comma list of existing desktop ids (skip up)")
     ap.add_argument("--apks", default="")
     ap.add_argument("--configure", default="", help="file with configure shell commands (incumbent arms)")
+    ap.add_argument("--min-seconds", type=float, default=0, help="keep running episodes until this long AND --episodes reached")
     a = ap.parse_args()
 
     tasks = load_tasks(a.tasks)
@@ -79,8 +80,31 @@ def main():
     if len(arm.ids) < a.n:
         rec({"kind": "error", "error": f"only {len(arm.ids)} of {a.n} desktops came up"})
 
+    stop_sampler = threading.Event()
+    def sampler():
+        while not stop_sampler.is_set():
+            mi = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo") if l.split(":")[0] in ("MemTotal", "MemAvailable", "SwapFree")}
+            ksm = None
+            try:
+                ksm = int(open("/sys/kernel/mm/ksm/pages_sharing").read())
+            except Exception:
+                pass
+            rec({"kind": "host", "mem_total_mib": mi["MemTotal"] // 1024, "mem_available_mib": mi["MemAvailable"] // 1024, "load1": float(open("/proc/loadavg").read().split()[0]), "ksm_pages_sharing": ksm})
+            stop_sampler.wait(10)
+    def oom_count():
+        try:
+            return subprocess.run(["sudo", "-n", "dmesg"], capture_output=True, text=True, timeout=30).stdout.count("Out of memory")
+        except Exception:
+            return None
+    oom0 = oom_count()
+    threading.Thread(target=sampler, daemon=True).start()
+
     def worker(i, d):
-        for k in range(a.episodes):
+        k = -1
+        while True:
+            k += 1
+            if k >= a.episodes and time.time() - t1 >= a.min_seconds:
+                break
             task = tasks[ids[(i + k) % len(ids)]]
             # mixed: passes over the task list alternate oracle / no-op, so each task is seen passing and failing
             oracle = a.mode == "oracle" or (a.mode == "mixed" and (k // len(ids)) % 2 == 0)
@@ -115,12 +139,18 @@ def main():
     t1 = time.time()
     [t.start() for t in ths]
     [t.join() for t in ths]
-    rec({"kind": "done", "soak_s": time.time() - t1})
+    stop_sampler.set()
+    rec({"kind": "done", "soak_s": time.time() - t1, "oom_kills": (oom_count() - oom0) if oom0 is not None else None})
     if a.arm == "drums":
         st, h = http("GET", a.url + "/v1/health", token=arm.token)
         rec({"kind": "health", "health": h})
     if not a.keep:
-        arm.down()
+        if a.arm == "drums":
+            arm.down()
+        else:
+            logdir = os.path.splitext(os.path.abspath(a.out))[0] + ".logs"
+            os.makedirs(logdir, exist_ok=True)
+            arm.down(logdir)
 
 if __name__ == "__main__":
     main()

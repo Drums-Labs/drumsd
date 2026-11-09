@@ -105,6 +105,9 @@ class WaaArm(_AuditMixin):
             ok &= p; checks.append({"cmd": c["cmd"], "pass": p, "detail": det})
         iso, names = self.audit_end(d, ep)
         return {"ok": True, "wall_s": time.time() - t, "reward": 1.0 if ok else 0.0, "checks": checks, "isolation_end": iso, "canaries": names}
-    def down(self):
+    def down(self, logdir=None):
         for d in self.ids:
+            if logdir:
+                rc, o, e, _ = run(["docker", "logs", d], timeout=60)
+                open(os.path.join(logdir, f"{d}.docker.log"), "w").write(o + e)
             run(["docker", "rm", "-f", d])

@@ -31,6 +31,9 @@ def http(method, url, body=None, token=None, timeout=600, raw=False):
             return e.code, json.loads(b)
         except Exception:
             return e.code, {"error": b.decode(errors="replace")[:500]}
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+        # not answering (yet): status 0, the caller decides
+        return 0, {"error": f"{type(e).__name__}: {e}"}
 
 def run(args, timeout=120, stdin=None):
     t = time.time()
@@ -114,9 +117,13 @@ class _AuditMixin:
         rc2, _ = self.shell(d, self.canary_write.format(name=mine))
         return {"state_hash_ok": h == clean, "state_hash": h, "clean_hash": clean, "canary_written": rc2 == 0, "audit_s": time.time() - t, "probe_text": None if h == clean else out[:20000]}
     def audit_end(self, d, ep):
+        """Isolation for incumbents: no canary of ANOTHER desktop is present and this episode's canary is. Canaries
+        left by this desktop's own earlier episodes are stale state, counted by the clean-start metric instead."""
         rc, out = self.shell(d, self.canary_list)
         names = sorted(x.strip().split("/")[-1].split("\\")[-1] for x in out.split() if "drums_canary_" in x)
-        return names == [f"drums_canary_{d}_{ep}"], names
+        mine = f"drums_canary_{d}_{ep}"
+        foreign = [n for n in names if not n.startswith(f"drums_canary_{d}_")]
+        return (mine in names and not foreign), names
 
 
 class AwArm(_AuditMixin):
@@ -124,7 +131,7 @@ class AwArm(_AuditMixin):
     -memory 2048, -gpu off), its FastAPI server on :5000. Stock reset = POST /reset?go_home=true; the task's own
     setup then sets the preconditions (as AndroidWorld's initialize_task does). Actions: POST /execute_action
     (JSONAction). Observation: GET /screenshot?wait_to_stabilize=false (its stock path: pixels as a JSON list)."""
-    def __init__(self, image, probe, port_base=9100, apks=(), configure_cmds=()):
+    def __init__(self, image, probe, port_base=20000, apks=(), configure_cmds=()):
         self.image, self.probe, self.port_base, self.apks, self.configure_cmds = image, probe, port_base, apks, configure_cmds
         self.ids, self.clean_hash = [], {}
         self.canary_write = "touch /data/local/tmp/{name}"
@@ -184,12 +191,20 @@ class AwArm(_AuditMixin):
         else:
             st, v = http("POST", self._url(d) + "/execute_action", action, timeout=300)
         act_s = time.time() - t
-        shot_s, nbytes = None, None
+        shot_s, nbytes, adb_shot_s = None, None, None
         if screenshot:
             t2 = time.time()
             s2, b = http("GET", self._url(d) + "/screenshot?wait_to_stabilize=false", timeout=300, raw=True)
             shot_s, nbytes = time.time() - t2, len(b or b"")
-        return {"ok": st == 200, "http": st, "wall_s": time.time() - t, "act_s": act_s, "shot_s": shot_s, "shot_bytes": nbytes}
+            wall = time.time() - t
+            # tuned observation path (not AndroidWorld's API): adb screencap inside the container, timed separately
+            t3 = time.time()
+            rc, _, _, _ = run(["docker", "exec", d, "sh", "-c", "adb -s emulator-5554 exec-out screencap -p > /dev/null"], timeout=120)
+            adb_shot_s = time.time() - t3 if rc == 0 else None
+        else:
+            wall = time.time() - t
+        return {"ok": st == 200, "http": st, "wall_s": wall, "act_s": act_s, "shot_s": shot_s, "shot_bytes": nbytes, "adb_shot_s": adb_shot_s,
+                "tuned_wall_s": (act_s + adb_shot_s) if adb_shot_s is not None else None}
     def verify(self, d, task, ep):
         t = time.time()
         checks, ok = [], True
@@ -199,6 +214,9 @@ class AwArm(_AuditMixin):
             ok &= p; checks.append({"cmd": c["cmd"], "pass": p, "detail": det})
         iso, names = self.audit_end(d, ep)
         return {"ok": True, "wall_s": time.time() - t, "reward": 1.0 if ok else 0.0, "checks": checks, "isolation_end": iso, "canaries": names}
-    def down(self):
+    def down(self, logdir=None):
         for d in self.ids:
+            if logdir:
+                rc, o, e, _ = run(["docker", "logs", d], timeout=60)
+                open(os.path.join(logdir, f"{d}.docker.log"), "w").write(o + e)
             run(["docker", "rm", "-f", d])

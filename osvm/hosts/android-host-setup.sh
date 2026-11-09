@@ -44,3 +44,10 @@ jq -n --arg redroid "$REDROID_DIGEST" --arg aw "$(cat aw_commit.txt)" --arg cl "
   '{redroid_image:$redroid, android_world_commit:$aw, cmdline_tools:$cl, emulator:$emu, kernel:$kernel, system_image_api33:$sysimg}' > versions.json
 cat versions.json
 echo SETUP_DONE
+# --- added for drumsd's emulator pools (T5): empty console token (drumsd runs as root and talks to the console),
+# reflink-capable XFS for per-desktop AVD clones (android-emulator-cow pool)
+: > /root/.emulator_console_auth_token
+modprobe xfs; mkdir -p /srv/t5/xfs
+[ -f /srv/t5/xfs.img ] || { truncate -s 350G /srv/t5/xfs.img; mkfs.xfs -q -f -m reflink=1 /srv/t5/xfs.img; }
+mountpoint -q /srv/t5/xfs || mount -o loop,noatime /srv/t5/xfs.img /srv/t5/xfs
+mkdir -p /srv/t5/xfs/avd-template /srv/t5/xfs/clones
