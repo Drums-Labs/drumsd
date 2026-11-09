@@ -30,7 +30,7 @@ run() { # arm-key n episodes min_seconds name
 passes() { python3 -c "import sys; sys.path.insert(0,'$H'); from analyze import summarize; r=summarize('$OUT/$1.jsonl'); print(r['density_criteria']); sys.exit(0 if r['density_pass'] else 1)"; }
 sudo touch /run/drums-busy
 if [ "$PHASE" = latency ]; then
-  if [ "$OS" = android ]; then for k in a3 a2 a1 a0; do run $k 16 19 0 lat-$k-n16; done; fi
+  if [ "$OS" = android ]; then for k in ${LAT_ARMS:-a3 a2 a1 a0}; do run $k 16 19 0 lat-$k-n16; done; fi
   if [ "$OS" = windows ]; then for k in w1 w0; do run $k 8 15 0 lat-$k-n8; done; fi
 elif [ "$PHASE" = ladder ]; then
   key=$1; shift

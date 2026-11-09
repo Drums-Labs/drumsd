@@ -24,6 +24,7 @@ sudo mkdir -p /var/lib/drumsd-os/journal /srv/t5/drums-redroid /srv/t5/drums-emu
 mkdir -p ~/t5runs
 bash osvm/hosts/redeploy.sh android-host.json android
 # measured runs (PLAN.md): latency phase, then the headline ladders
+[ -f ~/repro-ladders.env ] && . ~/repro-ladders.env; export LAT_ARMS
 bash osvm/harness/run_measured.sh android latency
 # ladders: full pre-registered ladders by default; a replication may list rungs per arm in ~/repro-ladders.env
 # (e.g. LADDER_a3="64 96"), read when the ladder phase starts
