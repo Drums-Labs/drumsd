@@ -6,6 +6,7 @@
 # sha256 in /opt/t5/apks/SHA256SUMS). Settings: AndroidWorld's docker setup (animations off, hidden api policy) plus
 # stay-awake so the screen never sleeps during an episode.
 set -euxo pipefail
+SELF=$(readlink -f "$0")
 export ANDROID_HOME=/opt/t5/android-sdk ANDROID_SDK_ROOT=/opt/t5/android-sdk ANDROID_AVD_HOME=/opt/t5/avd
 A=$ANDROID_HOME/platform-tools/adb
 REDROID_IMAGE=${REDROID_IMAGE:-redroid/redroid@sha256:5a42a569ee1d7c71796c0385e906cbaa4c3e0a162a56d9f26b29bdb1befac13b}
@@ -49,7 +50,7 @@ fi
 
 # --- emulator snapshot "clean" (the AVD and adb keys belong to ubuntu: run as ubuntu with its own HOME)
 if [ "$(id -un)" != ubuntu ]; then
-  cp "$0" /tmp/android-golden-emu.sh; chmod 755 /tmp/android-golden-emu.sh
+  cp "$SELF" /tmp/android-golden-emu.sh; chmod 755 /tmp/android-golden-emu.sh
   sudo -u ubuntu -H env ONLY_EMU=1 bash /tmp/android-golden-emu.sh
   echo GOLDEN_DONE; exit 0
 fi
