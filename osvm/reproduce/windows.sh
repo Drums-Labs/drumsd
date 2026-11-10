@@ -21,7 +21,12 @@ grep -q "Shutdown completed" ~/repro-waa-prepare.log || { echo "WAA prepare did 
 sudo docker rm -f winarena >/dev/null 2>&1 || true
 sudo mkdir -p /srv/t5/waa-golden && sudo cp --sparse=always -p $W/src/win-arena-container/vm/storage/* /srv/t5/waa-golden/ && sudo chmod -R a-w /srv/t5/waa-golden
 # extra volume for WAA per-desktop copies
-D=$(lsblk -dno NAME,SIZE,MOUNTPOINT | awk '$3=="" && $1 ~ /^nvme/ {print $1}' | head -1)
+# the extra volume: a whole disk of >= 1 TB with no partitions and nothing mounted (never the root disk)
+D=""
+for d in $(lsblk -dnbo NAME,SIZE,TYPE | awk '$3=="disk" && $2>=1000000000000 {print $1}'); do
+  [ "$(lsblk -no NAME /dev/$d | wc -l)" = 1 ] && [ -z "$(lsblk -no MOUNTPOINT /dev/$d | tr -d '[:space:]')" ] && { D=$d; break; }
+done
+[ -n "$D" ] || { echo "no unused >= 1 TB disk for WAA storage"; exit 1; }
 sudo mkdir -p /srv/t5/waa; mountpoint -q /srv/t5/waa || { sudo mkfs.ext4 -q -E nodiscard /dev/$D; sudo mount -o noatime /dev/$D /srv/t5/waa; }
 # drumsd + Drums clean state
 command -v cargo >/dev/null || { curl -sSf https://sh.rustup.rs | sh -s -- -y -q; }
