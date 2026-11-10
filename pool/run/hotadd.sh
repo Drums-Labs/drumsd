@@ -28,5 +28,5 @@ PY
 [ $? = 0 ] || { echo "$(date -u +%FT%TZ) REJECTED" >> $LOG; exit 1; }
 PT=$(cat /etc/drums-pool/token)
 curl -s -X POST -H "Authorization: Bearer $PT" -H "Content-Type: application/json" localhost:7080/pool/v1/hosts \
-  -d "{\"name\": \"$NAME\", \"url\": \"$U\", \"token_file\": \"$TF\", \"region\": \"us-east-2\", \"cpus\": $CPUS, \"max_envs\": $(python3 -c "print(round(4.375*$CPUS))")}" >> $LOG
+  -d "{\"name\": \"$NAME\", \"url\": \"$U\", \"token_file\": \"$TF\", \"region\": \"${REGION:-us-east-2}\", \"cpus\": $CPUS, \"max_envs\": $(python3 -c "print(round(4.375*$CPUS))")}" >> $LOG
 echo " $(date -u +%FT%TZ) registered" >> $LOG; tail -2 $LOG
