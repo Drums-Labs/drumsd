@@ -18,6 +18,12 @@ fn d_alive() -> f64 {
 fn d_incr_depth() -> u32 {
     8
 }
+fn d_daemon_weight() -> u32 {
+    1000
+}
+fn d_prefork_window() -> f64 {
+    0.1
+}
 fn d_prefork_age() -> f64 {
     120.0
 }
@@ -105,6 +111,16 @@ pub struct Config {
     /// A prefork (POST /v1/slots/:id/prefork) nobody claimed with a fork within this many seconds is discarded.
     #[serde(default = "d_prefork_age")]
     pub prefork_max_age_s: f64,
+    /// Quiet window of a prefork's capture (a fork's is quiesce.window_s); see Manager::prefork.
+    #[serde(default = "d_prefork_window")]
+    pub prefork_quiesce_window_s: f64,
+    /// cpu.weight drumsd writes on its own cgroup at start (its gates, capture verbs and dumps run there); 0 = leave it.
+    #[serde(default = "d_daemon_weight")]
+    pub daemon_cpu_weight: u32,
+    /// Captures run through resident `sharedos_rootfs.capture serve` workers instead of one Python process each; a
+    /// worker that fails falls back to the process run. false = a process per capture (sota/t2).
+    #[serde(default = "yes")]
+    pub resident_capture_verb: bool,
     /// Incremental capture: every restore clears its tree's soft-dirty bits before any task runs (pre-resume), every
     /// dump keeps tracking (`--track-mem`), and a capture is dumped on top of the env's last base (the images it was
     /// restored from or last captured into, `--prev-images-dir`), writing only the pages written since. The parent

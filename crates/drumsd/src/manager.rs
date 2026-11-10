@@ -246,6 +246,56 @@ pub struct Slot {
     pub inputs: std::sync::atomic::AtomicU64,
 }
 
+/// Resident capture verbs (`python -m sharedos_rootfs.capture serve`): one JSON request and one JSON reply per line.
+/// A worker is taken for one capture and put back after; a worker that fails to answer is dropped.
+#[derive(Default)]
+pub struct VerbPool {
+    idle: StdMutex<Vec<VerbWorker>>,
+}
+
+pub struct VerbWorker {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for VerbWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl VerbPool {
+    /// Some((exit code, stdout, stderr)) of the verb with `argv`, or None if no worker could answer (caller runs a process).
+    pub fn run(&self, argv: &[String], spawn: impl Fn() -> std::process::Command) -> Option<(Option<i32>, String, String)> {
+        use std::io::{BufRead, Write};
+        let w = self.idle.lock().unwrap().pop();
+        let mut w = match w {
+            Some(w) => w,
+            None => {
+                let mut c = spawn();
+                c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+                let mut child = c.spawn().ok()?;
+                let stdin = child.stdin.take()?;
+                let stdout = std::io::BufReader::new(child.stdout.take()?);
+                VerbWorker { child, stdin, stdout }
+            }
+        };
+        let req = serde_json::to_string(&json!({"argv": argv})).ok()?;
+        writeln!(w.stdin, "{req}").ok()?;
+        w.stdin.flush().ok()?;
+        let mut line = String::new();
+        if w.stdout.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let v: Value = serde_json::from_str(&line).ok()?;
+        let r = (v["rc"].as_i64().map(|x| x as i32), v["stdout"].as_str().unwrap_or("").to_string(), v["stderr"].as_str().unwrap_or("").to_string());
+        self.idle.lock().unwrap().push(w);
+        Some(r)
+    }
+}
+
 /// A fork prepared ahead of the fork call (POST /v1/slots/:id/prefork): the same capture and children as a fork,
 /// started right after an action so they are ready when the policy asks. Handed out by the next fork of the same
 /// parent with the same n only when the parent took no input since it started, had no task start or exit since, and
@@ -290,6 +340,7 @@ pub struct Manager {
     /// Saved states a fork is creating children from: the reaper leaves them alone until the children exist.
     pinned_states: StdMutex<BTreeSet<String>>,
     preforks: StdMutex<BTreeMap<String, Prefork>>,
+    verbs: VerbPool,
     /// Held while a template server is being started (see ensure_server).
     server_start: StdMutex<()>,
     /// Exits by crash signal, attributed by cgroup (the `no_app_crash` gate). None only when `crash_watch` is off.
@@ -401,6 +452,15 @@ struct RestoreOk {
 impl Manager {
     pub fn new(cfg: Config) -> Result<Arc<Manager>, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        // drumsd's own cgroup (its gates, capture verbs and CRIU dumps run in it) ahead of the envs' episodes
+        if cfg.daemon_cpu_weight > 0 {
+            if let Some(cg) = std::fs::read_to_string("/proc/self/cgroup").ok().and_then(|c| c.lines().find_map(|l| l.strip_prefix("0::").map(String::from))) {
+                let d = Path::new(cgroup::CG_ROOT).join(cg.trim_start_matches('/'));
+                if let Err(e) = cgroup::set_cpu_weight(&d, cfg.daemon_cpu_weight) {
+                    tracing::warn!("cpu.weight {} on drumsd's cgroup {}: {e}", cfg.daemon_cpu_weight, d.display());
+                }
+            }
+        }
         let journal = Journal::open(&cfg.journal_dir).map_err(|e| format!("journal {}: {e}", cfg.journal_dir.display()))?;
         let source_sha = slotfs::source_sha256(&cfg.py_src.join("sharedos_rootfs")).map_err(|e| format!("python sources: {e}"))?;
         let metrics = Registry::default();
@@ -476,6 +536,7 @@ impl Manager {
             lease_reaped: StdMutex::new(BTreeMap::new()),
             pinned_states: StdMutex::new(BTreeSet::new()),
             preforks: StdMutex::new(BTreeMap::new()),
+            verbs: VerbPool::default(),
             server_start: StdMutex::new(()),
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
@@ -2175,20 +2236,30 @@ impl Manager {
                 extra.push(u.to_string());
             }
         }
-        let o = std::process::Command::new(py)
-            .args(["-m", "sharedos_rootfs.capture", "capture", "--slot", &slot.to_string(), "--into", &into.to_string(), "--leave-running", "--no-continue",
-                   "--dump-log-level", &self.cfg.criu_log_level.clamp(3, 4).to_string()])
-            .args(&extra)
-            .current_dir(&self.cfg.py_src)
-            .env("SHAREDOS_ROOTFS_CONFIG", &self.cfg.py_config)
-            .env("PYTHONPATH", &self.cfg.py_src)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .env("PATH", format!("{criu_dir}:/usr/sbin:/usr/bin:/sbin:/bin"))
-            .output()
-            .map_err(|e| e.to_string())?;
-        let out = String::from_utf8_lossy(&o.stdout).to_string();
-        if !o.status.success() {
-            return Err(format!("capture verb rc {:?}: {}", o.status.code(), String::from_utf8_lossy(&o.stderr).chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()));
+        let mut argv: Vec<String> = ["capture", "--slot", &slot.to_string(), "--into", &into.to_string(), "--leave-running", "--no-continue",
+                                     "--dump-log-level", &self.cfg.criu_log_level.clamp(3, 4).to_string()].iter().map(|x| x.to_string()).collect();
+        argv.extend(extra);
+        let cmd = |args: &[&str]| {
+            let mut c = std::process::Command::new(&py);
+            c.args(["-m", "sharedos_rootfs.capture"]).args(args)
+                .current_dir(&self.cfg.py_src)
+                .env("SHAREDOS_ROOTFS_CONFIG", &self.cfg.py_config)
+                .env("PYTHONPATH", &self.cfg.py_src)
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .env("PATH", format!("{criu_dir}:/usr/sbin:/usr/bin:/sbin:/bin"));
+            c
+        };
+        // a resident verb (no Python start per capture); any failure of the worker itself falls back to a process run
+        let (code, out, err) = match self.cfg.resident_capture_verb.then(|| self.verbs.run(&argv, || cmd(&["serve"]))).flatten() {
+            Some(r) => r,
+            None => {
+                let a: Vec<&str> = argv.iter().map(|x| x.as_str()).collect();
+                let o = cmd(&a).output().map_err(|e| e.to_string())?;
+                (o.status.code(), String::from_utf8_lossy(&o.stdout).to_string(), String::from_utf8_lossy(&o.stderr).to_string())
+            }
+        };
+        if code != Some(0) {
+            return Err(format!("capture verb rc {:?}: {}", code, err.chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()));
         }
         Ok(out.lines().rev().find(|l| l.starts_with('{')).and_then(|l| serde_json::from_str(l).ok()).unwrap_or(json!({"stdout": out})))
     }
@@ -2267,6 +2338,13 @@ impl Manager {
             return Err(ApiError::new(400, "n must be 1..64"));
         }
         let slot = self.slot(id)?;
+        // The prefork's capture waits a shorter quiet window than a fork's (prefork_quiesce_window_s, default 0.1 s):
+        // its children are handed out only if the tree then stays free of task starts and exits from the capture's end
+        // to the fork call (claim_prefork), so the window here only saves work that would be discarded.
+        let mut o = o;
+        if o.window_s.is_none() {
+            o.window_s = Some(self.cfg.prefork_quiesce_window_s.min(self.cfg.quiesce.window_s));
+        }
         let old = self.preforks.lock().unwrap().remove(id);
         if let Some(p) = old {
             let me = self.clone();
