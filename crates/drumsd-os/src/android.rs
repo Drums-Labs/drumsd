@@ -382,6 +382,10 @@ impl AndroidDesk {
         crate::exec::write_pgid(&self.dir(), child.id());
         self.child = Some(child);
         self.adb.wait_boot(self.cfg.boot_timeout_s, 0.1).await?;
+        // a freshly started emulator's TCP adb transport can drop right after boot: require a steady connection
+        if !self.adb.steady(3, 0.15, 15.0).await {
+            return Err(format!("{}: adb not steady after boot", self.adb.serial));
+        }
         Ok(
             json!({"clone_s": clone_s, "boot_s": t0.elapsed().as_secs_f64() - clone_s, "total_s": t0.elapsed().as_secs_f64()}),
         )
@@ -473,7 +477,7 @@ impl AndroidDesk {
                             // the guest's adbd comes back with the snapshot's connection state: drop the host-side
                             // TCP transport and open a new one (an old transport stayed offline in 11 of 304 loads)
                             self.adb.disconnect().await;
-                            if self.adb.wait_boot(15.0, 0.02).await.is_ok() {
+                            if self.adb.wait_boot(15.0, 0.02).await.is_ok() && self.adb.steady(3, 0.15, 10.0).await {
                                 return Ok(
                                     json!({"kind": "snapshot_load", "load_s": load_s, "total_s": t0.elapsed().as_secs_f64()}),
                                 );
@@ -539,8 +543,9 @@ impl AndroidDesk {
         }
     }
 
+    /// Desktop shell for probes, checkers and setup (idempotent: retried once on a broken transport).
     pub async fn shell(&self, cmd: &str, timeout_s: f64) -> Out {
-        self.adb.shell(cmd, timeout_s).await
+        self.adb.shell_idempotent(cmd, timeout_s).await
     }
     pub async fn screenshot(&self) -> Result<Vec<u8>, String> {
         self.adb.screencap().await
