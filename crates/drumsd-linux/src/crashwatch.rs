@@ -33,6 +33,9 @@ pub const CRASH_SIGNALS: [i32; 7] = [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT,
 /// How many events are kept (oldest dropped first). An episode is judged against the events since its start, which
 /// are the newest; the count of dropped-by-age events is kept so a judgment can never miss one silently.
 pub const KEEP: usize = 4096;
+/// How many plain exits' cgroups are remembered, and for how long.
+const EXITED_KEEP: usize = 20_000;
+const EXITED_KEEP_S: f64 = 15.0;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct CrashEvent {
@@ -64,6 +67,11 @@ pub struct Overflow {
 struct Inner {
     events: VecDeque<CrashEvent>,
     dropped_by_age: u64,
+    /// cgroup of every process whose exit was seen while /proc still had it, kept for a few seconds: when a whole env
+    /// tree is killed (close, reset) the kernel reports the exits in any order, and a renderer that died of a crash
+    /// signal a few ms after its zygote and browser are gone can only be placed through them (fresh-host replication of
+    /// T2b W1p: one such unattributed SIGTRAP marked every running episode incomplete).
+    exited_cg: VecDeque<(f64, i32, String)>,
     /// Epochs at which the kernel reported lost events (ENOBUFS).
     overflows: Vec<f64>,
     /// When the watch stopped (a fatal socket error): every episode since then is unjudgeable.
@@ -156,17 +164,36 @@ impl CrashWatch {
     pub fn record_exit(&self, r: &ExitRecord, epoch: f64, read_cgroup: impl Fn(i32) -> Option<String>, read_comm: impl Fn(i32) -> Option<String>) {
         let mut g = self.inner.lock().unwrap();
         g.exits_seen += 1;
-        let Some((sig, core)) = crash_signal(r.exit_code) else { return };
+        let Some((sig, core)) = crash_signal(r.exit_code) else {
+            // a plain exit: remember where the process was, for crashes of its children reported after it is gone
+            if r.pid == r.tgid {
+                drop(g);
+                let c = read_cgroup(r.tgid);
+                let mut g = self.inner.lock().unwrap();
+                if let Some(c) = c {
+                    g.exited_cg.push_back((epoch, r.tgid, c));
+                }
+                while g.exited_cg.len() > EXITED_KEEP || g.exited_cg.front().map(|(t, _, _)| epoch - *t > EXITED_KEEP_S).unwrap_or(false) {
+                    g.exited_cg.pop_front();
+                }
+            }
+            return;
+        };
         // a fatal signal ends every thread of the group, each with the same status: keep one event per process
         if g.events.iter().rev().take(64).any(|e| e.tgid == r.tgid && e.signal == sig && (epoch - e.epoch).abs() < 5.0) {
             return;
         }
+        let remembered = |g: &Inner, tg: i32| g.exited_cg.iter().rev().find(|(_, t, _)| *t == tg).map(|(_, _, c)| c.clone());
+        let (rem_self, rem_parent) = (remembered(&g, r.tgid), remembered(&g, r.parent_tgid));
         drop(g);
         let (cgroup, from) = match read_cgroup(r.tgid).or_else(|| read_cgroup(r.pid)) {
             Some(c) => (Some(c), Some("task".to_string())),
             None => match read_cgroup(r.parent_tgid).or_else(|| read_cgroup(r.parent_pid)) {
                 Some(c) => (Some(c), Some("parent".to_string())),
-                None => (None, None),
+                None => match rem_self.or(rem_parent) {
+                    Some(c) => (Some(c), Some("remembered exit".to_string())),
+                    None => (None, None),
+                },
             },
         };
         let ev = CrashEvent {
@@ -397,6 +424,28 @@ mod tests {
         assert!(w.judge(slot, t0 + 2.0).clean());
         // a similar prefix is not a sub-cgroup
         assert!(w.judge("/system.slice/drumsbench-pool.scope/drumsbench-m-1-pool.scope/drumsbench-m-1-r", t0).clean());
+    }
+
+    #[test]
+    fn a_crash_after_its_tree_is_gone_is_placed_through_a_remembered_exit() {
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        // the browser (pid 7, in /a) exits normally while /proc still has it; then its renderer dies of SIGTRAP after
+        // every /proc entry of the tree is gone
+        w.record_exit(&ExitRecord { pid: 7, tgid: 7, exit_code: 0, parent_pid: 1, parent_tgid: 1 }, t0 + 1.0, |p| (p == 7).then(|| "/a".to_string()), |_| None);
+        w.record_exit(&ExitRecord { pid: 9, tgid: 9, exit_code: 5, parent_pid: 7, parent_tgid: 7 }, t0 + 1.01, |_| None, |_| None);
+        let j = w.judge("/a", t0);
+        assert_eq!(j.crashes.len(), 1);
+        assert_eq!(j.crashes[0].cgroup_from.as_deref(), Some("remembered exit"));
+        assert!(j.incomplete.is_empty(), "{:?}", j.incomplete);
+        // an episode in another cgroup is untouched
+        let k = w.judge("/b", t0);
+        assert!(k.crashes.is_empty() && k.incomplete.is_empty());
+        // a remembered exit older than the window is forgotten
+        w.record_exit(&ExitRecord { pid: 30, tgid: 30, exit_code: 0, parent_pid: 1, parent_tgid: 1 }, t0 + 1.0, |_| Some("/c".into()), |_| None);
+        w.record_exit(&ExitRecord { pid: 31, tgid: 31, exit_code: 0, parent_pid: 1, parent_tgid: 1 }, t0 + 100.0, |_| Some("/d".into()), |_| None);
+        w.record_exit(&ExitRecord { pid: 32, tgid: 32, exit_code: 5, parent_pid: 30, parent_tgid: 30 }, t0 + 100.0, |_| None, |_| None);
+        assert_eq!(w.judge("/c", t0 + 50.0).incomplete.len(), 1);
     }
 
     #[test]
