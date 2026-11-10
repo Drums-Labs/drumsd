@@ -351,11 +351,21 @@ async fn capture(State(m): S, Path(id): Path<String>, body: Option<Json<CaptureR
     Ok(Json(json!(m.capture_leased(&id, r.id, o, LeaseOpts { idle_timeout_s: r.idle_timeout_s, ttl_s: r.ttl_s }, false).await?)))
 }
 async fn branch(State(m): S, Path(id): Path<String>, Json(r): Json<BranchReq>) -> J {
+    if let Some(v) = m.claim_prefork(&id, r.n, r.delete_state_with_children).await {
+        return Ok(Json(v));
+    }
     let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
     let _admitted = m.admit("fork", Need { envs: r.n as u64, captures: 1 })?;
     let child = LeaseOpts { idle_timeout_s: r.idle_timeout_s, ttl_s: r.ttl_s };
     let state = LeaseOpts { idle_timeout_s: r.state_idle_timeout_s, ttl_s: r.state_ttl_s };
     Ok(Json(m.branch_leased(&id, r.n, o, child, state, r.delete_state_with_children).await?))
+}
+/// Prepare a fork now (capture + children in the background) for the next fork of this env; see Manager::prefork.
+async fn prefork(State(m): S, Path(id): Path<String>, Json(r): Json<BranchReq>) -> J {
+    let o = QuiesceOpts { timeout_s: r.quiesce_timeout_s, window_s: r.quiesce_window_s };
+    let child = LeaseOpts { idle_timeout_s: r.idle_timeout_s, ttl_s: r.ttl_s };
+    let state = LeaseOpts { idle_timeout_s: r.state_idle_timeout_s, ttl_s: r.state_ttl_s };
+    Ok(Json(m.prefork(&id, r.n, o, child, state, r.delete_state_with_children).await?))
 }
 async fn quiescent(State(m): S, Path(id): Path<String>, body: Option<Json<QuiescentReq>>) -> J {
     let r = body.map(|b| b.0).unwrap_or_default();
@@ -398,6 +408,7 @@ pub fn router(m: Arc<Manager>) -> Router {
         .route("/v1/slots/:id/screenshot", get(screenshot))
         .route("/v1/slots/:id/capture", post(capture))
         .route("/v1/slots/:id/branch", post(branch))
+        .route("/v1/slots/:id/prefork", post(prefork))
         .route("/v1/slots/:id/quiescent", post(quiescent))
         .route("/v1/slots/:id/quarantine", post(quarantine))
         .route("/v1/slots/:id/release", post(release))

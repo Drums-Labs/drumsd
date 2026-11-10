@@ -294,6 +294,46 @@ pub fn set_cpu_max(d: &Path, v: &str) -> io::Result<()> {
     write(&d.join("cpu.max"), v)
 }
 
+/// The cgroup v2 default cpu.weight; slots never set another one except during a boost.
+pub const DEFAULT_CPU_WEIGHT: u32 = 100;
+
+pub fn set_cpu_weight(d: &Path, w: u32) -> io::Result<()> {
+    write(&d.join("cpu.weight"), &w.clamp(1, 10000).to_string())
+}
+
+pub fn cpu_weight(d: &Path) -> Option<u32> {
+    read(&d.join("cpu.weight")).ok()?.trim().parse().ok()
+}
+
+/// A cpu.weight boost of one cgroup for the life of the guard; dropping it writes the default weight back.
+pub struct WeightBoost {
+    path: Option<PathBuf>,
+}
+
+impl WeightBoost {
+    /// weight 0 = no boost (nothing written, nothing put back).
+    pub fn new(d: &Path, weight: u32) -> WeightBoost {
+        if weight == 0 || weight == DEFAULT_CPU_WEIGHT || !d.is_dir() {
+            return WeightBoost { path: None };
+        }
+        match set_cpu_weight(d, weight) {
+            Ok(()) => WeightBoost { path: Some(d.to_path_buf()) },
+            Err(_) => WeightBoost { path: None },
+        }
+    }
+    pub fn active(&self) -> bool {
+        self.path.is_some()
+    }
+}
+
+impl Drop for WeightBoost {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = set_cpu_weight(&p, DEFAULT_CPU_WEIGHT);
+        }
+    }
+}
+
 pub fn join(d: &Path, pid: i32) -> io::Result<()> {
     write(&d.join("cgroup.procs"), &pid.to_string())
 }
@@ -312,6 +352,26 @@ mod tests {
             Limits { cpu_max: "400000 100000".into(), memory_max: "4294967296".into(), swap_max: "0".into() }
         );
         assert!(slot_cg("rootfs-0734af49-2").ends_with("drumsbench-pool.scope/drumsbench-rootfs-0734af49-2-pool.scope"));
+    }
+
+    #[test]
+    fn a_weight_boost_is_put_back_to_the_default_on_drop_and_zero_writes_nothing() {
+        let d = std::env::temp_dir().join(format!("drumsd-weight-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("cpu.weight"), "100\n").unwrap();
+        {
+            let b = WeightBoost::new(&d, 10000);
+            assert!(b.active());
+            assert_eq!(cpu_weight(&d), Some(10000));
+        }
+        assert_eq!(cpu_weight(&d), Some(DEFAULT_CPU_WEIGHT));
+        let b = WeightBoost::new(&d, 0);
+        assert!(!b.active());
+        drop(b);
+        assert_eq!(cpu_weight(&d), Some(100));
+        assert!(!WeightBoost::new(&d.join("missing"), 5000).active());
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

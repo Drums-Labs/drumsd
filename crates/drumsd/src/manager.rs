@@ -98,6 +98,18 @@ pub struct SlotRecord {
     /// The last API request that named this env (epoch seconds; the lease's idle time counts from it).
     #[serde(default)]
     pub last_used_epoch: Option<f64>,
+    /// Incremental capture base: the images whose pages equal this env's memory except for the pages its soft-dirty
+    /// bits mark (set by a restore that cleared them, or by a capture with --track-mem); None = next capture is full.
+    #[serde(default)]
+    pub dirty_base: Option<PathBuf>,
+    /// Parent-chain depth of `dirty_base` (0 = a complete checkpoint).
+    #[serde(default)]
+    pub dirty_depth: u32,
+    /// For a base that is the images the env was restored from: the uptime (us) when the restore cleared the soft-dirty
+    /// bits, given to CRIU as --prev-images-uptime (tasks started later are pid reuse, dumped in full). None for a
+    /// base made by a capture (its inventory holds the dump's uptime).
+    #[serde(default)]
+    pub dirty_base_uptime_us: Option<u64>,
     /// Why it was destroyed when it was not a client's DELETE (e.g. `lease: idle 1800 s`).
     #[serde(default)]
     pub closed_reason: Option<String>,
@@ -230,6 +242,22 @@ pub struct Slot {
     pub view: RwLock<SlotRecord>,
     pub targets: Vec<proxy::Target>,
     pub proxies: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Inputs the env took (steps, resets, task loads): a prefork is handed out only if none came after it started.
+    pub inputs: std::sync::atomic::AtomicU64,
+}
+
+/// A fork prepared ahead of the fork call (POST /v1/slots/:id/prefork): the same capture and children as a fork,
+/// started right after an action so they are ready when the policy asks. Handed out by the next fork of the same
+/// parent with the same n only when the parent took no input since it started, had no task start or exit since, and
+/// its desktop state hash still equals the one the children were checked against; otherwise discarded and the fork
+/// runs cold.
+pub struct Prefork {
+    pub n: usize,
+    pub delete_state_with_children: bool,
+    pub inputs_at_start: u64,
+    pub started: Instant,
+    pub started_epoch: f64,
+    pub done: tokio::sync::watch::Receiver<Option<Result<Value, String>>>,
 }
 
 pub struct Manager {
@@ -261,6 +289,7 @@ pub struct Manager {
     lease_reaped: StdMutex<BTreeMap<String, u64>>,
     /// Saved states a fork is creating children from: the reaper leaves them alone until the children exist.
     pinned_states: StdMutex<BTreeSet<String>>,
+    preforks: StdMutex<BTreeMap<String, Prefork>>,
     /// Held while a template server is being started (see ensure_server).
     server_start: StdMutex<()>,
     /// Exits by crash signal, attributed by cgroup (the `no_app_crash` gate). None only when `crash_watch` is off.
@@ -363,6 +392,10 @@ struct RestoreOk {
     upper_warm: bool,
     /// When the CRIU restore was spawned: the episode's tree is judged by the crash watch from then on.
     spawn_epoch: f64,
+    /// The pre-resume hook cleared the soft-dirty bits of every restored process (incremental capture base).
+    softdirty_ok: bool,
+    softdirty_uptime_us: Option<u64>,
+    images: PathBuf,
 }
 
 impl Manager {
@@ -442,6 +475,7 @@ impl Manager {
             forget_pruned: StdMutex::new(BTreeMap::new()),
             lease_reaped: StdMutex::new(BTreeMap::new()),
             pinned_states: StdMutex::new(BTreeSet::new()),
+            preforks: StdMutex::new(BTreeMap::new()),
             server_start: StdMutex::new(()),
             restore_sem: Arc::new(Semaphore::new(cfg.max_concurrent_restores)),
             cfg,
@@ -778,7 +812,7 @@ impl Manager {
             let _ = std::fs::remove_file(template::pidfile_for(&c2.socket));
             let _ = kill_slot(&slotfs::marker_for(&me.cfg.state_dir, c2.slot));
             let mut freed = 0u64;
-            for d in ["images", "upper", "upper.snap", "work", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root"] {
+            for d in ["images", "upper", "upper.snap", "work", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root", "softdirty-base", "softdirty-base.new"] {
                 let p = sp.dir.join(d);
                 if p.symlink_metadata().is_ok() {
                     freed += dir_bytes(&p);
@@ -942,8 +976,11 @@ impl Manager {
             lease: Some(lease),
             last_used_epoch: Some(now),
             closed_reason: None,
+            dirty_base: None,
+            dirty_depth: 0,
+            dirty_base_uptime_us: None,
         };
-        let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec), targets, proxies: StdMutex::new(handles) });
+        let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec), targets, proxies: StdMutex::new(handles) , inputs: std::sync::atomic::AtomicU64::new(0) });
         self.slots.write().unwrap().insert(id.clone(), slot.clone());
         self.release_num(num); // the live slot record holds the number now
         let _g = slot.op.lock().await;
@@ -987,6 +1024,7 @@ impl Manager {
     pub async fn reset(self: &Arc<Self>, id: &str) -> R<SlotRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
+        self.took_input(&slot);
         let st = begin_op(&slot, Op::Reset)?;
         self.finalize_episode(&slot);
         self.put_slot(&slot, |r| r.state = st);
@@ -1107,9 +1145,22 @@ impl Manager {
         let mut cost = CostRecord::default();
         let mut private = slot.view.read().unwrap().mode == "private";
         let mut attempt = 0;
+        // the restore's critical path (CRIU, gates, task setup) runs ahead of the busy envs: the slot cgroup's
+        // cpu.weight is raised until this function returns (WeightBoost puts the default back on drop)
+        let _boost = {
+            let num = slot.view.read().unwrap().num;
+            let marker = slotfs::marker_for(&self.cfg.state_dir, num);
+            match (self.cfg.restore_cpu_weight, cgroup::ensure_slot_cg(&marker, &self.limits)) {
+                (w, Ok(d)) if w > 0 => cgroup::WeightBoost::new(&d, w),
+                _ => cgroup::WeightBoost::new(Path::new("/nonexistent"), 0),
+            }
+        };
+        let mut queue_wait = 0.0f64;
         let outcome = loop {
             attempt += 1;
+            let tq = Instant::now();
             let permit = self.restore_sem.clone().acquire_owned().await.map_err(e500)?;
+            queue_wait += tq.elapsed().as_secs_f64();
             let me = self.clone();
             let s2 = slot.clone();
             let ta = Instant::now();
@@ -1193,8 +1244,10 @@ impl Manager {
                             let err = format!("task setup failed: {e}");
                             let mut timings = ok.timings.clone();
                             timings.insert("task_setup".into(), round3(secs));
+                            timings.insert("queue_wait".into(), round3(queue_wait));
                             timings.insert("total".into(), round3(t0.elapsed().as_secs_f64()));
                             return Ok(self.put_slot(slot, |r| {
+                                r.dirty_base = None;
                                 r.state = SlotState::Down { reason: err.chars().take(300).collect() };
                                 r.episode += 1;
                                 r.gates = ok.gates.clone();
@@ -1228,6 +1281,9 @@ impl Manager {
                 if let Some(x) = setup_s {
                     timings.insert("task_setup".into(), x);
                 }
+                timings.insert("queue_wait".into(), round3(queue_wait));
+                timings.insert("cpu_weight_boost".into(), if _boost.active() { self.cfg.restore_cpu_weight as f64 } else { 0.0 });
+                timings.insert("attempts".into(), attempt as f64);
                 timings.insert("total".into(), round3(total));
                 self.account(Some(slot), |l| l.op(op.as_str(), total, true));
                 let r = self.put_slot(slot, |r| {
@@ -1244,6 +1300,9 @@ impl Manager {
                     r.last_error = None;
                     r.ready_epoch = Some(ok.ready_epoch);
                     r.episode_start_epoch = Some(ok.spawn_epoch);
+                    r.dirty_base = ok.softdirty_ok.then(|| ok.images.clone());
+                    r.dirty_depth = if ok.softdirty_ok { slotfs::chain_depth(&ok.images) } else { 0 };
+                    r.dirty_base_uptime_us = ok.softdirty_uptime_us;
                     r.mode = if private { "private".into() } else { "template".into() };
                 });
                 self.metrics.inc("drumsd_ops_total", &[("op", op.as_str()), ("outcome", "ok")], 1.0);
@@ -1271,10 +1330,12 @@ impl Manager {
                 self.metrics.inc("drumsd_ops_total", &[("op", op.as_str()), ("outcome", oname)], 1.0);
                 let validity = f.gates.validity(&required_gates());
                 let mut timings = f.timings.clone();
+                timings.insert("queue_wait".into(), round3(queue_wait));
                 timings.insert("total".into(), round3(total));
                 self.put_slot(slot, |r| {
                     r.state = SlotState::finish(op, &outcome);
                     r.episode += 1;
+                    r.dirty_base = None;
                     r.gates = f.gates.clone();
                     r.validity = match validity {
                         Validity::Valid => Validity::Invalid { gates: vec![] },
@@ -1349,6 +1410,9 @@ impl Manager {
         let hook = hook::write_script(&hook_dir, &self.exe).map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
         if self.cfg.netns_fast {
             std::fs::write(hook_dir.join("netns-lo-up"), b"").map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
+        }
+        if self.cfg.incremental_capture {
+            std::fs::write(hook_dir.join("softdirty-clear"), b"").map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
         }
         if self.cfg.restore_cpu_boost {
             let rec = json!({"paths": [cg, slot_cg], "cpu_max": self.limits.cpu_max});
@@ -1565,7 +1629,11 @@ impl Manager {
                    "last_restore": {"by": "drumsd", "log": log.file_name().map(|x| x.to_string_lossy().to_string()), "epoch": drumsd_linux::now_epoch()}}),
         );
         t.insert("sync_total".into(), round3(t_all.elapsed().as_secs_f64()));
-        Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm, spawn_epoch })
+        let sd = if self.cfg.incremental_capture { slotfs::read_json(&hook_dir.join("softdirty-clear.done")).ok() } else { None };
+        let softdirty_uptime_us = sd.as_ref().filter(|v| v["ok"].as_bool() == Some(true)).and_then(|v| v["uptime_us"].as_u64());
+        let softdirty_ok = softdirty_uptime_us.is_some();
+        Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm, spawn_epoch,
+                       softdirty_ok, softdirty_uptime_us, images: sp.images.clone() })
     }
 
     /// After a restore: the alive gate at ready + alive_after_s, the next warm spare, trash removal.
@@ -1658,6 +1726,7 @@ impl Manager {
     pub async fn step(self: &Arc<Self>, id: &str, action: Value, screenshot: bool) -> R<Value> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
+        self.took_input(&slot);
         let v = slot.view.read().unwrap().clone();
         v.state.begin(Op::Step).map_err(|e| refused(&v, e))?;
         let port = v.port;
@@ -1811,7 +1880,35 @@ impl Manager {
             };
             let me = self.clone();
             let td = Instant::now();
-            let res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into)).await;
+            // the parasite runs in the parent's own tasks: its slot cgroup goes ahead of the busy envs during the dump
+            let boost = match self.cfg.restore_cpu_weight {
+                0 => cgroup::WeightBoost::new(Path::new("/nonexistent"), 0),
+                w => cgroup::WeightBoost::new(&cgroup::slot_cg(&slotfs::marker_for(&self.cfg.state_dir, num)), w),
+            };
+            // incremental capture: on top of the env's base, if it has one that still exists and is not too deep
+            let (base, base_up) = if self.cfg.incremental_capture {
+                let v = slot.view.read().unwrap();
+                (v.dirty_base.clone().filter(|b| b.is_dir() && v.dirty_depth < self.cfg.incremental_max_depth), v.dirty_base_uptime_us)
+            } else {
+                (None, None)
+            };
+            // whatever happens next, the soft-dirty bits no longer match the old base until a dump succeeds
+            self.put_slot(&slot, |r| r.dirty_base = None);
+            let b2 = base.clone();
+            let mut res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into, b2.as_deref(), base_up)).await;
+            att["incremental"] = json!(base.as_ref().map(|b| b.display().to_string()));
+            if base.is_some() && matches!(res, Ok(Err(_))) {
+                // the incremental dump failed: its attempt is kept under forgotten/, then the same capture in full
+                let why = match &res { Ok(Err(e)) => e.chars().take(400).collect::<String>(), _ => String::new() };
+                let me = self.clone();
+                let kept = tokio::task::spawn_blocking(move || me.discard_dump(into)).await.unwrap_or_else(|e| format!("not moved: {e}"));
+                self.event(json!({"slot": id, "incremental_capture_failed": why, "into": into, "records": kept, "retry": "full dump"}));
+                self.metrics.inc("drumsd_incremental_capture_total", &[("outcome", "fell_back_full")], 1.0);
+                att["incremental_failed"] = json!(why);
+                let me = self.clone();
+                res = tokio::task::spawn_blocking(move || me.run_capture_verb(num, into, None, None)).await;
+            }
+            drop(boost);
             self.release_num(into); // its directory (or nothing, if the verb made none) holds the number now
             let res = res.map_err(e500)?;
             let out = match res {
@@ -1837,6 +1934,27 @@ impl Manager {
             };
             att["dump_s"] = json!(round3(td.elapsed().as_secs_f64()));
             att["into"] = json!(into);
+            // an incremental dump's parent chain becomes part of its images (hard links), so deleting the base later
+            // never breaks this checkpoint
+            let qimg = slotfs::paths(&self.cfg.state_dir, into).images;
+            let q2 = qimg.clone();
+            let tp = Instant::now();
+            let depth = match tokio::task::spawn_blocking(move || slotfs::pin_parent(&q2)).await.map_err(e500)? {
+                Ok(d) => d,
+                Err(e) => {
+                    att["rejected"] = json!({"why": format!("pinning the incremental dump's parent chain failed: {e}")});
+                    self.event(json!({"slot": id, "capture_attempt_rejected": att}));
+                    let me = self.clone();
+                    att["discarded_to"] = json!(tokio::task::spawn_blocking(move || me.discard_dump(into)).await.map_err(e500)?);
+                    attempts.push(att);
+                    continue;
+                }
+            };
+            att["chain_depth"] = json!(depth);
+            att["pin_s"] = json!(round3(tp.elapsed().as_secs_f64()));
+            if base.is_some() && depth > 0 {
+                self.metrics.inc("drumsd_incremental_capture_total", &[("outcome", "incremental")], 1.0);
+            }
             // 3. the dump must be the quiescent tree
             let qdir = slotfs::paths(&self.cfg.state_dir, into).dir;
             let tc = Instant::now();
@@ -1886,6 +2004,36 @@ impl Manager {
                 continue;
             }
             attempts.push(att);
+            // the parent's next capture is taken on top of this one: its base is a hard-link copy of these images
+            if self.cfg.incremental_capture && c.is_ok() {
+                let pdir = slotfs::paths(&self.cfg.state_dir, num).dir;
+                let q2 = qimg.clone();
+                let nb = tokio::task::spawn_blocking(move || -> std::io::Result<PathBuf> {
+                    let (new, cur) = (pdir.join("softdirty-base.new"), pdir.join("softdirty-base"));
+                    if new.symlink_metadata().is_ok() {
+                        std::fs::remove_dir_all(&new)?;
+                    }
+                    slotfs::link_images(&q2, &new)?;
+                    slotfs::copy_access(&q2, &new)?;
+                    if cur.symlink_metadata().is_ok() {
+                        std::fs::remove_dir_all(&cur)?;
+                    }
+                    std::fs::rename(&new, &cur)?;
+                    Ok(cur)
+                })
+                .await
+                .map_err(e500)?;
+                match nb {
+                    Ok(b) => {
+                        self.put_slot(&slot, |r| {
+                            r.dirty_base = Some(b);
+                            r.dirty_depth = depth;
+                            r.dirty_base_uptime_us = None;
+                        });
+                    }
+                    Err(e) => self.event(json!({"slot": id, "incremental_base": format!("not kept: {e}; the next capture is full")})),
+                }
+            }
             // an app that crashed in the source before or during the dump is in the saved state too
             self.check_episode(&slot);
             let taint = slot.view.read().unwrap().gates.get(Gate::NoAppCrash).filter(|g| g.status == GateStatus::Fail).map(|g| app_crash_words(&g.detail));
@@ -1934,7 +2082,7 @@ impl Manager {
     /// state_dir/forgotten (kept). Returns where.
     fn discard_dump(&self, into: u32) -> String {
         let sp = slotfs::paths(&self.cfg.state_dir, into);
-        for d in ["images", "upper.snap", "upper", "work"] {
+        for d in ["images", "upper.snap", "upper", "work", "softdirty-base", "softdirty-base.new"] {
             let p = sp.dir.join(d);
             if p.symlink_metadata().is_ok() {
                 let _ = std::fs::remove_dir_all(&p);
@@ -2008,12 +2156,29 @@ impl Manager {
         }
     }
 
-    fn run_capture_verb(&self, slot: u32, into: u32) -> Result<Value, String> {
+    /// `base`: dump on top of these images (`--prev-images-dir`, incremental); with incremental_capture every dump
+    /// also keeps tracking (`--track-mem`).
+    fn run_capture_verb(&self, slot: u32, into: u32, base: Option<&Path>, base_uptime_us: Option<u64>) -> Result<Value, String> {
         let py = self.cfg.python.clone().unwrap_or_else(|| PathBuf::from("/usr/bin/python3"));
         let criu_dir = self.cfg.criu.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let mut extra: Vec<String> = vec![];
+        if self.cfg.incremental_capture {
+            extra.push("--track-mem".into());
+        }
+        if let Some(b) = base {
+            // relative to the new images dir, state_dir/slotQ/images
+            let rel = b.strip_prefix(&self.cfg.state_dir).map_err(|_| format!("incremental base {} is not under the state dir", b.display()))?;
+            extra.push("--prev-images-dir".into());
+            extra.push(format!("../../{}", rel.display()));
+            if let Some(u) = base_uptime_us {
+                extra.push("--prev-images-uptime".into());
+                extra.push(u.to_string());
+            }
+        }
         let o = std::process::Command::new(py)
             .args(["-m", "sharedos_rootfs.capture", "capture", "--slot", &slot.to_string(), "--into", &into.to_string(), "--leave-running", "--no-continue",
                    "--dump-log-level", &self.cfg.criu_log_level.clamp(3, 4).to_string()])
+            .args(&extra)
             .current_dir(&self.cfg.py_src)
             .env("SHAREDOS_ROOTFS_CONFIG", &self.cfg.py_config)
             .env("PYTHONPATH", &self.cfg.py_src)
@@ -2083,6 +2248,176 @@ impl Manager {
         Ok(json!({"checkpoint": c, "state": c.id, "delete_state_with_children": delete_state_with_children, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(secs - t_cap), "seconds": round3(secs)}))
     }
 
+    /// The env took an input (step, reset, task load, destroy): a prefork of it no longer matches its state and is
+    /// discarded in the background.
+    fn took_input(self: &Arc<Self>, slot: &Slot) {
+        slot.inputs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let p = self.preforks.lock().unwrap().remove(&slot.id);
+        if let Some(p) = p {
+            let me = self.clone();
+            let id = slot.id.clone();
+            tokio::spawn(async move { me.discard_prefork(&id, p, "the parent took an input").await });
+        }
+    }
+
+    /// Start a fork of the env now, in the background, for the next fork call (see `Prefork`). A prefork already
+    /// prepared for this env is discarded first.
+    pub async fn prefork(self: &Arc<Self>, id: &str, n: usize, o: QuiesceOpts, child: LeaseOpts, state: LeaseOpts, delete_state_with_children: bool) -> R<Value> {
+        if n == 0 || n > 64 {
+            return Err(ApiError::new(400, "n must be 1..64"));
+        }
+        let slot = self.slot(id)?;
+        let old = self.preforks.lock().unwrap().remove(id);
+        if let Some(p) = old {
+            let me = self.clone();
+            let id2 = id.to_string();
+            tokio::spawn(async move { me.discard_prefork(&id2, p, "replaced by a new prefork").await });
+        }
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let p = Prefork { n, delete_state_with_children, inputs_at_start: slot.inputs.load(std::sync::atomic::Ordering::SeqCst), started: Instant::now(),
+                          started_epoch: drumsd_linux::now_epoch(), done: rx };
+        let started_epoch = p.started_epoch;
+        self.preforks.lock().unwrap().insert(id.to_string(), p);
+        let me = self.clone();
+        let id2 = id.to_string();
+        tokio::spawn(async move {
+            // admitted like a fork, for as long as it runs
+            let r = match me.admit("fork", drumsd_core::admission::Need { envs: n as u64, captures: 1 }) {
+                Ok(g) => {
+                    let r = me.branch_leased(&id2, n, o, child, state, delete_state_with_children).await;
+                    drop(g);
+                    r
+                }
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(Some(r.map_err(|e| e.message)));
+        });
+        self.metrics.inc("drumsd_prefork_total", &[("outcome", "started")], 1.0);
+        Ok(json!({"prefork": "started", "env": id, "n": n, "started_epoch": started_epoch}))
+    }
+
+    /// The fork call: hand out the env's prefork if it matches (same n, same state lifetime) and still equals the
+    /// parent's state; None means fork cold. Waits for a prefork still in flight.
+    pub async fn claim_prefork(self: &Arc<Self>, id: &str, n: usize, delete_state_with_children: bool) -> Option<Value> {
+        let t0 = Instant::now();
+        let p = self.preforks.lock().unwrap().remove(id)?;
+        let slot = self.slot(id).ok()?;
+        let why: String = 'check: {
+            if p.n != n || p.delete_state_with_children != delete_state_with_children {
+                break 'check format!("asked fork({n}, delete_state_with_children={delete_state_with_children}), prepared fork({}, {})", p.n, p.delete_state_with_children);
+            }
+            let mut rx = p.done.clone();
+            let in_flight = rx.borrow().is_none();
+            let res = match rx.wait_for(|v| v.is_some()).await {
+                Ok(v) => v.clone().unwrap(),
+                Err(_) => Err("the prefork task ended without a result".into()),
+            };
+            let waited_s = t0.elapsed().as_secs_f64();
+            let v = match res {
+                Ok(v) => v,
+                Err(e) => {
+                    self.metrics.inc("drumsd_prefork_total", &[("outcome", "failed")], 1.0);
+                    break 'check format!("the prefork failed: {e}");
+                }
+            };
+            // 1. no input reached the parent since the prefork started
+            let inputs = slot.inputs.load(std::sync::atomic::Ordering::SeqCst);
+            if inputs != p.inputs_at_start {
+                break 'check "the parent took an input".into();
+            }
+            // 2. no task started or exited in the parent's tree since its capture ended (the capture's own checks cover
+            //    the dump: the dumped tree must equal the quiescent sample, and every dumped process must still run after it)
+            let now = drumsd_linux::now_epoch();
+            let cap_end = p.started_epoch + v["capture_s"].as_f64().unwrap_or(f64::INFINITY);
+            let need = (now - cap_end).max(0.0);
+            let quiet = match &self.activity {
+                Some(aw) => aw.quiet_for(&self.tree_cg(&slot).display().to_string(), now, need),
+                None => Err("no activity watch".into()),
+            };
+            match quiet {
+                Ok(q) if q + 1e-3 >= need => {}
+                Ok(q) => {
+                    break 'check format!("a task started or exited in the parent {q:.3} s ago, after its capture ended {need:.3} s ago");
+                }
+                Err(e) => {
+                    break 'check format!("the activity watch can not vouch for the parent: {e}");
+                }
+            }
+            // 3. every child is still up and not invalid
+            let kids: Vec<String> = v["children"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
+            if kids.len() != n {
+                break 'check format!("{} of {n} children came up", kids.len());
+            }
+            for k in &kids {
+                let ok = self.slot(k).map(|s| {
+                    let r = s.view.read().unwrap();
+                    r.state == SlotState::Ready && !matches!(r.validity, Validity::Invalid { .. })
+                }).unwrap_or(false);
+                if !ok {
+                    break 'check format!("child {k} is no longer ready and valid");
+                }
+            }
+            // 4. the parent's desktop state hash still equals the one the children were checked against
+            let state_id = v["state"].as_str().unwrap_or("").to_string();
+            let want = self.ckpt(&state_id).ok().and_then(|c| c.expected_state_hash);
+            let port = slot.view.read().unwrap().port;
+            let th = Instant::now();
+            let now_hash = tokio::task::spawn_blocking(move || state_hash(&Guest::new(port, Duration::from_secs(10))).ok()).await.ok().flatten();
+            let hash_s = th.elapsed().as_secs_f64();
+            if want.is_none() || now_hash != want {
+                break 'check format!("the parent's state hash is {now_hash:?}, the children's reference {want:?}");
+            }
+            let mut v = v;
+            v["prefork"] = json!({"claimed": true, "age_s": round3(p.started.elapsed().as_secs_f64()), "in_flight_at_claim": in_flight,
+                                   "waited_s": round3(waited_s), "hash_check_s": round3(hash_s), "prepare_seconds": v["seconds"].clone(),
+                                   "claim_s": round3(t0.elapsed().as_secs_f64())});
+            v["seconds"] = json!(round3(t0.elapsed().as_secs_f64()));
+            self.metrics.inc("drumsd_prefork_total", &[("outcome", "claimed")], 1.0);
+            self.event(json!({"prefork": id, "claimed": v["prefork"].clone()}));
+            self.account(Some(&slot), |l| l.op("fork", t0.elapsed().as_secs_f64(), true));
+            return Some(v);
+        };
+        // not handed out: discard what it made, then the caller forks cold
+        self.discard_prefork(id, p, &why).await;
+        None
+    }
+
+    /// Close a prefork's children and delete its state (after it finishes, if still in flight).
+    async fn discard_prefork(self: &Arc<Self>, id: &str, p: Prefork, why: &str) {
+        let mut rx = p.done.clone();
+        let res = rx.wait_for(|v| v.is_some()).await.ok().and_then(|v| v.clone()).unwrap_or(Err("no result".into()));
+        let mut closed = vec![];
+        if let Ok(v) = &res {
+            for c in v["children"].as_array().cloned().unwrap_or_default() {
+                if let Some(k) = c["id"].as_str() {
+                    let r = self.destroy_why(k, Some(format!("prefork discarded: {why}"))).await;
+                    closed.push(json!({"env": k, "ok": r.is_ok()}));
+                }
+            }
+            if let Some(st) = v["state"].as_str() {
+                if !p.delete_state_with_children && self.ckpt(st).is_ok() {
+                    let _ = self.delete_checkpoint(st, false).await;
+                }
+            }
+        }
+        self.metrics.inc("drumsd_prefork_total", &[("outcome", "discarded")], 1.0);
+        self.event(json!({"prefork": id, "discarded": why, "closed": closed, "age_s": round3(p.started.elapsed().as_secs_f64())}));
+    }
+
+    /// Preforks nobody claimed within `max_age_s` are discarded (the reaper calls this).
+    async fn expire_preforks(self: &Arc<Self>, max_age_s: f64) -> usize {
+        let old: Vec<(String, Prefork)> = {
+            let mut m = self.preforks.lock().unwrap();
+            let ids: Vec<String> = m.iter().filter(|(_, p)| p.started.elapsed().as_secs_f64() > max_age_s).map(|(k, _)| k.clone()).collect();
+            ids.into_iter().filter_map(|k| m.remove(&k).map(|p| (k, p))).collect()
+        };
+        let n = old.len();
+        for (id, p) in old {
+            self.discard_prefork(&id, p, "not claimed in time").await;
+        }
+        n
+    }
+
     pub async fn quarantine(self: &Arc<Self>, id: &str, reason: String) -> R<SlotRecord> {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
@@ -2125,6 +2460,7 @@ impl Manager {
             return Ok(slot.view.read().unwrap().clone());
         }
         let st = begin_op(&slot, Op::Destroy)?;
+        self.took_input(&slot);
         self.finalize_episode(&slot);
         // what the env was when it was closed: decides whether its records are kept in full or as a summary
         let last = slot.view.read().unwrap().clone();
@@ -2236,6 +2572,10 @@ impl Manager {
     /// One pass of the reaper: destroy envs and delete saved states whose lease ran out. An env busy with an
     /// operation (its lock held) is in use and skipped; so is one in a transient state.
     pub async fn reap_once(self: &Arc<Self>) -> Value {
+        let expired = self.expire_preforks(self.cfg.prefork_max_age_s).await;
+        if expired > 0 {
+            self.event(json!({"preforks_expired": expired}));
+        }
         let now = drumsd_linux::now_epoch();
         let mut envs = vec![];
         for s in self.slots.read().unwrap().values() {
@@ -2431,6 +2771,7 @@ impl Manager {
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         begin_op(&slot, Op::Step)?;
+        self.took_input(&slot);
         let num = slot.view.read().unwrap().num;
         let me = self.clone();
         let t = task.clone();
@@ -2834,7 +3175,7 @@ impl Manager {
                     let _ = t.set_pid(rec.init_pid.unwrap());
                 }
             }
-            let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec2.clone()), targets, proxies: StdMutex::new(handles) });
+            let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec2.clone()), targets, proxies: StdMutex::new(handles) , inputs: std::sync::atomic::AtomicU64::new(0) });
             self.slots.write().unwrap().insert(id.clone(), slot.clone());
             self.put_slot(&slot, |_| {});
             // a pending alive gate of a still-running episode is judged now
@@ -3029,7 +3370,7 @@ pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64, forget: impl FnO
     if sp.dir.symlink_metadata().is_err() {
         return Ok(PathBuf::from(format!("slot{num}-* (moved by an earlier, interrupted destroy)")));
     }
-    for d in ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root"] {
+    for d in ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root", "softdirty-base", "softdirty-base.new"] {
         let p = sp.dir.join(d);
         if p.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&p)?;
@@ -3269,7 +3610,7 @@ mod tests {
                      restore_generation: 1, leaf: 1, mode: "template".into(), port: 25147, extra_ports: vec![], validity: gates.validity(&required_gates()), gates,
                      cost: CostRecord::default(), timings: BTreeMap::new(), last_error: None, task: None, ready_epoch: None, episode_start_epoch: None, created_epoch: 0.0,
                      updated_epoch: 0.0, task_setup_on_restore: false, usage: Ledger::default(), verified: None, closed_epoch: None, lease: None,
-                     last_used_epoch: None, closed_reason: None }
+                     last_used_epoch: None, closed_reason: None, dirty_base: None, dirty_depth: 0, dirty_base_uptime_us: None }
     }
 
     #[test]

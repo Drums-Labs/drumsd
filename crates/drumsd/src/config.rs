@@ -15,6 +15,15 @@ fn d_guest_port() -> u16 {
 fn d_alive() -> f64 {
     5.0
 }
+fn d_incr_depth() -> u32 {
+    8
+}
+fn d_prefork_age() -> f64 {
+    120.0
+}
+fn d_restore_weight() -> u32 {
+    10000
+}
 fn d_conc() -> usize {
     4
 }
@@ -87,6 +96,25 @@ pub struct Config {
     /// restore is no longer throttled to the env's own 4 vCPU.
     #[serde(default = "yes")]
     pub restore_cpu_boost: bool,
+    /// cpu.weight of the slot cgroup from the start of a restore (reset, create, fork child) to the end of its task
+    /// setup, and of the parent's slot cgroup during a capture's dump; put back to the default (100) after. Every slot
+    /// has weight 100, so on a CPU-saturated host a restore got about 1/N of the CPU the N busy envs share (CRIU
+    /// restore 1.5 s at 128 desktops vs 0.3 s idle, sota/t2 W2). 0 = off (no cpu.weight write). Default 10000.
+    #[serde(default = "d_restore_weight")]
+    pub restore_cpu_weight: u32,
+    /// A prefork (POST /v1/slots/:id/prefork) nobody claimed with a fork within this many seconds is discarded.
+    #[serde(default = "d_prefork_age")]
+    pub prefork_max_age_s: f64,
+    /// Incremental capture: every restore clears its tree's soft-dirty bits before any task runs (pre-resume), every
+    /// dump keeps tracking (`--track-mem`), and a capture is dumped on top of the env's last base (the images it was
+    /// restored from or last captured into, `--prev-images-dir`), writing only the pages written since. The parent
+    /// chain is pinned into the new checkpoint as hard links. A failed incremental dump is retried in full. false =
+    /// every capture is a full dump (sota/t2).
+    #[serde(default = "yes")]
+    pub incremental_capture: bool,
+    /// Longest parent chain an incremental capture may make; at this depth the next capture is a full dump.
+    #[serde(default = "d_incr_depth")]
+    pub incremental_max_depth: u32,
     /// drums-criu app-compat build: name `--nested-pidns` on restore (dump side is the capture verb's), so sandboxed
     /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.
     #[serde(default)]

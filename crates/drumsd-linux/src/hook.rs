@@ -74,8 +74,44 @@ pub fn hook_main(dir: &str) -> i32 {
         let _ = fs::write(Path::new(dir).join("cpu-restore.done"), serde_json::to_vec(&json!({"at": crate::now_epoch(), "errors": errs})).unwrap_or_default());
     }
     let rc = pre_resume(dir);
+    if Path::new(dir).join("softdirty-clear").exists() {
+        clear_soft_dirty(dir);
+    }
     note(dir, &action, start);
     rc
+}
+
+/// Clear the soft-dirty bits of every restored process while all of them are still stopped (pre-resume), so a later
+/// `criu dump --track-mem --prev-images-dir <the images restored from>` writes only the pages written since this
+/// restore. Result in `<dir>/softdirty-clear.done`: the pids cleared and any error; drumsd uses the restore as an
+/// incremental base only when the file says every process was cleared.
+fn clear_soft_dirty(dir: &str) {
+    let t0 = crate::now_epoch();
+    // the base's time for CRIU's pid-reuse check (--prev-images-uptime): read before the first clear, so every task
+    // restored here started before it and any task started after the restore is dumped in full
+    let uptime_us: Option<u64> = fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())).map(|s| (s * 1e6) as u64);
+    let root = std::env::var("CRTOOLS_INIT_PID").unwrap_or_default();
+    let mut errs: Vec<String> = vec![];
+    let mut done: Vec<i64> = vec![];
+    match root.parse::<i64>() {
+        Ok(pid) => {
+            let p = RealProc;
+            let (by_ns, _) = procfs::ns_members_and_procs(pid as i32);
+            let mut tree: Vec<i64> = by_ns.iter().chain(locks::children_walk(&p, pid).iter()).copied().chain(std::iter::once(pid)).collect();
+            tree.sort();
+            tree.dedup();
+            for t in tree {
+                match fs::write(format!("/proc/{t}/clear_refs"), "4") {
+                    Ok(()) => done.push(t),
+                    Err(e) => errs.push(format!("{t}: {e}")),
+                }
+            }
+        }
+        Err(e) => errs.push(format!("CRTOOLS_INIT_PID {root:?}: {e}")),
+    }
+    let rec = json!({"pids": done, "errors": errs, "ok": errs.is_empty() && !done.is_empty() && uptime_us.is_some(), "uptime_us": uptime_us,
+                     "seconds": crate::now_epoch() - t0});
+    let _ = fs::write(Path::new(dir).join("softdirty-clear.done"), serde_json::to_vec(&rec).unwrap_or_default());
 }
 
 /// Bring `lo` up inside the restored init's (empty) network namespace: the kernel then adds 127.0.0.1/8 and ::1
