@@ -8,6 +8,7 @@
 pub mod cgroup;
 pub mod guest;
 pub mod hook;
+pub mod idrange;
 pub mod pidfd;
 pub mod procfs;
 pub mod procview;

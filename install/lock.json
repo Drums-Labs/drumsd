@@ -83,10 +83,10 @@
   "sources": {
     "drums-criu": {
       "repo": "sahiljagtap08/drums-criu",
-      "branch": "rc1",
-      "commit": "b4fbfddf15b91997288c628abad2756e6368291e",
+      "branch": "sota/t4",
+      "commit": "bfdd3e062ee6dd497737c54dc0938c663ef66aa1",
       "tag": null,
-      "note": "rc1 = fix/pkeys-userns b4fbfddf1: drums-main 358380f66 + fix/ip6tables fbbd7c20a (a dump unlocks only the network lock it took) + fix/userns-slot (dump/restore of a slot in its own user namespace: 549eedbc4, 7cb53173f, tests 9ab683f62, a17b78241) + memory protection keys across C/R (dfb7ae3fa, ad88c44d2, f100f93c0, 52ac59456; tests b8859f65e, b4fbfddf1; the restored-Chrome crash in fork children). Gates: runbooks/userns-appcompat, fork-chrome-crash, rc1",
+      "note": "sota/t4 bfdd3e062 = rc1 b4fbfddf1 + --userns-remap (c35422e0f..bfdd3e062: restore into another host uid range, for drumsd idrange; T4). rc1 = fix/pkeys-userns b4fbfddf1: drums-main 358380f66 + fix/ip6tables fbbd7c20a (a dump unlocks only the network lock it took) + fix/userns-slot (dump/restore of a slot in its own user namespace: 549eedbc4, 7cb53173f, tests 9ab683f62, a17b78241) + memory protection keys across C/R (dfb7ae3fa, ad88c44d2, f100f93c0, 52ac59456; tests b8859f65e, b4fbfddf1; the restored-Chrome crash in fork children). Gates: runbooks/userns-appcompat, fork-chrome-crash, rc1",
       "reference_binary_sha256": "informational only",
       "reference_binary_note": "CRIU builds are not byte-reproducible; the installer prints its own build's sha256"
     },

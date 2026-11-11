@@ -122,9 +122,10 @@ fs.pipe-user-pages-soft = 0
 EOF
 sysctl -q --system
 # the hardened slot profile: root (the launcher) may map the slots' host uid/gid ranges (newuidmap enforces this even for
-# root); 100 slots of 65536 from 100000 (drums-lab harden.subid_delegation_lines). Restored envs share the origin's range.
+# root). 1000 ranges of 65536 from 100000: the origin's (drums-lab harden.subid_base) and one of its own for every env and
+# saved state (drumsd idrange.rs picks only ranges inside this delegation). The older 100-range line is kept if present.
 for f in /etc/subuid /etc/subgid; do
-  grep -qx 'root:100000:6553600' "$f" 2>/dev/null || echo 'root:100000:6553600' >> "$f"
+  grep -qx 'root:100000:65536000' "$f" 2>/dev/null || echo 'root:100000:65536000' >> "$f"
 done
 printf 'nbd\noverlay\n' > /etc/modules-load.d/drums.conf
 modprobe nbd max_part=16 || die "modprobe nbd"; modprobe overlay || die "modprobe overlay"

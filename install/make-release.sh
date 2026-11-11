@@ -39,5 +39,8 @@ S=$(mktemp -d); trap 'rm -rf "$S"' EXIT
 git -C "$SDK" archive --format=tar "$(lk drums-sdk)" | tar -x -C "$S"
 python3 "$HERE/install/build_wheel.py" "$S" "$R/sdk" > /dev/null
 (cd "$R" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
-COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
+# no xattrs or macOS metadata in the tarball: bsdtar (macOS) needs --no-mac-metadata (and COPYFILE_DISABLE), which GNU tar
+# (Linux) does not know; GNU tar stores no xattrs unless asked and takes --no-xattrs.
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then TARX=(--no-xattrs); else TARX=(--no-mac-metadata --no-xattrs); fi
+COPYFILE_DISABLE=1 tar "${TARX[@]}" -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
 sha256sum "$R.tar.gz"
