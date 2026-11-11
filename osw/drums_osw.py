@@ -286,17 +286,187 @@ def lab_score(out) -> tuple:
     return float(out), info
 
 
+def lab_function(req, verifier, function):
+    mod = load_verifier(req.get("verifiers_dir") or DEFAULT_VERIFIERS_DIR, verifier)
+    fn = getattr(mod, function or "reward", None)
+    if not callable(fn):
+        raise AttributeError(f"verifier {verifier!r} has no function {function or 'reward'!r}")
+    return fn
+
+
 def run_lab_verifier(env, task, req) -> dict:
     ev = task["evaluator"]
     if ev.get("postconfig"):
         if env.setup_controller.setup(ev["postconfig"], False) is False:
             raise RuntimeError("Postconfig setup failed")
-    mod = load_verifier(req.get("verifiers_dir") or DEFAULT_VERIFIERS_DIR, ev.get("verifier"))
-    fn = getattr(mod, ev.get("function") or "reward", None)
-    if not callable(fn):
-        raise AttributeError(f"verifier {ev.get('verifier')!r} has no function {ev.get('function') or 'reward'!r}")
+    fn = lab_function(req, ev.get("verifier"), ev.get("function"))
     ctx = Ctx(req["host"], req["server_port"], task, ev.get("options") or {}, env.cache_dir)
-    return lab_score(fn(ctx, **(ev.get("options") or {})))
+    return with_deadline(checker_deadline(ev), lambda: lab_score(fn(ctx, **(ev.get("options") or {}))))
+
+
+# ------------------------------------------------------------------------------------------------ reward audit
+# Every evaluate reply carries `audit` (drumsd returns it as the reward's `audit`): how far the score can be trusted,
+# measured on this rollout, never assumed. Each check runs only when it can run without changing the scored state:
+#   checker    the first call's seconds and error class (none | exception | timeout | bad_return)
+#   recheck    the same checker run a second time on the same state (lab verifiers always; OSWorld evaluators only
+#              without postconfig, whose actions could change the state); a different score is `nondeterministic`
+#   redundant  an independent second checker the task declares (`evaluator.redundant`: verifier, function,
+#              options); a different score is `redundant_disagree`
+#   scope      files under the task's declared roots compared with its start manifest (`evaluator.scope`: roots,
+#              manifest {path: sha256}, allow [globs], ignore [globs]); a change outside `allow` is `scope_violation`,
+#              a reward-hacking signal (the agent edited state the task did not ask for)
+# The scope scan runs in the desktop as the desktop user (stdlib python3): it is a signal, not a security boundary.
+AUDIT_VERSION = 1
+DEFAULT_CHECKER_DEADLINE_S = 90.0
+
+
+class CheckerTimeout(Exception):
+    pass
+
+
+def checker_deadline(ev) -> float:
+    try:
+        return float((ev or {}).get("deadline_s") or DEFAULT_CHECKER_DEADLINE_S)
+    except (TypeError, ValueError):
+        return DEFAULT_CHECKER_DEADLINE_S
+
+
+def with_deadline(seconds, fn):
+    """fn() with a wall-clock limit (SIGALRM; this helper is single-threaded). A checker over its limit raises
+    CheckerTimeout: a checker error of class `timeout`, never a score."""
+    import signal
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        return fn()
+
+    def on_alarm(signum, frame):  # noqa: ARG001
+        raise CheckerTimeout(f"checker exceeded its {seconds:g} s deadline")
+    old = signal.signal(signal.SIGALRM, on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return fn()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def error_class(e) -> str:
+    if e is None:
+        return "none"
+    if isinstance(e, CheckerTimeout):
+        return "timeout"
+    if isinstance(e, TypeError) and "a verifier must return" in str(e):
+        return "bad_return"
+    return "exception"
+
+
+SCOPE_SCAN = r"""
+import fnmatch, hashlib, json, os, sys
+req = json.loads(sys.argv[1]); out = {}
+for root in req["roots"]:
+    if not os.path.isdir(root):
+        continue
+    for d, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if not any(fnmatch.fnmatch(os.path.join(d, x), g) for g in req["ignore"]))
+        for f in sorted(files):
+            p = os.path.join(d, f)
+            if any(fnmatch.fnmatch(p, g) or fnmatch.fnmatch(f, g) for g in req["ignore"]):
+                continue
+            try:
+                if os.path.islink(p) or not os.path.isfile(p):
+                    out[p] = "special"; continue
+                if os.path.getsize(p) > req["max_bytes"]:
+                    out[p] = "size:%d" % os.path.getsize(p); continue
+                h = hashlib.sha256()
+                with open(p, "rb") as fh:
+                    for b in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(b)
+                out[p] = h.hexdigest()
+            except OSError as e:
+                out[p] = "error:%s" % e.__class__.__name__
+print(json.dumps(out))
+"""
+
+
+def scope_check(ctx, scope) -> dict:
+    """Compare the files under scope.roots with scope.manifest. Paths in the manifest are absolute."""
+    import fnmatch
+    roots = [r.rstrip("/") for r in scope.get("roots") or []]
+    manifest = scope.get("manifest") or {}
+    allow = list(scope.get("allow") or [])
+    ignore = list(scope.get("ignore") or []) + [".~lock.*#", "*/__pycache__"]
+    r = ctx.run(["python3", "-I", "-c", SCOPE_SCAN, json.dumps({"roots": roots, "ignore": ignore, "max_bytes": 64 << 20})],
+                timeout=60)
+    if r.get("returncode") != 0:
+        raise RuntimeError(f"scope scan failed: rc {r.get('returncode')}: {(r.get('error') or '')[:300]}")
+    now = json.loads((r.get("output") or "").strip().splitlines()[-1])
+    allowed = lambda p: any(fnmatch.fnmatch(p, g) for g in allow)  # noqa: E731
+    changed = sorted(p for p, h in now.items() if p in manifest and manifest[p] != h and not allowed(p))
+    deleted = sorted(p for p in manifest if p not in now and not allowed(p))
+    created = sorted(p for p in now if p not in manifest and not allowed(p))
+    return {"ran": True, "roots": roots, "files": len(now), "changed": changed[:50], "deleted": deleted[:50],
+            "created": created[:50], "violations": len(changed) + len(deleted) + len(created)}
+
+
+def audit_evaluate(env, task, req, score, err, t_first) -> dict:
+    ev = task.get("evaluator") or {}
+    flags = []
+    a = {"version": AUDIT_VERSION, "checker": {"seconds": round(t_first, 3), "error_class": error_class(err)},
+         "recheck": {"ran": False}, "redundant": {"ran": False}, "scope": {"ran": False}}
+    if err is not None:
+        flags.append("checker_timeout" if isinstance(err, CheckerTimeout) else "checker_crash")
+    lab = is_lab_task(task)
+    ctx = Ctx(req["host"], req["server_port"], task, ev.get("options") or {}, env.cache_dir) if lab or ev.get("scope") else None
+    # recheck: the same checker again on the same state
+    if err is None and (ev.get("audit_recheck", True) is not False):
+        if lab or not ev.get("postconfig"):
+            t0 = time.monotonic()
+            try:
+                if lab:
+                    fn = lab_function(req, ev.get("verifier"), ev.get("function"))
+                    s2, _ = with_deadline(checker_deadline(ev), lambda: lab_score(fn(ctx, **(ev.get("options") or {}))))
+                else:
+                    s2 = float(with_deadline(checker_deadline(ev), env._evaluate))
+                a["recheck"] = {"ran": True, "score": s2, "agree": s2 == score, "seconds": round(time.monotonic() - t0, 3)}
+                if s2 != score:
+                    flags.append("nondeterministic")
+            except Exception as e:  # noqa: BLE001
+                a["recheck"] = {"ran": True, "score": None, "agree": False, "error": f"{type(e).__name__}: {e}"[:300],
+                                "error_class": error_class(e), "seconds": round(time.monotonic() - t0, 3)}
+                flags.append("nondeterministic")
+        else:
+            a["recheck"] = {"ran": False, "skipped": "postconfig (a second run could change the state)"}
+    # redundant: an independent checker the task declares
+    red = ev.get("redundant")
+    if err is None and isinstance(red, dict) and lab:
+        t0 = time.monotonic()
+        try:
+            fn = lab_function(req, red.get("verifier") or ev.get("verifier"), red.get("function"))
+            opts = red.get("options") if red.get("options") is not None else (ev.get("options") or {})
+            rctx = Ctx(req["host"], req["server_port"], task, opts, env.cache_dir)
+            s3, info3 = with_deadline(checker_deadline(ev), lambda: lab_score(fn(rctx, **opts)))
+            a["redundant"] = {"ran": True, "checker": f"{red.get('verifier') or ev.get('verifier')}.{red.get('function')}",
+                              "score": s3, "agree": s3 == score, "seconds": round(time.monotonic() - t0, 3)}
+            if s3 != score:
+                flags.append("redundant_disagree")
+        except Exception as e:  # noqa: BLE001
+            a["redundant"] = {"ran": True, "score": None, "agree": False, "error": f"{type(e).__name__}: {e}"[:300],
+                              "error_class": error_class(e), "seconds": round(time.monotonic() - t0, 3)}
+            flags.append("redundant_disagree")
+    elif red is not None and not lab:
+        a["redundant"] = {"ran": False, "skipped": "redundant checkers are lab verifiers"}
+    # scope: state edits outside what the task asked for
+    if isinstance(ev.get("scope"), dict):
+        t0 = time.monotonic()
+        try:
+            a["scope"] = scope_check(ctx, ev["scope"])
+            a["scope"]["seconds"] = round(time.monotonic() - t0, 3)
+            if a["scope"]["violations"]:
+                flags.append("scope_violation")
+        except Exception as e:  # noqa: BLE001
+            a["scope"] = {"ran": True, "error": f"{type(e).__name__}: {e}"[:300], "seconds": round(time.monotonic() - t0, 3)}
+            flags.append("scope_unchecked")
+    a["flags"] = flags
+    return a
 
 
 def main(argv) -> dict:
@@ -338,18 +508,26 @@ def run_verb(verb, env, task, staged, t0, req=None) -> dict:
             r["error"] = "OSWorld setup returned False (a config step failed; see the helper log)"
         return r
     info = None
+    t1 = time.monotonic()
+    exc = None
     try:
         if is_lab_task(task):
             score, info = run_lab_verifier(env, task, req)
         else:
-            score = env._evaluate()
+            score = with_deadline(checker_deadline(task.get("evaluator")), env._evaluate)
         err = None
     except Exception as e:  # a checker error is its own outcome, never a score
-        score, err = None, f"{type(e).__name__}: {e}"[:800]
+        score, err, exc = None, f"{type(e).__name__}: {e}"[:800], e
+    t_first = time.monotonic() - t1
+    score = None if score is None else float(score)
     ev = task.get("evaluator") or {}
-    out = {"ok": True, "score": None if score is None else float(score), "checker_error": err,
+    try:
+        audit = audit_evaluate(env, task, req, score, exc, t_first)
+    except Exception as e:  # noqa: BLE001 - the audit never turns a score into an error
+        audit = {"version": AUDIT_VERSION, "error": f"{type(e).__name__}: {e}"[:300], "flags": ["audit_error"]}
+    out = {"ok": True, "score": score, "checker_error": err,
            "seconds": round(time.monotonic() - t0, 3), "osworld_commit": OSWORLD_COMMIT,
-           "postconfig_ran": bool(ev.get("postconfig"))}
+           "postconfig_ran": bool(ev.get("postconfig")), "audit": audit}
     if is_lab_task(task):
         out["verifier"] = f"{ev.get('verifier')}.{ev.get('function') or 'reward'}"
         out["info"] = info

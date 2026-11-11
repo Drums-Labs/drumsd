@@ -404,7 +404,7 @@ impl Manager {
         // the crash watch starts before any env is adopted or made: an episode it did not see from its start is never
         // vouched for (judge() reports it incomplete)
         let crash = if cfg.crash_watch {
-            Some(drumsd_linux::crashwatch::start().map_err(|e| format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on"))?)
+            Some(drumsd_linux::crashwatch::start(vec![cgroup::pool()]).map_err(|e| format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on"))?)
         } else {
             tracing::warn!("crash_watch is off: an app that crashes in an env does not make its episode invalid");
             None
@@ -2475,6 +2475,13 @@ impl Manager {
         };
         let secs = t0.elapsed().as_secs_f64();
         let skipped = quarantined.is_some();
+        let audit = reward_audit(&detail, score, err.as_deref(), valid, skipped);
+        for f in audit["flags"].as_array().cloned().unwrap_or_default() {
+            if let Some(f) = f.as_str() {
+                self.metrics.inc("drumsd_audit_flag_total", &[("flag", f)], 1.0);
+            }
+        }
+        self.metrics.inc("drumsd_audit_total", &[("trusted", if audit["trusted"] == true { "true" } else { "false" })], 1.0);
         self.account(Some(&slot), |l| {
             l.op("verify", secs, skipped || score.is_some());
             if skipped {
@@ -2486,12 +2493,16 @@ impl Manager {
                 }
             }
         });
+        // unattributed crashes the watch did not count against this episode (its tree ran no Chrome then): reported, so a
+        // valid verdict next to a crash elsewhere on the host is never silent
+        let crash_not_counted = self.crash_judgment(&slot).map(|(_, j)| j.excused).unwrap_or_default();
         let out = json!({
             "slot": v.id, "episode": v.episode, "task_id": tid, "score": score, "valid": valid,
-            "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "checker_skipped": detail.get("skipped"),
+            "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "crash_not_counted": crash_not_counted, "checker_skipped": detail.get("skipped"),
             "state": v.state.name(), "gates": v.gates, "checker_error": err,
             "checker": {"func": task["evaluator"]["func"], "osworld_commit": detail["osworld_commit"], "seconds": detail["seconds"],
                         "postconfig_ran": detail["postconfig_ran"], "verifier": detail.get("verifier"), "info": detail.get("info")},
+            "audit": audit,
             "seconds": round3(secs),
         });
         self.event(json!({"slot": v.id, "verify": {"episode": v.episode, "task": tid, "score": score, "valid": valid, "error": err}}));
@@ -3210,8 +3221,60 @@ pub fn b64(data: &[u8]) -> String {
     out
 }
 
+/// The reward's audit block: the helper's checks (recheck, redundant checker, scope) plus what only drumsd sees (the
+/// helper killed at its timeout, a helper failure, the episode's validity). `trusted` is true only for a valid
+/// episode whose checker returned a score with no audit flag. `flags` is the union.
+pub fn reward_audit(detail: &Value, score: Option<f64>, err: Option<&str>, valid: bool, skipped: bool) -> Value {
+    let mut a = match detail.get("audit") {
+        Some(Value::Object(m)) => Value::Object(m.clone()),
+        _ => json!({"version": 1, "recheck": {"ran": false}, "redundant": {"ran": false}, "scope": {"ran": false}}),
+    };
+    let mut flags: Vec<String> = a["flags"].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    let helper_reply = !detail.is_null();
+    if skipped {
+        flags.push("checker_skipped".into());
+    } else if !helper_reply {
+        // the helper itself failed: killed at drumsd's timeout, or no reply
+        let e = err.unwrap_or("");
+        flags.push(if e.contains("timed out after") { "checker_timeout".into() } else { "checker_crash".into() });
+        a["checker"] = json!({"error_class": if e.contains("timed out after") { "timeout" } else { "helper_failed" }});
+    }
+    if !valid {
+        flags.push("invalid_episode".into());
+    }
+    flags.sort();
+    flags.dedup();
+    let trusted = valid && score.is_some() && err.is_none() && flags.is_empty();
+    a["flags"] = json!(flags);
+    a["trusted"] = json!(trusted);
+    a
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reward_audit_marks_only_clean_valid_scores_trusted() {
+        use super::reward_audit;
+        use serde_json::json;
+        let ok = json!({"score": 1.0, "audit": {"version": 1, "flags": [], "recheck": {"ran": true, "agree": true}}});
+        let a = reward_audit(&ok, Some(1.0), None, true, false);
+        assert_eq!(a["trusted"], true);
+        assert_eq!(a["recheck"]["agree"], true);
+        let a = reward_audit(&ok, Some(1.0), None, false, false);
+        assert_eq!(a["trusted"], false);
+        assert_eq!(a["flags"], json!(["invalid_episode"]));
+        let flagged = json!({"score": 1.0, "audit": {"version": 1, "flags": ["scope_violation"]}});
+        let a = reward_audit(&flagged, Some(1.0), None, true, false);
+        assert_eq!((a["trusted"].clone(), a["flags"].clone()), (json!(false), json!(["scope_violation"])));
+        let a = reward_audit(&serde_json::Value::Null, None, Some("osw evaluate timed out after 600s"), true, false);
+        assert_eq!(a["flags"], json!(["checker_timeout"]));
+        assert_eq!(a["checker"]["error_class"], "timeout");
+        let a = reward_audit(&serde_json::Value::Null, None, Some("osw evaluate exit Some(1), no reply"), true, false);
+        assert_eq!(a["flags"], json!(["checker_crash"]));
+        let a = reward_audit(&json!({"skipped": "quarantined: gate"}), None, None, false, true);
+        assert_eq!(a["flags"], json!(["checker_skipped", "invalid_episode"]));
+    }
 
     #[test]
     fn a_lost_checkpoint_is_not_held_by_down_or_quarantined_envs() {

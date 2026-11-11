@@ -223,8 +223,10 @@ pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, P
             set_limits(l, want)?;
         }
     }
-    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back
+    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back; a kill that
+    // drumsd did not see through (a restart) can leave a cgroup frozen
     for l in [&d, &a, &b] {
+        thaw(l)?;
         if read_limits(l)? != *want {
             set_limits(l, want)?;
         }
@@ -232,9 +234,28 @@ pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, P
     Ok((d, a, b))
 }
 
-/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting.
+/// Freeze the tree before it is killed. cgroup.kill sends SIGKILL to one task after another, and a Chrome thread
+/// that sees its peer die first (a broken IPC channel) hits a CHECK and dies of SIGTRAP before its own SIGKILL lands:
+/// an app crash during a teardown, with its whole tree reaped before anyone can read which cgroup it was in (T6).
+/// A frozen task runs no user code, and a fatal signal still ends it. Best effort: the kill does not depend on it.
+fn freeze_for_kill(d: &Path) {
+    let _ = write(&d.join("cgroup.freeze"), "1");
+}
+
+/// Undo [`freeze_for_kill`] once the cgroup is empty: the leaf is the next restore's target, and a frozen cgroup
+/// would freeze the restored tree.
+pub fn thaw(d: &Path) -> io::Result<()> {
+    let f = d.join("cgroup.freeze");
+    if f.exists() && read(&f)? != "0" {
+        write(&f, "0")?;
+    }
+    Ok(())
+}
+
+/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting; the tree is frozen first.
 pub fn kill_nowait(d: &Path) -> io::Result<bool> {
     if d.is_dir() && populated(d)? {
+        freeze_for_kill(d);
         write(&d.join("cgroup.kill"), "1")?;
         return Ok(true);
     }
@@ -249,6 +270,9 @@ pub fn wait_empty(d: &Path, timeout: Duration) -> io::Result<f64> {
             return kill_and_wait(d, Duration::from_secs(5)).map(|r| r.seconds + t0.elapsed().as_secs_f64());
         }
         std::thread::sleep(Duration::from_millis(2));
+    }
+    if d.is_dir() {
+        thaw(d)?;
     }
     Ok(t0.elapsed().as_secs_f64())
 }
@@ -278,6 +302,7 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
     let had = procs(d)?.len();
     let mut killed = false;
     if populated(d)? {
+        freeze_for_kill(d);
         write(&d.join("cgroup.kill"), "1")?;
         killed = true;
     }
@@ -287,6 +312,7 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+    thaw(d)?;
     Ok(KillReport { had_procs: had, killed, seconds: t0.elapsed().as_secs_f64() })
 }
 
@@ -305,6 +331,41 @@ pub fn memory_current(d: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fake_cg(name: &str, populated: bool, frozen: bool) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("drumsd-cg-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("cgroup.events"), format!("populated {}\nfrozen {}\n", populated as u8, frozen as u8)).unwrap();
+        fs::write(d.join("cgroup.freeze"), if frozen { "1" } else { "0" }).unwrap();
+        fs::write(d.join("cgroup.kill"), "").unwrap();
+        fs::write(d.join("cgroup.procs"), "").unwrap();
+        d
+    }
+
+    #[test]
+    fn a_kill_freezes_the_tree_first_so_no_app_sees_its_peers_die() {
+        // T6: cgroup.kill SIGKILLs one task after another; a Chrome thread that saw its peer die hit a CHECK and died
+        // of SIGTRAP before its own SIGKILL, a crash during teardown that no one could attribute
+        let d = fake_cg("kill", true, false);
+        assert!(kill_nowait(&d).unwrap());
+        assert_eq!(read(&d.join("cgroup.freeze")).unwrap(), "1", "frozen before the kill");
+        assert_eq!(read(&d.join("cgroup.kill")).unwrap(), "1");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_emptied_leaf_is_thawed_before_anything_is_restored_into_it() {
+        // the leaf that was frozen and killed is the next restore's target: a frozen leaf would freeze the new tree
+        let d = fake_cg("thaw", false, true);
+        wait_empty(&d, Duration::from_secs(1)).unwrap();
+        assert_eq!(read(&d.join("cgroup.freeze")).unwrap(), "0");
+        let e = fake_cg("thaw2", false, true);
+        kill_and_wait(&e, Duration::from_secs(1)).unwrap();
+        assert_eq!(read(&e.join("cgroup.freeze")).unwrap(), "0");
+        for x in [d, e] {
+            let _ = fs::remove_dir_all(&x);
+        }
+    }
     #[test]
     fn limits_match_launch_py() {
         assert_eq!(
