@@ -128,16 +128,31 @@ pub fn run(self_exe: &Path, s: &RestoreSpec, timeout: Duration) -> io::Result<Re
     let out = fs::File::create(&s.out)?;
     let err = out.try_clone()?;
     let mut child = Command::new(self_exe).args(client_args(s)?).stdin(Stdio::null()).stdout(out).stderr(err).spawn()?;
-    let status = loop {
-        if let Some(st) = child.try_wait()? {
-            break Some(st);
+    // Wait on a pidfd (one poll, woken at the exit) instead of polling waitid every 2 ms: at 128 desktops with 16
+    // restores in flight that polling was ~8,000 waitid/s, each taking the kernel's global tasklist_lock for reading,
+    // which every fork and exit on the host (CRIU's own restore forks included) must take for writing (perf, T2b W2:
+    // 3.9 % of all host CPU spinning on it from drumsd's Child::try_wait).
+    let status = match crate::pidfd::open(child.id() as i32) {
+        Ok(fd) => {
+            if crate::pidfd::wait_exit(&fd, timeout.saturating_sub(t0.elapsed())) {
+                Some(child.wait()?)
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            }
         }
-        if t0.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(2));
+        Err(_) => loop {
+            if let Some(st) = child.try_wait()? {
+                break Some(st);
+            }
+            if t0.elapsed() > timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        },
     };
     let text = fs::read_to_string(&s.out).unwrap_or_default();
     let tail: String = text.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();

@@ -168,6 +168,13 @@ pub fn link_images(src: &Path, dst: &Path) -> io::Result<usize> {
             continue;
         }
         let ft = e.file_type()?;
+        if ft.is_dir() && name == "parent" {
+            // an incremental checkpoint's parent chain (pinned by pin_parent): linked the same way, recursively,
+            // with the access of the parent dir (a hardened restore opens it from inside the slot's user namespace)
+            n += link_images(&e.path(), &dst.join(&name))?;
+            parent_access(&e.path(), &dst.join(&name))?;
+            continue;
+        }
         if !ft.is_file() {
             return Err(io::Error::other(format!("unexpected non-file {:?} in images", e.path())));
         }
@@ -175,6 +182,51 @@ pub fn link_images(src: &Path, dst: &Path) -> io::Result<usize> {
         n += 1;
     }
     Ok(n)
+}
+
+/// An incremental dump (`criu dump --prev-images-dir REL`) leaves `images/parent` as a symlink to the images it was
+/// taken on top of, which belong to another slot and may be deleted first. Replace the symlink with a directory of
+/// hard links of the parent's files (recursively, its own chain too), so the checkpoint is complete on its own.
+/// Returns the chain depth (0 = no parent).
+pub fn pin_parent(images: &Path) -> io::Result<u32> {
+    let link = images.join("parent");
+    match fs::symlink_metadata(&link) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+        Ok(m) if m.file_type().is_symlink() => {
+            let target = fs::read_link(&link)?;
+            let target = if target.is_absolute() { target } else { images.join(target) };
+            let target = fs::canonicalize(&target)?;
+            let tmp = images.join("parent.pin");
+            if tmp.symlink_metadata().is_ok() {
+                fs::remove_dir_all(&tmp)?;
+            }
+            link_images(&target, &tmp)?;
+            parent_access(&target, &tmp)?;
+            fs::remove_file(&link)?;
+            fs::rename(&tmp, &link)?;
+        }
+        Ok(_) => {}
+    }
+    Ok(chain_depth(images))
+}
+
+/// A pinned parent dir gets the owner, group and mode of the images dir it was linked from. CRIU opens `parent` by
+/// name from inside a hardened slot's user namespace (SysV shm pages, files' private pages), as the slot's mapped
+/// root: a root-only 0700 dir (link_images' default) refuses that with EACCES.
+fn parent_access(src: &Path, dst: &Path) -> io::Result<()> {
+    copy_access(src, dst)
+}
+
+/// How many `parent` levels the images have (0 = a complete, non-incremental checkpoint).
+pub fn chain_depth(images: &Path) -> u32 {
+    let mut d = 0;
+    let mut p = images.join("parent");
+    while p.is_dir() {
+        d += 1;
+        p = p.join("parent");
+    }
+    d
 }
 
 fn cp_a(src: &Path, dst: &Path) -> io::Result<()> {
@@ -334,6 +386,36 @@ pub fn image_inodes(images: &Path) -> io::Result<Vec<(String, u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_incremental_checkpoint_keeps_its_parent_chain_as_hard_links() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let (base, mid, top, kid) = (d.path().join("s1/images"), d.path().join("s2/images"), d.path().join("s3/images"), d.path().join("s4/images"));
+        for x in [&base, &mid, &top] {
+            fs::create_dir_all(x).unwrap();
+        }
+        fs::create_dir_all(kid.parent().unwrap()).unwrap();
+        fs::write(base.join("pages-1.img"), b"base").unwrap();
+        fs::write(mid.join("pages-1.img"), b"mid").unwrap();
+        std::os::unix::fs::symlink("../../s1/images", mid.join("parent")).unwrap();
+        assert_eq!(pin_parent(&mid).unwrap(), 1);
+        fs::write(top.join("pages-1.img"), b"top").unwrap();
+        std::os::unix::fs::symlink("../../s2/images", top.join("parent")).unwrap();
+        assert_eq!(pin_parent(&top).unwrap(), 2);
+        assert!(!fs::symlink_metadata(top.join("parent")).unwrap().file_type().is_symlink());
+        // the parents' files are the same inodes, and deleting the parent slots leaves the chain whole
+        assert_eq!(fs::metadata(top.join("parent/parent/pages-1.img")).unwrap().ino(), fs::metadata(base.join("pages-1.img")).unwrap().ino());
+        fs::remove_dir_all(d.path().join("s1")).unwrap();
+        fs::remove_dir_all(d.path().join("s2")).unwrap();
+        assert_eq!(fs::read(top.join("parent/parent/pages-1.img")).unwrap(), b"base");
+        // a child's images link the chain too
+        assert_eq!(link_images(&top, &kid).unwrap(), 3);
+        assert_eq!(chain_depth(&kid), 2);
+        assert_eq!(fs::read(kid.join("parent/pages-1.img")).unwrap(), b"mid");
+        // a complete checkpoint has depth 0 and pinning is a no-op
+        assert_eq!(pin_parent(&kid.join("parent/parent")).unwrap(), 0);
+    }
 
     #[test]
     fn a_branch_gets_the_access_of_its_origin_dirs() {

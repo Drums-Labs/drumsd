@@ -98,7 +98,11 @@ mapfile -t PKGS < <(python3 -c "import json; d=json.load(open('$LOCK'))['apt']['
 RETRY_LOG_DIR="$D"; mkdir -p "$D"
 say "apt: ${#PKGS[@]} pinned packages from snapshot.ubuntu.com ($SNAP); 1-10 min depending on the snapshot service"
 with_progress "apt update" retry "apt update (snapshot $SNAP)" apt-get update -qq --snapshot "$SNAP" || die "apt update (snapshot $SNAP), ${DRUMS_RETRY_ATTEMPTS:-5} attempts"
-with_progress "apt install" retry "apt install" apt-get install -y -qq --no-install-recommends --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
+# --allow-downgrades: an install over a host where unattended-upgrades moved a pinned package (sota-t2b-a: ca-certificates,
+# python3-pil) is put back to the pinned version; the lock, not the host, decides. The timer is stopped below so it
+# does not happen again on a Drums host (a reinstall on a stale host is the owner's call, with the pins).
+with_progress "apt install" retry "apt install" apt-get install -y -qq --no-install-recommends --allow-downgrades --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
+systemctl disable --now unattended-upgrades.service apt-daily-upgrade.timer apt-daily.timer > /dev/null 2>&1 || true
 for pv in "${PKGS[@]}"; do
   p=${pv%%=*}; want=${pv#*=}; got=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || true)
   [ "$got" = "$want" ] || die "package $p is $got, pinned $want"
@@ -274,7 +278,9 @@ EOF
 chmod 0600 "$E/token"
 # concurrent CRIU restores: 4 on the 16-vCPU host this was tuned on; one per 4 vCPUs on larger hosts (at 64 vCPU
 # and 64 envs, 4 at a time queued fork children and resets for tens of seconds)
-RESTORES=$(( $(nproc) / 4 )); [ "$RESTORES" -ge 4 ] || RESTORES=4
+# sota/t2b: with the restore's cpu.weight boost, more permits than nproc/4 no longer queue (16/24/32/48 measured at
+# 128 desktops on 64 vCPU: queue wait 0 from 24 up, reset p99 the same within noise); one per 2.7 vCPUs, at least 4
+RESTORES=$(( $(nproc) * 3 / 8 )); [ "$RESTORES" -ge 4 ] || RESTORES=4
 LISTEN="127.0.0.1:$PORT"; ALLOW=false
 [ "$REMOTE" = 1 ] && { LISTEN="0.0.0.0:$PORT"; ALLOW=true; }
 OSW_UID=$(id -u drums-osw); OSW_GID=$(id -g drums-osw)

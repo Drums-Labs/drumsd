@@ -13,7 +13,9 @@
 //! the parent with it, so /proc can no longer answer. A census thread therefore reads every slot cgroup's
 //! `cgroup.procs` every [`CENSUS_EVERY_MS`] and remembers which tgid lived in which cgroup (and its comm) for
 //! [`CENSUS_KEEP_S`] after it was last seen; an exit /proc cannot place is attributed from the census (the task, else
-//! its parent).
+//! its parent). The watch also remembers the cgroup of every plain (non-crash) process exit it saw for a few seconds
+//! ([`EXITED_KEEP_S`]): when a whole tree is torn down the kernel reports the exits in any order, and a renderer that
+//! dies of a crash signal after its parent is gone and reaped is placed through that remembered parent.
 //!
 //! An exit that neither /proc nor the census can place counts against every episode whose tree ran Chrome in the
 //! last fresh census pass (the crash signals seen are Chrome's), and is recorded as not counted for the others. With no
@@ -43,6 +45,9 @@ pub const CRASH_SIGNALS: [i32; 7] = [libc::SIGILL, libc::SIGTRAP, libc::SIGABRT,
 /// How many events are kept (oldest dropped first). An episode is judged against the events since its start, which
 /// are the newest; the count of dropped-by-age events is kept so a judgment can never miss one silently.
 pub const KEEP: usize = 4096;
+/// How many plain exits' cgroups are remembered, and for how long.
+const EXITED_KEEP: usize = 20_000;
+const EXITED_KEEP_S: f64 = 15.0;
 
 /// How often the census reads the slots' cgroups (which process lives in which cgroup).
 pub const CENSUS_EVERY_MS: u64 = 200;
@@ -71,7 +76,8 @@ pub struct CrashEvent {
     /// when neither the task nor its parent could be read (unattributed).
     pub cgroup: Option<String>,
     /// Where the cgroup came from: "task" or "parent" (read from /proc at once), "census" or "census-parent" (the
-    /// census pass that last saw the task or its parent).
+    /// census pass that last saw the task or its parent), or "remembered exit" (the plain exit of the task or its
+    /// parent that the watch saw a moment before).
     pub cgroup_from: Option<String>,
     /// Only for an unattributed crash: the cgroups that ran Chrome in the last census pass, or None when there was no
     /// fresh pass (then the crash counts against every episode).
@@ -109,12 +115,17 @@ pub struct Overflow {
 struct Inner {
     events: VecDeque<CrashEvent>,
     dropped_by_age: u64,
+    /// cgroup of every process whose exit was seen while /proc still had it, kept for a few seconds: when a whole env
+    /// tree is killed (close, reset) the kernel reports the exits in any order, and a renderer that died of a crash
+    /// signal a few ms after its zygote and browser are gone can only be placed through them (fresh-host replication of
+    /// T2b W1p: one such unattributed SIGTRAP marked every running episode incomplete).
+    exited_cg: VecDeque<(f64, i32, String)>,
     /// Epochs at which the kernel reported lost events (ENOBUFS).
     overflows: Vec<f64>,
     /// When the watch stopped (a fatal socket error): every episode since then is unjudgeable.
     stopped: Option<(f64, String)>,
     exits_seen: u64,
-    /// How each kept crash was attributed: task, parent, census, census-parent, chrome-fallback, none.
+    /// How each kept crash was attributed: task, parent, census, census-parent, remembered exit, chrome-fallback, none.
     attributed: std::collections::BTreeMap<String, u64>,
 }
 
@@ -204,11 +215,27 @@ impl CrashWatch {
     pub fn record_exit(&self, r: &ExitRecord, epoch: f64, read_cgroup: impl Fn(i32) -> Option<String>, read_comm: impl Fn(i32) -> Option<String>) {
         let mut g = self.inner.lock().unwrap();
         g.exits_seen += 1;
-        let Some((sig, core)) = crash_signal(r.exit_code) else { return };
+        let Some((sig, core)) = crash_signal(r.exit_code) else {
+            // a plain exit: remember where the process was, for crashes of its children reported after it is gone
+            if r.pid == r.tgid {
+                drop(g);
+                let c = read_cgroup(r.tgid);
+                let mut g = self.inner.lock().unwrap();
+                if let Some(c) = c {
+                    g.exited_cg.push_back((epoch, r.tgid, c));
+                }
+                while g.exited_cg.len() > EXITED_KEEP || g.exited_cg.front().map(|(t, _, _)| epoch - *t > EXITED_KEEP_S).unwrap_or(false) {
+                    g.exited_cg.pop_front();
+                }
+            }
+            return;
+        };
         // a fatal signal ends every thread of the group, each with the same status: keep one event per process
         if g.events.iter().rev().take(64).any(|e| e.tgid == r.tgid && e.signal == sig && (epoch - e.epoch).abs() < 5.0) {
             return;
         }
+        let remembered = |g: &Inner, tg: i32| g.exited_cg.iter().rev().find(|(_, t, _)| *t == tg).map(|(_, _, c)| c.clone());
+        let (rem_self, rem_parent) = (remembered(&g, r.tgid), remembered(&g, r.parent_tgid));
         drop(g);
         let (census_task, census_parent, chrome, fresh) = {
             let c = self.census.lock().unwrap();
@@ -223,7 +250,12 @@ impl CrashWatch {
                 None => match (&census_task, &census_parent) {
                     (Some(e), _) => (Some(e.cgroup.clone()), Some("census".to_string())),
                     (None, Some(e)) => (Some(e.cgroup.clone()), Some("census-parent".to_string())),
-                    _ => (None, None),
+                    // neither /proc nor the census knows the task or its parent: a parent whose plain exit the watch
+                    // saw a moment ago (a tree torn down by close or reset, exits reported in any order)
+                    _ => match rem_self.or(rem_parent) {
+                        Some(c) => (Some(c), Some("remembered exit".to_string())),
+                        None => (None, None),
+                    },
                 },
             },
         };
@@ -539,6 +571,28 @@ mod tests {
         assert!(w.judge(slot, t0 + 2.0).clean());
         // a similar prefix is not a sub-cgroup
         assert!(w.judge("/system.slice/drumsbench-pool.scope/drumsbench-m-1-pool.scope/drumsbench-m-1-r", t0).clean());
+    }
+
+    #[test]
+    fn a_crash_after_its_tree_is_gone_is_placed_through_a_remembered_exit() {
+        let w = CrashWatch::new_for_test();
+        let t0 = w.started_epoch;
+        // the browser (pid 7, in /a) exits normally while /proc still has it; then its renderer dies of SIGTRAP after
+        // every /proc entry of the tree is gone
+        w.record_exit(&ExitRecord { pid: 7, tgid: 7, exit_code: 0, parent_pid: 1, parent_tgid: 1 }, t0 + 1.0, |p| (p == 7).then(|| "/a".to_string()), |_| None);
+        w.record_exit(&ExitRecord { pid: 9, tgid: 9, exit_code: 5, parent_pid: 7, parent_tgid: 7 }, t0 + 1.01, |_| None, |_| None);
+        let j = w.judge("/a", t0);
+        assert_eq!(j.crashes.len(), 1);
+        assert_eq!(j.crashes[0].cgroup_from.as_deref(), Some("remembered exit"));
+        assert!(j.incomplete.is_empty(), "{:?}", j.incomplete);
+        // an episode in another cgroup is untouched
+        let k = w.judge("/b", t0);
+        assert!(k.crashes.is_empty() && k.incomplete.is_empty());
+        // a remembered exit older than the window is forgotten
+        w.record_exit(&ExitRecord { pid: 30, tgid: 30, exit_code: 0, parent_pid: 1, parent_tgid: 1 }, t0 + 1.0, |_| Some("/c".into()), |_| None);
+        w.record_exit(&ExitRecord { pid: 31, tgid: 31, exit_code: 0, parent_pid: 1, parent_tgid: 1 }, t0 + 100.0, |_| Some("/d".into()), |_| None);
+        w.record_exit(&ExitRecord { pid: 32, tgid: 32, exit_code: 5, parent_pid: 30, parent_tgid: 30 }, t0 + 100.0, |_| None, |_| None);
+        assert_eq!(w.judge("/c", t0 + 50.0).incomplete.len(), 1);
     }
 
     #[test]
