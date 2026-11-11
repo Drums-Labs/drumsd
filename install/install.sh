@@ -123,8 +123,9 @@ fs.inotify.max_user_watches = 4194304
 # size: Operation not permitted"). Every env restored from one image used to run as the same host uids (hardened: 100000+),
 # and even with one uid range per env (idrange.rs) the origin's range is shared by its live children at fork time:
 # fork children of LibreOffice desktops failed at 12 concurrent forks (drums-info sota/t6 20261108T0659Z); 79 of 1,972
-# resets and 74 of 176 creates failed at 128 desktops (drums-info sota/t2). Pipe buffers are charged to the writer's
-# memory cgroup (the env's), so memory.max still bounds them; 0 = no soft limit.
+# resets and 74 of 176 creates failed at 128 desktops (drums-info sota/t2); every restore failed past ~250 desktops on
+# one r8i.16xlarge (sota/t3 smoke1). Pipe buffers are charged to the writer's memory cgroup (the env's), so memory.max
+# still bounds them; 0 = no soft limit.
 fs.pipe-user-pages-soft = 0
 EOF
 sysctl -q --system
