@@ -48,6 +48,9 @@ pub struct RestoreSpec {
     /// The checkpoint's slot ran in its own user namespace (the hardened profile, drums-lab harden.py): its overlay keeps
     /// its metadata in user.overlay xattrs, so the restore root is mounted with `userxattr` (criu_root.overlay_options).
     pub userxattr: bool,
+    /// CRIU's log level (`-vN`). 4 logs every debug line (about 150k lines per desktop restore, ~0.1 s of it); 3
+    /// keeps every pr_info line, which is everything the gates read (lock lines, `Restore finished successfully`).
+    pub log_level: u8,
 }
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
@@ -69,6 +72,10 @@ pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
         // launch.py (app-compat): ("--shell-job", "--tcp-close", "--manage-cgroups=ignore", "--nested-pidns", "-v4")
         if x == "-v4" && s.nested_pidns {
             v.push("--nested-pidns".into());
+        }
+        if x == "-v4" {
+            v.push(format!("-v{}", s.log_level.clamp(1, 4)));
+            continue;
         }
         v.push(x.to_string());
     }
@@ -313,6 +320,7 @@ mod tests {
             nested_pidns: false,
             externals: vec![],
             userxattr: false,
+            log_level: 4,
         }
     }
 
@@ -327,6 +335,8 @@ mod tests {
         assert!(!criu_argv(&s).contains(&"--file-locks".to_string()));
         s.empty_net = true;
         assert!(criu_argv(&s).windows(2).any(|w| w[0] == "--empty-ns" && w[1] == "net"));
+        s.log_level = 3;
+        assert!(criu_argv(&s).contains(&"-v3".to_string()) && !criu_argv(&s).contains(&"-v4".to_string()));
     }
 
     #[test]

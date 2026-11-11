@@ -77,17 +77,25 @@ pub struct Config {
     /// Two leaf cgroups per slot: a reset kills the old tree without waiting and restores into the other leaf.
     #[serde(default = "yes")]
     pub async_kill: bool,
-    /// Labelled variant: `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore.
-    #[serde(default)]
+    /// `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore (which execs ip and
+    /// iptables-restore for every network namespace of the tree, ~70 ms of a Chrome desktop restore). The netns gate
+    /// still compares links, addresses and routes with the dump. Default on since sota/t2; false = CRIU's restore.
+    #[serde(default = "yes")]
     pub netns_fast: bool,
-    /// Labelled variant: lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the
-    /// pre-resume action, before any restored task runs. The cgroup gate proves the limits afterwards.
-    #[serde(default)]
+    /// Lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the pre-resume action,
+    /// before any restored task runs; the cgroup gate proves the limits afterwards. Default on since sota/t2: the
+    /// restore is no longer throttled to the env's own 4 vCPU.
+    #[serde(default = "yes")]
     pub restore_cpu_boost: bool,
     /// drums-criu app-compat build: name `--nested-pidns` on restore (dump side is the capture verb's), so sandboxed
     /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.
     #[serde(default)]
     pub nested_pidns: bool,
+    /// CRIU log level for dumps (the capture verb's --dump-log-level), restores and template servers. 3 (default)
+    /// keeps every pr_info line, which is all the gates read; 4 adds the debug lines (~250k per desktop dump, about
+    /// 0.1 s of each dump and each restore). The verb refuses below 3.
+    #[serde(default = "d_criu_log")]
+    pub criu_log_level: u8,
     /// The `no_app_crash` gate: watch the kernel's process events for exits by crash signal (SIGSEGV, SIGILL, ...) in
     /// env trees. On by default; drumsd refuses to start when it cannot open the watch. Turn it off only on a host
     /// whose rewards nobody trains on: without it, an env whose app crashed can return a valid reward.
@@ -261,12 +269,24 @@ pub struct QuiesceConfig {
     /// check runs as soon as the checkpoint is adopted.
     #[serde(default)]
     pub confirm_s: f64,
+    /// Prove the window from the kernel's process events (drumsd_linux::activity) when they cover it, so a tree that
+    /// has been quiet for the window already is captured at once; false = always sample the full window.
+    #[serde(default = "yes_q")]
+    pub events: bool,
+}
+
+fn yes_q() -> bool {
+    true
 }
 
 impl Default for QuiesceConfig {
     fn default() -> Self {
-        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0 }
+        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0, events: true }
     }
+}
+
+fn d_criu_log() -> u8 {
+    3
 }
 
 fn d_q_window() -> f64 {

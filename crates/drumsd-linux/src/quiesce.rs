@@ -85,6 +85,74 @@ pub fn wait(cg: &Path, p: &Params) -> io::Result<(Report, Option<Sample>)> {
     }
 }
 
+/// Event-assisted wait. The activity watch says how long no task of the tree has started or exited; once that covers
+/// the window, one sample must show no task on its way out (`PF_EXITING`, state X) and a non-empty tree, and that
+/// sample is the tree a following dump must match. A task found leaving keeps the wait going (its exit is an event
+/// and restarts the window). When the watch can not vouch for the window (it stopped, dropped or could not attribute
+/// an event, or started too recently) the sampler (`wait`) runs for the remaining time instead; the report says so.
+pub fn wait_with(cg: &Path, p: &Params, watch: Option<&crate::activity::ActivityWatch>) -> io::Result<(Report, Option<Sample>)> {
+    let Some(w) = watch else { return wait(cg, p) };
+    let t0 = Instant::now();
+    let cgs = cg.display().to_string();
+    let mut rep = Report { window_s: p.window_s, timeout_s: p.timeout_s, basis: Some("events".into()), ..Default::default() };
+    let mut ms_total = 0.0;
+    let mut last_issues: Vec<drumsd_core::quiesce::Unstable> = vec![];
+    loop {
+        let left = p.timeout_s - t0.elapsed().as_secs_f64();
+        match w.quiet_for(&cgs, crate::now_epoch(), p.window_s) {
+            Err(why) => {
+                let mut p2 = p.clone();
+                p2.timeout_s = left.max(0.0);
+                let before = t0.elapsed().as_secs_f64();
+                let (mut r, s) = wait(cg, &p2)?;
+                r.waited_s += before;
+                r.events_fallback = Some(why);
+                return Ok((r, s));
+            }
+            Ok(q) if q >= p.window_s => {
+                let ts = Instant::now();
+                let s = sample(cg)?;
+                ms_total += ts.elapsed().as_secs_f64() * 1000.0;
+                rep.samples += 1;
+                rep.sample_ms_mean = ms_total / rep.samples as f64;
+                rep.processes = s.processes().len();
+                rep.threads = s.n_threads();
+                let mut bad = drumsd_core::quiesce::kernel_issues(&s);
+                if s.tasks.is_empty() {
+                    bad.push(drumsd_core::quiesce::Unstable { kind: "empty".into(), pid: 0, tid: None, comm: "no task in the slot's cgroup".into() });
+                }
+                rep.waited_s = t0.elapsed().as_secs_f64();
+                if bad.is_empty() {
+                    rep.quiescent = true;
+                    rep.quiet_for_s = Some((q * 1000.0).round() / 1000.0);
+                    return Ok((rep, Some(s)));
+                }
+                rep.restarts += 1;
+                for b in &bad {
+                    if rep.seen.len() < 50 {
+                        rep.seen.push(b.clone());
+                    }
+                }
+                last_issues = bad;
+                if left <= 0.0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(p.poll_ms.max(1)));
+            }
+            Ok(q) => {
+                if left <= 0.0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs_f64((p.window_s - q).clamp(0.001, left.max(0.001))));
+            }
+        }
+    }
+    rep.waited_s = t0.elapsed().as_secs_f64();
+    last_issues.truncate(50);
+    rep.unstable = last_issues;
+    Ok((rep, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

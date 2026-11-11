@@ -89,7 +89,7 @@ pub fn exe_replaced(exe: &Path) -> bool {
     exe.to_string_lossy().ends_with(" (deleted)")
 }
 
-pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path) -> io::Result<Server> {
+pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path, log_level: u8) -> io::Result<Server> {
     cgroup::pool_init()?;
     if let Some(pid) = adopt(sock, images) {
         return Ok(Server { socket: sock.into(), pidfile: pidfile_for(sock), pid, images: images.into(), log: PathBuf::new(), ready_s: 0.0, cgroup: PathBuf::new(), memory_current: 0 });
@@ -115,7 +115,7 @@ pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path) -> io::Res
     }
     let t0 = Instant::now();
     let mut cmd = Command::new(criu);
-    cmd.args(["restore", "--template-server"]).arg(sock).arg("-D").arg(images).arg("-o").arg(&log).args(["-v4", "--pidfile"]).arg(&pidf);
+    cmd.args(["restore", "--template-server"]).arg(sock).arg("-D").arg(images).arg("-o").arg(&log).arg(format!("-v{}", log_level.clamp(1, 4))).arg("--pidfile").arg(&pidf);
     cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
     let procs = tcg.join("cgroup.procs");
     unsafe {
