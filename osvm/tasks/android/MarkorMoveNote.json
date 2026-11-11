@@ -1,0 +1,33 @@
+{
+ "id": "android/MarkorMoveNote",
+ "os": "android",
+ "instruction": "In Markor, move the note ideas.md into the folder archive.",
+ "source": "android_world@55ddaf5 task_evals/single/markor.py MarkorMoveNote",
+ "setup": [
+  "mkdir -p /sdcard/Documents/Markor",
+  "rm -rf /sdcard/Documents/Markor/*",
+  "mkdir -p /sdcard/Documents/Markor/archive",
+  "echo 'solar boat' > /sdcard/Documents/Markor/ideas.md"
+ ],
+ "check": [
+  {
+   "cmd": "cat /sdcard/Documents/Markor/archive/ideas.md",
+   "equals": "solar boat"
+  },
+  {
+   "cmd": "test -e /sdcard/Documents/Markor/ideas.md && echo present || echo absent",
+   "equals": "absent"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "mv /sdcard/Documents/Markor/ideas.md /sdcard/Documents/Markor/archive/ideas.md"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "net.gsantner.markor"
+ ],
+ "max_steps": 10
+}

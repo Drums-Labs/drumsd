@@ -1,0 +1,24 @@
+{
+ "id": "android/AirplaneModeOn",
+ "os": "android",
+ "instruction": "Turn on airplane mode.",
+ "source": "AndroidWorld-style (system settings)",
+ "setup": [
+  "cmd connectivity airplane-mode disable"
+ ],
+ "check": [
+  {
+   "cmd": "settings get global airplane_mode_on",
+   "equals": "1"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "cmd connectivity airplane-mode enable"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

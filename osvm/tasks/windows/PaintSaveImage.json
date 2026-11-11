@@ -1,0 +1,24 @@
+{
+ "id": "windows/PaintSaveImage",
+ "os": "windows",
+ "instruction": "Save a new image named canvas.png in Pictures.",
+ "source": "WindowsAgentArena-style, domain microsoft_paint (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Remove-Item -Force (Join-Path ([Environment]::GetFolderPath('MyPictures')) 'canvas.png') -ErrorAction SilentlyContinue; exit 0"
+ ],
+ "check": [
+  {
+   "cmd": "$b=[IO.File]::ReadAllBytes((Join-Path ([Environment]::GetFolderPath('MyPictures')) 'canvas.png')); '{0:X2}{1:X2}{2:X2}{3:X2}' -f $b[0],$b[1],$b[2],$b[3]",
+   "equals": "89504E47"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Add-Type -A System.Drawing; $bm=New-Object Drawing.Bitmap 64,64; $bm.Save((Join-Path ([Environment]::GetFolderPath('MyPictures')) 'canvas.png'), [Drawing.Imaging.ImageFormat]::Png)"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

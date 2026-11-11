@@ -1,0 +1,29 @@
+{
+ "id": "android/FilesDeleteFile",
+ "os": "android",
+ "instruction": "Delete the file report_2023.txt from the Download folder.",
+ "source": "android_world@55ddaf5 task_evals/single/files.py FilesDeleteFile",
+ "setup": [
+  "mkdir -p /sdcard/Download",
+  "echo quarterly > /sdcard/Download/report_2023.txt"
+ ],
+ "check": [
+  {
+   "cmd": "test -e /sdcard/Download/report_2023.txt && echo present || echo absent",
+   "equals": "absent"
+  },
+  {
+   "cmd": "test -d /sdcard/Download && echo dir || echo nodir",
+   "equals": "dir"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "rm /sdcard/Download/report_2023.txt"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

@@ -1,0 +1,24 @@
+{
+ "id": "windows/FileExplorerShowExtensions",
+ "os": "windows",
+ "instruction": "Make File Explorer show file name extensions.",
+ "source": "WindowsAgentArena-style, domain file_explorer (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced' HideFileExt 1"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced').HideFileExt",
+   "equals": "0"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced' HideFileExt 0"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

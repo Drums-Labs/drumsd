@@ -1,0 +1,33 @@
+{
+ "id": "android/MarkorDeleteNote",
+ "os": "android",
+ "instruction": "Delete the note old_todo.md in Markor.",
+ "source": "android_world@55ddaf5 task_evals/single/markor.py MarkorDeleteNote",
+ "setup": [
+  "mkdir -p /sdcard/Documents/Markor",
+  "rm -rf /sdcard/Documents/Markor/*",
+  "echo 'call bank' > /sdcard/Documents/Markor/old_todo.md",
+  "echo 'keep me' > /sdcard/Documents/Markor/keep.md"
+ ],
+ "check": [
+  {
+   "cmd": "test -e /sdcard/Documents/Markor/old_todo.md && echo present || echo absent",
+   "equals": "absent"
+  },
+  {
+   "cmd": "cat /sdcard/Documents/Markor/keep.md",
+   "equals": "keep me"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "rm /sdcard/Documents/Markor/old_todo.md"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "net.gsantner.markor"
+ ],
+ "max_steps": 10
+}

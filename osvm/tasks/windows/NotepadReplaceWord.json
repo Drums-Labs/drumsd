@@ -1,0 +1,24 @@
+{
+ "id": "windows/NotepadReplaceWord",
+ "os": "windows",
+ "instruction": "In story.txt on the Desktop, replace the word 'cat' with 'dog'.",
+ "source": "WindowsAgentArena-style, domain notepad (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'story.txt') 'the cat sat'"
+ ],
+ "check": [
+  {
+   "cmd": "Get-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'story.txt')",
+   "equals": "the dog sat"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'story.txt') 'the dog sat'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

@@ -1,0 +1,24 @@
+{
+ "id": "windows/SettingsDarkModeApps",
+ "os": "windows",
+ "instruction": "Switch apps to dark mode.",
+ "source": "WindowsAgentArena-style, domain settings (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize' AppsUseLightTheme 1"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize').AppsUseLightTheme",
+   "equals": "0"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize' AppsUseLightTheme 0"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

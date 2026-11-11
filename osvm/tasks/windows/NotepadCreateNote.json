@@ -1,0 +1,24 @@
+{
+ "id": "windows/NotepadCreateNote",
+ "os": "windows",
+ "instruction": "Create todo.txt on the Desktop containing the text 'buy milk'.",
+ "source": "WindowsAgentArena-style, domain notepad (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Remove-Item -Force (Join-Path ([Environment]::GetFolderPath('Desktop')) 'todo.txt') -ErrorAction SilentlyContinue; exit 0"
+ ],
+ "check": [
+  {
+   "cmd": "Get-Content -Raw (Join-Path ([Environment]::GetFolderPath('Desktop')) 'todo.txt')",
+   "contains": "buy milk"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'todo.txt') 'buy milk'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}
