@@ -15,6 +15,21 @@ fn d_guest_port() -> u16 {
 fn d_alive() -> f64 {
     5.0
 }
+fn d_incr_depth() -> u32 {
+    8
+}
+fn d_daemon_weight() -> u32 {
+    1000
+}
+fn d_prefork_window() -> f64 {
+    0.1
+}
+fn d_prefork_age() -> f64 {
+    120.0
+}
+fn d_restore_weight() -> u32 {
+    10000
+}
 fn d_conc() -> usize {
     4
 }
@@ -77,17 +92,54 @@ pub struct Config {
     /// Two leaf cgroups per slot: a reset kills the old tree without waiting and restores into the other leaf.
     #[serde(default = "yes")]
     pub async_kill: bool,
-    /// Labelled variant: `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore.
-    #[serde(default)]
+    /// `--empty-ns net` + lo brought up by the hook instead of CRIU's ip/iptables restore (which execs ip and
+    /// iptables-restore for every network namespace of the tree, ~70 ms of a Chrome desktop restore). The netns gate
+    /// still compares links, addresses and routes with the dump. Default on since sota/t2; false = CRIU's restore.
+    #[serde(default = "yes")]
     pub netns_fast: bool,
-    /// Labelled variant: lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the
-    /// pre-resume action, before any restored task runs. The cgroup gate proves the limits afterwards.
-    #[serde(default)]
+    /// Lift cpu.max while CRIU restores (every restored task is stopped) and put it back in the pre-resume action,
+    /// before any restored task runs; the cgroup gate proves the limits afterwards. Default on since sota/t2: the
+    /// restore is no longer throttled to the env's own 4 vCPU.
+    #[serde(default = "yes")]
     pub restore_cpu_boost: bool,
+    /// cpu.weight of the slot cgroup from the start of a restore (reset, create, fork child) to the end of its task
+    /// setup, and of the parent's slot cgroup during a capture's dump; put back to the default (100) after. Every slot
+    /// has weight 100, so on a CPU-saturated host a restore got about 1/N of the CPU the N busy envs share (CRIU
+    /// restore 1.5 s at 128 desktops vs 0.3 s idle, sota/t2 W2). 0 = off (no cpu.weight write). Default 10000.
+    #[serde(default = "d_restore_weight")]
+    pub restore_cpu_weight: u32,
+    /// A prefork (POST /v1/slots/:id/prefork) nobody claimed with a fork within this many seconds is discarded.
+    #[serde(default = "d_prefork_age")]
+    pub prefork_max_age_s: f64,
+    /// Quiet window of a prefork's capture (a fork's is quiesce.window_s); see Manager::prefork.
+    #[serde(default = "d_prefork_window")]
+    pub prefork_quiesce_window_s: f64,
+    /// cpu.weight drumsd writes on its own cgroup at start (its gates, capture verbs and dumps run there); 0 = leave it.
+    #[serde(default = "d_daemon_weight")]
+    pub daemon_cpu_weight: u32,
+    /// Captures run through resident `sharedos_rootfs.capture serve` workers instead of one Python process each; a
+    /// worker that fails falls back to the process run. false = a process per capture (sota/t2).
+    #[serde(default = "yes")]
+    pub resident_capture_verb: bool,
+    /// Incremental capture: every restore clears its tree's soft-dirty bits before any task runs (pre-resume), every
+    /// dump keeps tracking (`--track-mem`), and a capture is dumped on top of the env's last base (the images it was
+    /// restored from or last captured into, `--prev-images-dir`), writing only the pages written since. The parent
+    /// chain is pinned into the new checkpoint as hard links. A failed incremental dump is retried in full. false =
+    /// every capture is a full dump (sota/t2).
+    #[serde(default = "yes")]
+    pub incremental_capture: bool,
+    /// Longest parent chain an incremental capture may make; at this depth the next capture is a full dump.
+    #[serde(default = "d_incr_depth")]
+    pub incremental_max_depth: u32,
     /// drums-criu app-compat build: name `--nested-pidns` on restore (dump side is the capture verb's), so sandboxed
     /// apps (Chrome, Electron) that nest pid/user/net namespaces restore.
     #[serde(default)]
     pub nested_pidns: bool,
+    /// CRIU log level for dumps (the capture verb's --dump-log-level), restores and template servers. 3 (default)
+    /// keeps every pr_info line, which is all the gates read; 4 adds the debug lines (~250k per desktop dump, about
+    /// 0.1 s of each dump and each restore). The verb refuses below 3.
+    #[serde(default = "d_criu_log")]
+    pub criu_log_level: u8,
     /// The `no_app_crash` gate: watch the kernel's process events for exits by crash signal (SIGSEGV, SIGILL, ...) in
     /// env trees. On by default; drumsd refuses to start when it cannot open the watch. Turn it off only on a host
     /// whose rewards nobody trains on: without it, an env whose app crashed can return a valid reward.
@@ -261,12 +313,24 @@ pub struct QuiesceConfig {
     /// check runs as soon as the checkpoint is adopted.
     #[serde(default)]
     pub confirm_s: f64,
+    /// Prove the window from the kernel's process events (drumsd_linux::activity) when they cover it, so a tree that
+    /// has been quiet for the window already is captured at once; false = always sample the full window.
+    #[serde(default = "yes_q")]
+    pub events: bool,
+}
+
+fn yes_q() -> bool {
+    true
 }
 
 impl Default for QuiesceConfig {
     fn default() -> Self {
-        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0 }
+        QuiesceConfig { window_s: d_q_window(), timeout_s: d_q_timeout(), poll_ms: d_q_poll(), max_attempts: d_q_attempts(), confirm_s: 0.0, events: true }
     }
+}
+
+fn d_criu_log() -> u8 {
+    3
 }
 
 fn d_q_window() -> f64 {

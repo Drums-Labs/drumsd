@@ -1,0 +1,5 @@
+{"run": "r1", "ami_region": "us-east-2", "ami": "ami-0bfa4f41fed2432b6", "key_name": "drums-sota-t3", "ssh_cidr": "192.5.215.215/32",
+ "coordinator": {"region": "us-east-2", "types": ["c8i.8xlarge"], "market": "on-demand"},
+ "regions": {"us-east-2": {"hosts": 5}, "us-west-2": {"hosts": 4}},
+ "host_types": ["r8i.16xlarge", "r7i.16xlarge", "r6i.16xlarge"],
+ "guard": {"ceiling_min": 300, "idle_min": 30}}

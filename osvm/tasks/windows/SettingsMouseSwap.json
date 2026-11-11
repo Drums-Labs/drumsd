@@ -1,0 +1,24 @@
+{
+ "id": "windows/SettingsMouseSwap",
+ "os": "windows",
+ "instruction": "Swap the primary and secondary mouse buttons.",
+ "source": "WindowsAgentArena-style, domain settings (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-ItemProperty 'HKCU:\\Control Panel\\Mouse' SwapMouseButtons '0'"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-ItemProperty 'HKCU:\\Control Panel\\Mouse').SwapMouseButtons",
+   "equals": "1"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-ItemProperty 'HKCU:\\Control Panel\\Mouse' SwapMouseButtons '1'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

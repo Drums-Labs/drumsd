@@ -1,0 +1,19 @@
+[package]
+name = "drumsd-os"
+description = "Android and Windows desktop backends for drumsd: the same slot API (create, step, screenshot, reset, capture, branch, verify) over redroid containers, Android emulators and QEMU/KVM Windows VMs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+regex = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 drumsd-core = { path = "../drumsd-core" }
 drumsd-linux = { path = "../drumsd-linux" }
+drumsd-os = { path = "../drumsd-os" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

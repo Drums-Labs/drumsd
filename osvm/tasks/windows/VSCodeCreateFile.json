@@ -1,0 +1,24 @@
+{
+ "id": "windows/VSCodeCreateFile",
+ "os": "windows",
+ "instruction": "Create hello.py on the Desktop that prints hello.",
+ "source": "WindowsAgentArena-style, domain vs_code (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Remove-Item -Force (Join-Path ([Environment]::GetFolderPath('Desktop')) 'hello.py') -ErrorAction SilentlyContinue; exit 0"
+ ],
+ "check": [
+  {
+   "cmd": "Get-Content -Raw (Join-Path ([Environment]::GetFolderPath('Desktop')) 'hello.py')",
+   "regex": "print\\(['\\\"]hello['\\\"]\\)"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'hello.py') 'print(\"hello\")'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

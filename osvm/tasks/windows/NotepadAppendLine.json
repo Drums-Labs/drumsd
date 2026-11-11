@@ -1,0 +1,24 @@
+{
+ "id": "windows/NotepadAppendLine",
+ "os": "windows",
+ "instruction": "Open notes.txt on the Desktop and add a last line 'line two'.",
+ "source": "WindowsAgentArena-style, domain notepad (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'notes.txt') 'line one'"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'notes.txt')) -join '|'",
+   "equals": "line one|line two"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Add-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'notes.txt') 'line two'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

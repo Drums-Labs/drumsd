@@ -1,0 +1,27 @@
+{
+ "id": "android/MarkorCreateNote",
+ "os": "android",
+ "instruction": "Create a new note in Markor named shopping.md with the text: milk eggs bread.",
+ "source": "android_world@55ddaf5 task_evals/single/markor.py MarkorCreateNote",
+ "setup": [
+  "mkdir -p /sdcard/Documents/Markor",
+  "rm -rf /sdcard/Documents/Markor/*"
+ ],
+ "check": [
+  {
+   "cmd": "cat /sdcard/Documents/Markor/shopping.md",
+   "contains": "milk eggs bread"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "echo 'milk eggs bread' > /sdcard/Documents/Markor/shopping.md"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "net.gsantner.markor"
+ ],
+ "max_steps": 10
+}

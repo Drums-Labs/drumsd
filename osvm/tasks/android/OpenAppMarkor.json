@@ -1,0 +1,29 @@
+{
+ "id": "android/OpenAppMarkor",
+ "os": "android",
+ "instruction": "Open the Markor app. Clear any pop-ups that may appear by granting all permissions that are required.",
+ "source": "android_world@55ddaf5 task_evals/single/system.py OpenAppTaskEval app_name=markor",
+ "setup": [
+  "input keyevent 3",
+  "am force-stop net.gsantner.markor"
+ ],
+ "check": [
+  {
+   "cmd": "dumpsys window | grep -E 'mCurrentFocus=' | head -1",
+   "regex": "(net\\.gsantner\\.markor)/"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "for p in net.gsantner.markor; do pm path $p >/dev/null 2>&1 && for perm in $(dumpsys package $p | grep -oE 'android.permission.[A-Z_]+: granted=false' | cut -d: -f1); do pm grant $p $perm 2>/dev/null; done; pm path $p >/dev/null 2>&1 && am start -n \"$(cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $p | tail -1)\" && break; done"
+  },
+  {
+   "action_type": "wait",
+   "seconds": 3
+  }
+ ],
+ "oracle_kind": "app_launch",
+ "requires": [],
+ "max_steps": 10
+}

@@ -1,0 +1,26 @@
+{
+ "id": "android/ContactsAddContact",
+ "os": "android",
+ "instruction": "Create a new contact for Ada Lovelace. Their number is 555-0142.",
+ "source": "android_world@55ddaf5 task_evals/single/contacts.py ContactsAddContact",
+ "setup": [
+  "content delete --uri content://com.android.contacts/raw_contacts --where \"_id>0\""
+ ],
+ "check": [
+  {
+   "cmd": "content query --uri content://com.android.contacts/data --projection display_name:data1 --where \"mimetype='vnd.android.cursor.item/phone_v2'\" | tr -d '-' ",
+   "contains": "display_name=Ada Lovelace, data1=5550142"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "content insert --uri content://com.android.contacts/raw_contacts --bind account_name:n: --bind account_type:n:; id=$(content query --uri content://com.android.contacts/raw_contacts --projection _id | tail -1 | sed 's/.*_id=//'); content insert --uri content://com.android.contacts/data --bind raw_contact_id:i:$id --bind mimetype:s:vnd.android.cursor.item/name --bind data1:s:'Ada Lovelace'; content insert --uri content://com.android.contacts/data --bind raw_contact_id:i:$id --bind mimetype:s:vnd.android.cursor.item/phone_v2 --bind data1:s:5550142 --bind data2:i:2"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [
+  "com.android.providers.contacts"
+ ],
+ "max_steps": 10
+}

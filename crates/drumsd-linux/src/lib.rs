@@ -5,9 +5,11 @@
 //! the same directory layout, ownership marker, `slot.json` fields, cgroup name and restore command line as one made by
 //! `pageshare.py branch`, so the Python verbs (`capture`, `drop`, `cleanup`) still work on it.
 
+pub mod activity;
 pub mod cgroup;
 pub mod guest;
 pub mod hook;
+pub mod idrange;
 pub mod pidfd;
 pub mod procfs;
 pub mod procview;

@@ -48,6 +48,9 @@ pub struct RestoreSpec {
     /// The checkpoint's slot ran in its own user namespace (the hardened profile, drums-lab harden.py): its overlay keeps
     /// its metadata in user.overlay xattrs, so the restore root is mounted with `userxattr` (criu_root.overlay_options).
     pub userxattr: bool,
+    /// CRIU's log level (`-vN`). 4 logs every debug line (about 150k lines per desktop restore, ~0.1 s of it); 3
+    /// keeps every pr_info line, which is everything the gates read (lock lines, `Restore finished successfully`).
+    pub log_level: u8,
 }
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
@@ -69,6 +72,10 @@ pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
         // launch.py (app-compat): ("--shell-job", "--tcp-close", "--manage-cgroups=ignore", "--nested-pidns", "-v4")
         if x == "-v4" && s.nested_pidns {
             v.push("--nested-pidns".into());
+        }
+        if x == "-v4" {
+            v.push(format!("-v{}", s.log_level.clamp(1, 4)));
+            continue;
         }
         v.push(x.to_string());
     }
@@ -121,16 +128,31 @@ pub fn run(self_exe: &Path, s: &RestoreSpec, timeout: Duration) -> io::Result<Re
     let out = fs::File::create(&s.out)?;
     let err = out.try_clone()?;
     let mut child = Command::new(self_exe).args(client_args(s)?).stdin(Stdio::null()).stdout(out).stderr(err).spawn()?;
-    let status = loop {
-        if let Some(st) = child.try_wait()? {
-            break Some(st);
+    // Wait on a pidfd (one poll, woken at the exit) instead of polling waitid every 2 ms: at 128 desktops with 16
+    // restores in flight that polling was ~8,000 waitid/s, each taking the kernel's global tasklist_lock for reading,
+    // which every fork and exit on the host (CRIU's own restore forks included) must take for writing (perf, T2b W2:
+    // 3.9 % of all host CPU spinning on it from drumsd's Child::try_wait).
+    let status = match crate::pidfd::open(child.id() as i32) {
+        Ok(fd) => {
+            if crate::pidfd::wait_exit(&fd, timeout.saturating_sub(t0.elapsed())) {
+                Some(child.wait()?)
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            }
         }
-        if t0.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(2));
+        Err(_) => loop {
+            if let Some(st) = child.try_wait()? {
+                break Some(st);
+            }
+            if t0.elapsed() > timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        },
     };
     let text = fs::read_to_string(&s.out).unwrap_or_default();
     let tail: String = text.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
@@ -313,6 +335,7 @@ mod tests {
             nested_pidns: false,
             externals: vec![],
             userxattr: false,
+            log_level: 4,
         }
     }
 
@@ -327,6 +350,8 @@ mod tests {
         assert!(!criu_argv(&s).contains(&"--file-locks".to_string()));
         s.empty_net = true;
         assert!(criu_argv(&s).windows(2).any(|w| w[0] == "--empty-ns" && w[1] == "net"));
+        s.log_level = 3;
+        assert!(criu_argv(&s).contains(&"-v3".to_string()) && !criu_argv(&s).contains(&"-v4".to_string()));
     }
 
     #[test]

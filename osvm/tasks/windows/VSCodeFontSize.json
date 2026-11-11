@@ -1,0 +1,25 @@
+{
+ "id": "windows/VSCodeFontSize",
+ "os": "windows",
+ "instruction": "In VS Code, set the editor font size to 18.",
+ "source": "WindowsAgentArena-style, domain vs_code (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "New-Item -Force -ItemType Directory (Split-Path (Join-Path $env:APPDATA 'Code\\User\\settings.json')) | Out-Null",
+  "Set-Content (Join-Path $env:APPDATA 'Code\\User\\settings.json') '{}'"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-Content -Raw (Join-Path $env:APPDATA 'Code\\User\\settings.json') | ConvertFrom-Json).'editor.fontSize'",
+   "equals": "18"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-Content (Join-Path $env:APPDATA 'Code\\User\\settings.json') '{\"editor.fontSize\": 18}'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

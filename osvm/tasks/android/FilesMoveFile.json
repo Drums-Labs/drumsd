@@ -1,0 +1,30 @@
+{
+ "id": "android/FilesMoveFile",
+ "os": "android",
+ "instruction": "Move the file notes.txt from Download to Documents.",
+ "source": "android_world@55ddaf5 task_evals/single/files.py FilesMoveFile",
+ "setup": [
+  "mkdir -p /sdcard/Download /sdcard/Documents",
+  "echo meeting-notes > /sdcard/Download/notes.txt",
+  "rm -f /sdcard/Documents/notes.txt"
+ ],
+ "check": [
+  {
+   "cmd": "cat /sdcard/Documents/notes.txt",
+   "equals": "meeting-notes"
+  },
+  {
+   "cmd": "test -e /sdcard/Download/notes.txt && echo present || echo absent",
+   "equals": "absent"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "mv /sdcard/Download/notes.txt /sdcard/Documents/notes.txt"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

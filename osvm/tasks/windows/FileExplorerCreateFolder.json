@@ -1,0 +1,24 @@
+{
+ "id": "windows/FileExplorerCreateFolder",
+ "os": "windows",
+ "instruction": "Create a folder named Reports on the Desktop.",
+ "source": "WindowsAgentArena-style, domain file_explorer (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Remove-Item -Recurse -Force (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Reports') -ErrorAction SilentlyContinue; exit 0"
+ ],
+ "check": [
+  {
+   "cmd": "if (Test-Path -PathType Container (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Reports')) { 'yes' } else { 'no' }",
+   "equals": "yes"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "New-Item -ItemType Directory (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Reports') | Out-Null"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

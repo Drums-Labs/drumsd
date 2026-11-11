@@ -223,8 +223,10 @@ pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, P
             set_limits(l, want)?;
         }
     }
-    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back
+    // a restore boost that never reached its pre-resume reset (crash) leaves cpu.max raised: put it back; a kill that
+    // drumsd did not see through (a restart) can leave a cgroup frozen
     for l in [&d, &a, &b] {
+        thaw(l)?;
         if read_limits(l)? != *want {
             set_limits(l, want)?;
         }
@@ -232,9 +234,28 @@ pub fn ensure_slot_leaves(marker: &str, want: &Limits) -> io::Result<(PathBuf, P
     Ok((d, a, b))
 }
 
-/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting.
+/// Freeze the tree before it is killed. cgroup.kill sends SIGKILL to one task after another, and a Chrome thread
+/// that sees its peer die first (a broken IPC channel) hits a CHECK and dies of SIGTRAP before its own SIGKILL lands:
+/// an app crash during a teardown, with its whole tree reaped before anyone can read which cgroup it was in (T6).
+/// A frozen task runs no user code, and a fatal signal still ends it. Best effort: the kill does not depend on it.
+fn freeze_for_kill(d: &Path) {
+    let _ = write(&d.join("cgroup.freeze"), "1");
+}
+
+/// Undo [`freeze_for_kill`] once the cgroup is empty: the leaf is the next restore's target, and a frozen cgroup
+/// would freeze the restored tree.
+pub fn thaw(d: &Path) -> io::Result<()> {
+    let f = d.join("cgroup.freeze");
+    if f.exists() && read(&f)? != "0" {
+        write(&f, "0")?;
+    }
+    Ok(())
+}
+
+/// Send SIGKILL to every process in the cgroup (cgroup.kill) without waiting; the tree is frozen first.
 pub fn kill_nowait(d: &Path) -> io::Result<bool> {
     if d.is_dir() && populated(d)? {
+        freeze_for_kill(d);
         write(&d.join("cgroup.kill"), "1")?;
         return Ok(true);
     }
@@ -249,6 +270,9 @@ pub fn wait_empty(d: &Path, timeout: Duration) -> io::Result<f64> {
             return kill_and_wait(d, Duration::from_secs(5)).map(|r| r.seconds + t0.elapsed().as_secs_f64());
         }
         std::thread::sleep(Duration::from_millis(2));
+    }
+    if d.is_dir() {
+        thaw(d)?;
     }
     Ok(t0.elapsed().as_secs_f64())
 }
@@ -278,6 +302,7 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
     let had = procs(d)?.len();
     let mut killed = false;
     if populated(d)? {
+        freeze_for_kill(d);
         write(&d.join("cgroup.kill"), "1")?;
         killed = true;
     }
@@ -287,11 +312,52 @@ pub fn kill_and_wait(d: &Path, timeout: Duration) -> io::Result<KillReport> {
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+    thaw(d)?;
     Ok(KillReport { had_procs: had, killed, seconds: t0.elapsed().as_secs_f64() })
 }
 
 pub fn set_cpu_max(d: &Path, v: &str) -> io::Result<()> {
     write(&d.join("cpu.max"), v)
+}
+
+/// The cgroup v2 default cpu.weight; slots never set another one except during a boost.
+pub const DEFAULT_CPU_WEIGHT: u32 = 100;
+
+pub fn set_cpu_weight(d: &Path, w: u32) -> io::Result<()> {
+    write(&d.join("cpu.weight"), &w.clamp(1, 10000).to_string())
+}
+
+pub fn cpu_weight(d: &Path) -> Option<u32> {
+    read(&d.join("cpu.weight")).ok()?.trim().parse().ok()
+}
+
+/// A cpu.weight boost of one cgroup for the life of the guard; dropping it writes the default weight back.
+pub struct WeightBoost {
+    path: Option<PathBuf>,
+}
+
+impl WeightBoost {
+    /// weight 0 = no boost (nothing written, nothing put back).
+    pub fn new(d: &Path, weight: u32) -> WeightBoost {
+        if weight == 0 || weight == DEFAULT_CPU_WEIGHT || !d.is_dir() {
+            return WeightBoost { path: None };
+        }
+        match set_cpu_weight(d, weight) {
+            Ok(()) => WeightBoost { path: Some(d.to_path_buf()) },
+            Err(_) => WeightBoost { path: None },
+        }
+    }
+    pub fn active(&self) -> bool {
+        self.path.is_some()
+    }
+}
+
+impl Drop for WeightBoost {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = set_cpu_weight(&p, DEFAULT_CPU_WEIGHT);
+        }
+    }
 }
 
 pub fn join(d: &Path, pid: i32) -> io::Result<()> {
@@ -305,6 +371,41 @@ pub fn memory_current(d: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fake_cg(name: &str, populated: bool, frozen: bool) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("drumsd-cg-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("cgroup.events"), format!("populated {}\nfrozen {}\n", populated as u8, frozen as u8)).unwrap();
+        fs::write(d.join("cgroup.freeze"), if frozen { "1" } else { "0" }).unwrap();
+        fs::write(d.join("cgroup.kill"), "").unwrap();
+        fs::write(d.join("cgroup.procs"), "").unwrap();
+        d
+    }
+
+    #[test]
+    fn a_kill_freezes_the_tree_first_so_no_app_sees_its_peers_die() {
+        // T6: cgroup.kill SIGKILLs one task after another; a Chrome thread that saw its peer die hit a CHECK and died
+        // of SIGTRAP before its own SIGKILL, a crash during teardown that no one could attribute
+        let d = fake_cg("kill", true, false);
+        assert!(kill_nowait(&d).unwrap());
+        assert_eq!(read(&d.join("cgroup.freeze")).unwrap(), "1", "frozen before the kill");
+        assert_eq!(read(&d.join("cgroup.kill")).unwrap(), "1");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_emptied_leaf_is_thawed_before_anything_is_restored_into_it() {
+        // the leaf that was frozen and killed is the next restore's target: a frozen leaf would freeze the new tree
+        let d = fake_cg("thaw", false, true);
+        wait_empty(&d, Duration::from_secs(1)).unwrap();
+        assert_eq!(read(&d.join("cgroup.freeze")).unwrap(), "0");
+        let e = fake_cg("thaw2", false, true);
+        kill_and_wait(&e, Duration::from_secs(1)).unwrap();
+        assert_eq!(read(&e.join("cgroup.freeze")).unwrap(), "0");
+        for x in [d, e] {
+            let _ = fs::remove_dir_all(&x);
+        }
+    }
     #[test]
     fn limits_match_launch_py() {
         assert_eq!(
@@ -312,6 +413,26 @@ mod tests {
             Limits { cpu_max: "400000 100000".into(), memory_max: "4294967296".into(), swap_max: "0".into() }
         );
         assert!(slot_cg("rootfs-0734af49-2").ends_with("drumsbench-pool.scope/drumsbench-rootfs-0734af49-2-pool.scope"));
+    }
+
+    #[test]
+    fn a_weight_boost_is_put_back_to_the_default_on_drop_and_zero_writes_nothing() {
+        let d = std::env::temp_dir().join(format!("drumsd-weight-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("cpu.weight"), "100\n").unwrap();
+        {
+            let b = WeightBoost::new(&d, 10000);
+            assert!(b.active());
+            assert_eq!(cpu_weight(&d), Some(10000));
+        }
+        assert_eq!(cpu_weight(&d), Some(DEFAULT_CPU_WEIGHT));
+        let b = WeightBoost::new(&d, 0);
+        assert!(!b.active());
+        drop(b);
+        assert_eq!(cpu_weight(&d), Some(100));
+        assert!(!WeightBoost::new(&d.join("missing"), 5000).active());
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

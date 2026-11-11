@@ -1,0 +1,25 @@
+{
+ "id": "android/SystemBrightnessMin",
+ "os": "android",
+ "instruction": "Turn brightness to the min value.",
+ "source": "android_world@55ddaf5 task_evals/single/system.py SystemBrightnessMin",
+ "setup": [
+  "settings put system screen_brightness_mode 0",
+  "settings put system screen_brightness 102"
+ ],
+ "check": [
+  {
+   "cmd": "settings get system screen_brightness",
+   "equals": "1"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "settings put system screen_brightness 1"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}

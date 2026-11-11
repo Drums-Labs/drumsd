@@ -1,0 +1,24 @@
+{
+ "id": "windows/FileExplorerDeleteFile",
+ "os": "windows",
+ "instruction": "Delete the file old.log from the Desktop.",
+ "source": "WindowsAgentArena-style, domain file_explorer (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-Content (Join-Path ([Environment]::GetFolderPath('Desktop')) 'old.log') 'x'"
+ ],
+ "check": [
+  {
+   "cmd": "if (Test-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'old.log')) { 'yes' } else { 'no' }",
+   "equals": "no"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Remove-Item (Join-Path ([Environment]::GetFolderPath('Desktop')) 'old.log')"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

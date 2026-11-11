@@ -1,0 +1,24 @@
+{
+ "id": "windows/CreateShortcut",
+ "os": "windows",
+ "instruction": "Create a Desktop shortcut to Notepad named Notepad.",
+ "source": "WindowsAgentArena-style, domain windows (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Remove-Item -Force (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Notepad.lnk') -ErrorAction SilentlyContinue; exit 0"
+ ],
+ "check": [
+  {
+   "cmd": "(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Notepad.lnk')).TargetPath",
+   "regex": "(?i)notepad\\.exe$"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "$s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Notepad.lnk')); $s.TargetPath='C:\\Windows\\System32\\notepad.exe'; $s.Save()"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

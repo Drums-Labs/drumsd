@@ -1,0 +1,24 @@
+{
+ "id": "windows/SettingsScreenSaverTimeout",
+ "os": "windows",
+ "instruction": "Set the screen saver wait time to 10 minutes.",
+ "source": "WindowsAgentArena-style, domain settings (WindowsAgentArena@eb220c4 evaluation_examples_windows)",
+ "setup": [
+  "Set-ItemProperty 'HKCU:\\Control Panel\\Desktop' ScreenSaveTimeOut '900'"
+ ],
+ "check": [
+  {
+   "cmd": "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop').ScreenSaveTimeOut",
+   "equals": "600"
+  }
+ ],
+ "oracle": [
+  {
+   "type": "powershell",
+   "command": "Set-ItemProperty 'HKCU:\\Control Panel\\Desktop' ScreenSaveTimeOut '600'"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 15
+}

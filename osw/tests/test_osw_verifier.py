@@ -61,11 +61,21 @@ def boom(ctx):
     raise ValueError("bad state")
 def missing_file(ctx):
     return 0.0 if ctx.read_file("/nope") is None else 1.0
+def zero(ctx):
+    return 0.0
+def flaky(ctx, counter):
+    n = int(open(counter).read()) if os.path.exists(counter) else 0
+    open(counter, "w").write(str(n + 1))
+    return float(n % 2 == 0)
+def slow(ctx):
+    import time
+    time.sleep(3)
+    return 1.0
 '''
 
 
 class Guest(BaseHTTPRequestHandler):
-    files, calls = {}, []
+    files, calls, scope = {}, [], {}
 
     def log_message(self, *a):
         pass
@@ -82,6 +92,9 @@ class Guest(BaseHTTPRequestHandler):
             return self._send(200, data) if data is not None else self._send(404, b"not found")
         if self.path == "/execute":
             cmd = json.loads(body)["command"]
+            if isinstance(cmd, list) and cmd[:3] == ["python3", "-I", "-c"] and cmd[3] == osw.SCOPE_SCAN:
+                return self._send(200, json.dumps({"status": "success", "returncode": 0,
+                                                   "output": json.dumps(Guest.scope) + "\n", "error": ""}).encode())
             return self._send(200, json.dumps({"status": "success", "returncode": 0 if cmd[-1] == "/x" else 1,
                                                "output": "", "error": ""}).encode())
         self._send(404, b"")
@@ -219,3 +232,64 @@ class LabVerifier(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RewardAudit(LabVerifier):
+    """drums_osw.py's `audit` block on every evaluate reply (recheck, redundant checker, scope, timeout, crash)."""
+
+    def test_a_clean_score_has_every_check_and_no_flag(self):
+        t = lab_task("boolean")
+        t["evaluator"]["redundant"] = {"verifier": "lab", "function": "via_run"}
+        a = self.evaluate(t)["audit"]
+        self.assertEqual(a["flags"], [], a)
+        self.assertEqual((a["recheck"]["ran"], a["recheck"]["agree"]), (True, True))
+        self.assertEqual((a["redundant"]["ran"], a["redundant"]["agree"], a["redundant"]["checker"]), (True, True, "lab.via_run"))
+        self.assertEqual(a["scope"], {"ran": False})
+        self.assertEqual(a["checker"]["error_class"], "none")
+
+    def test_disagreeing_redundant_checker_and_nondeterministic_checker_are_flagged(self):
+        t = lab_task("boolean")
+        t["evaluator"]["redundant"] = {"verifier": "lab", "function": "zero"}
+        r = self.evaluate(t)
+        self.assertEqual(r["score"], 1.0)                    # the audit never changes the score
+        self.assertEqual(r["audit"]["flags"], ["redundant_disagree"])
+        counter = os.path.join(self.tmp.name, "counter")
+        r = self.evaluate(lab_task("flaky", counter=counter))
+        self.assertEqual((r["score"], r["audit"]["recheck"]["score"]), (1.0, 0.0))
+        self.assertIn("nondeterministic", r["audit"]["flags"])
+
+    def test_a_checker_over_its_deadline_is_a_timeout_error(self):
+        t = lab_task("slow")
+        t["evaluator"]["deadline_s"] = 0.5
+        r = self.evaluate(t)
+        self.assertIsNone(r["score"])
+        self.assertIn("CheckerTimeout", r["checker_error"])
+        self.assertEqual((r["audit"]["checker"]["error_class"], r["audit"]["flags"]), ("timeout", ["checker_timeout"]))
+        r = self.evaluate(lab_task("boom"))
+        self.assertEqual((r["audit"]["checker"]["error_class"], r["audit"]["flags"]), ("exception", ["checker_crash"]))
+        self.assertEqual(r["audit"]["recheck"], {"ran": False})
+
+    def test_scope_flags_edits_outside_the_allowed_paths(self):
+        man = {"/home/user/Documents/a.txt": "aa", "/home/user/Documents/keep.txt": "kk"}
+        t = lab_task("boolean")
+        t["evaluator"]["scope"] = {"roots": ["/home/user/Documents"], "manifest": man,
+                                   "allow": ["/home/user/Documents/a.txt", "/home/user/Documents/out/*"]}
+        Guest.scope = {"/home/user/Documents/a.txt": "changed", "/home/user/Documents/keep.txt": "kk",
+                       "/home/user/Documents/out/r.csv": "new"}
+        a = self.evaluate(t)["audit"]
+        self.assertEqual((a["scope"]["violations"], a["flags"]), (0, []), a)
+        Guest.scope = {"/home/user/Documents/a.txt": "aa", "/home/user/Documents/keep.txt": "edited",
+                       "/home/user/Documents/stray.txt": "x"}
+        a = self.evaluate(t)["audit"]
+        self.assertEqual(a["scope"]["changed"], ["/home/user/Documents/keep.txt"])
+        self.assertEqual(a["scope"]["created"], ["/home/user/Documents/stray.txt"])
+        self.assertEqual(a["flags"], ["scope_violation"])
+        Guest.scope = {"/home/user/Documents/a.txt": "aa"}
+        a = self.evaluate(t)["audit"]
+        self.assertEqual(a["scope"]["deleted"], ["/home/user/Documents/keep.txt"])
+
+    def test_osworld_evaluators_are_rechecked_only_without_postconfig(self):
+        t = {"id": "osw-1", "instruction": "x", "config": [], "evaluator": {"func": "exact_match"}}
+        self.assertEqual(self.evaluate(t)["audit"]["recheck"]["agree"], True)
+        t["evaluator"]["postconfig"] = [{"type": "sleep", "parameters": {"seconds": 0}}]
+        self.assertIn("postconfig", self.evaluate(t)["audit"]["recheck"]["skipped"])

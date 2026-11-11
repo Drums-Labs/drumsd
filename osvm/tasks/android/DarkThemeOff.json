@@ -1,0 +1,24 @@
+{
+ "id": "android/DarkThemeOff",
+ "os": "android",
+ "instruction": "Turn off dark theme.",
+ "source": "AndroidWorld-style (system settings)",
+ "setup": [
+  "cmd uimode night yes"
+ ],
+ "check": [
+  {
+   "cmd": "cmd uimode night",
+   "contains": "Night mode: no"
+  }
+ ],
+ "oracle": [
+  {
+   "action_type": "shell",
+   "command": "cmd uimode night no"
+  }
+ ],
+ "oracle_kind": "shell",
+ "requires": [],
+ "max_steps": 10
+}
