@@ -1364,6 +1364,18 @@
        "string",
        "null"
       ]
+     },
+     "state": {
+       "type": "string",
+       "description": "On a 409 wrong_state: the slot state that refused the operation."
+     },
+     "reason": {
+       "type": "string",
+       "description": "On a 409 wrong_state from a quarantined slot: why it was quarantined (the full gate detail, up to 4000 characters)."
+     },
+     "next": {
+       "type": "string",
+       "description": "On a 409 wrong_state from a quarantined slot: what a client can do (release then reset, or destroy and create a new env). A quarantined slot is never restored into again by itself; repeating the operation gets the same 409."
      }
     },
     "required": [

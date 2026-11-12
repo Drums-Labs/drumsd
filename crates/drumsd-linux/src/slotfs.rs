@@ -117,6 +117,30 @@ pub fn paths(state_dir: &Path, slot: u32) -> SlotPaths {
     }
 }
 
+/// The origin's records ([`COPIED_RECORDS`]) into a new slot directory, each one complete or absent: written under a
+/// temporary name and renamed into place. `fs::copy` creates the destination empty and fills it afterwards, and
+/// `service-plan.json` is read by every concurrent create's uid-range scan (idrange::held_bases, every `slot<N>`
+/// directory): with eight creates in flight one scan read a sibling's plan between its creation and its fill and the
+/// create failed with "slot103/service-plan.json: EOF while parsing a value" (R2-3 Firecracker study, host A, rung 8).
+pub fn copy_records(from: &Path, to: &Path) -> io::Result<()> {
+    for n in COPIED_RECORDS {
+        let s = from.join(n);
+        if s.is_file() {
+            copy_complete(&s, &to.join(n))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy `src` to `dst` so that `dst` is never observable half-written: the bytes go to `<dst>.drumsd-tmp` first and
+/// are renamed over `dst` (same directory, so the rename is atomic). The mode of `src` is kept, as `fs::copy` keeps it.
+pub fn copy_complete(src: &Path, dst: &Path) -> io::Result<()> {
+    let name = dst.file_name().and_then(|n| n.to_str()).ok_or_else(|| io::Error::other(format!("{}: no file name", dst.display())))?;
+    let tmp = dst.with_file_name(format!("{name}.drumsd-tmp"));
+    fs::copy(src, &tmp)?;
+    fs::rename(&tmp, dst)
+}
+
 pub fn read_json(p: &Path) -> io::Result<Value> {
     Ok(serde_json::from_slice(&fs::read(p)?)?)
 }
@@ -283,12 +307,7 @@ pub fn create_branch_dir(b: &BranchSpec) -> io::Result<SlotPaths> {
     copy_access(&po.dir, &p.dir)?;
     copy_access(&po.images, &p.images)?;
     cp_a(&po.snap, &p.snap)?;
-    for n in COPIED_RECORDS {
-        let s = po.dir.join(n);
-        if s.is_file() {
-            fs::copy(&s, p.dir.join(n))?;
-        }
-    }
+    copy_records(&po.dir, &p.dir)?;
     fs::create_dir(&p.upper)?;
     fs::create_dir(&p.work)?;
     let so = read_json(&po.slot_json).unwrap_or_else(|_| json!({}));
@@ -437,6 +456,66 @@ mod tests {
                         r("/dev/zero", "tmpfs", "/zero"), r("/dev/sda", "devtmpfs", "/sda")];
         assert_eq!(dev_restore_externals(&rows), vec!["--external", "mnt[drums-dev-null]:/dev/null", "--external", "mnt[drums-dev-tty]:/dev/tty"]);
         assert!(dev_restore_externals(&[r("/", "overlay", "/")]).is_empty());
+    }
+
+    /// R2-3 Firecracker study, host A, rung 8 (one of eight concurrent creates): a sibling create's uid-range scan read
+    /// this create's `service-plan.json` between `fs::copy`'s create and its fill ("EOF while parsing a value"). The
+    /// records are now copied complete-or-absent. The reader here is the scan's own parser, with no settle time, so a
+    /// single half-written observation fails the test; with `fs::copy` in `copy_complete` it fails within a few hundred
+    /// rounds on Linux.
+    #[test]
+    fn a_concurrent_scan_never_sees_a_half_copied_plan() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let t = tempfile::tempdir().unwrap();
+        let (origin, slot) = (t.path().join("slot0"), t.path().join("slot103"));
+        fs::create_dir_all(&origin).unwrap();
+        fs::create_dir_all(&slot).unwrap();
+        // a plan with the bulk of a real one (pretty-printed, several keys) and some more, so the copy is not one page
+        let plan = json!({"lower": "/run/drums-idmap/ab-165536", "userns": {"base": 165536, "count": 65536}, "pad": "x".repeat(256 * 1024)});
+        fs::write(origin.join("service-plan.json"), serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+        for n in REQUIRED_RECORDS {
+            fs::write(origin.join(n), b"[]").unwrap();
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (stop2, slot2) = (stop.clone(), slot.clone());
+        let reader = std::thread::spawn(move || {
+            let (mut reads, mut partial) = (0u64, vec![]);
+            while !stop2.load(Ordering::Relaxed) {
+                match crate::idrange::plan_userns(&slot2) {
+                    Ok(_) => reads += 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => partial.push(e.to_string()),
+                }
+            }
+            (reads, partial)
+        });
+        for _ in 0..400 {
+            copy_records(&origin, &slot).unwrap();
+            fs::remove_file(slot.join("service-plan.json")).unwrap(); // the next round makes the file afresh, as a create does
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (reads, partial) = reader.join().unwrap();
+        assert!(reads > 0, "the reader saw whole plans");
+        assert!(partial.is_empty(), "the scan saw a half-written plan {} times, first: {}", partial.len(), partial[0]);
+        assert!(fs::read_dir(&slot).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".drumsd-tmp")), "no temporary file is left behind");
+    }
+
+    #[test]
+    fn copy_complete_keeps_the_bytes_and_the_mode_and_replaces_an_old_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("a.json"), t.path().join("sub").join("b.json"));
+        fs::create_dir(t.path().join("sub")).unwrap();
+        fs::write(&src, b"{\"k\": 1}").unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::write(&dst, b"old").unwrap();
+        copy_complete(&src, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"{\"k\": 1}");
+        assert_eq!(fs::metadata(&dst).unwrap().permissions().mode() & 0o777, 0o640);
+        assert!(!t.path().join("sub").join("b.json.drumsd-tmp").exists());
+        assert!(copy_complete(&t.path().join("missing"), &dst).is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"{\"k\": 1}", "a failed copy leaves the old file as it was");
     }
 
     #[test]

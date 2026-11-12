@@ -115,8 +115,29 @@ pub fn plan_userns(dir: &Path) -> io::Result<Option<(u32, u32)>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let v: Value = serde_json::from_slice(&b)?;
+    let v: Value = serde_json::from_slice(&b).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     userns_of(&v)
+}
+
+/// How long [`held_bases`] gives a plan that does not parse to become whole before the scan fails.
+///
+/// A plan is written complete (slotfs::copy_complete, [`write_plan`]: temporary name, then rename), so a scan never
+/// sees a half-written one from drumsd itself. This is the second line: a file some other writer is still filling
+/// (`cp`, an operator's copy) is read again for a short while instead of failing the create at once, as it did in the
+/// R2-3 Firecracker study ("slot103/service-plan.json: EOF while parsing a value", host A, rung 8, one of eight
+/// creates). A plan that still does not parse afterwards is an error: a range is never handed out blindly.
+pub const PLAN_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+const PLAN_REREAD: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// [`plan_userns`] with the re-read of a plan that does not parse, up to `settle` from the first failure.
+pub fn plan_userns_settled(dir: &Path, settle: std::time::Duration) -> io::Result<Option<(u32, u32)>> {
+    let t0 = Instant::now();
+    loop {
+        match plan_userns(dir) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidData && t0.elapsed() < settle => std::thread::sleep(PLAN_REREAD),
+            r => return r,
+        }
+    }
 }
 
 fn userns_of(plan: &Value) -> io::Result<Option<(u32, u32)>> {
@@ -144,7 +165,7 @@ pub fn held_bases(state_dir: &Path) -> io::Result<BTreeSet<u32>> {
         if !e.file_type()?.is_dir() {
             continue;
         }
-        match plan_userns(&e.path()) {
+        match plan_userns_settled(&e.path(), PLAN_SETTLE) {
             Ok(Some((b, _))) => {
                 held.insert(b);
             }
@@ -554,6 +575,53 @@ mod tests {
         fs::create_dir(t.path().join("slot104")).unwrap();
         fs::write(t.path().join("slot104").join(PLAN), b"{").unwrap();
         assert!(held_bases(t.path()).is_err(), "an unreadable plan must not be skipped");
+    }
+
+    /// R2-3 Firecracker study, host A, rung 8: eight creates at once; one create's range scan read a sibling's
+    /// `service-plan.json` while it was still being copied (created, not yet filled) and failed the create with
+    /// "slot103/service-plan.json: EOF while parsing a value". The scan now waits a little for a plan that does not
+    /// parse, and the copy is complete-or-absent (slotfs::copy_complete).
+    #[test]
+    fn the_scan_waits_for_a_sibling_plan_that_is_still_being_written() {
+        let t = tempfile::tempdir().unwrap();
+        plan(&t.path().join("slot0"), Some(100000));
+        let sib = t.path().join("slot103");
+        fs::create_dir(&sib).unwrap();
+        fs::write(sib.join(PLAN), b"").unwrap(); // what fs::copy leaves between its create and its fill
+        let whole = serde_json::to_vec(&json!({"lower": "/run/drums-idmap/ab-165536", "userns": {"base": 165536, "count": 65536}})).unwrap();
+        let sib2 = sib.clone();
+        let w = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            fs::write(sib2.join(PLAN), whole).unwrap();
+        });
+        let t0 = Instant::now();
+        let held = held_bases(t.path()).expect("a plan that becomes whole within the settle time is read, not failed");
+        w.join().unwrap();
+        assert_eq!(held, BTreeSet::from([100000, 165536]));
+        assert!(t0.elapsed() < PLAN_SETTLE, "the scan returned as soon as the plan was whole, not after the full settle time");
+    }
+
+    #[test]
+    fn the_scan_still_refuses_a_plan_that_never_becomes_whole() {
+        let t = tempfile::tempdir().unwrap();
+        plan(&t.path().join("slot0"), Some(100000));
+        fs::create_dir(t.path().join("slot104")).unwrap();
+        fs::write(t.path().join("slot104").join(PLAN), b"").unwrap();
+        let t0 = Instant::now();
+        let e = held_bases(t.path()).unwrap_err().to_string();
+        assert!(t0.elapsed() >= PLAN_SETTLE, "it gave the writer the settle time first");
+        assert!(e.contains("slot104/service-plan.json") && e.contains("EOF while parsing"), "{e}");
+        // a plan that parses but is wrong is nothing a writer will finish: refused at once
+        fs::write(t.path().join("slot104").join(PLAN), b"{\"userns\": {\"base\": 1}}").unwrap();
+        let t0 = Instant::now();
+        let e = held_bases(t.path()).unwrap_err().to_string();
+        assert!(e.contains("no base or count"), "{e}");
+        assert!(t0.elapsed() < PLAN_SETTLE);
+        // an absent plan is still no plan: nothing to wait for
+        fs::remove_file(t.path().join("slot104").join(PLAN)).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(held_bases(t.path()).unwrap(), BTreeSet::from([100000]));
+        assert!(t0.elapsed() < PLAN_SETTLE);
     }
 
     #[test]

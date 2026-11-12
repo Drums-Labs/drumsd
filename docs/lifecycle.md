@@ -58,7 +58,10 @@ A drumsd restart does not reset an env's idle clock (it is journaled within a se
 - `env.close()` on an env that is already gone (closed elsewhere, reaped) is a no-op. `DELETE /v1/slots/{id}` is
   idempotent: it returns the destroyed record with 200.
 - An id this drumsd never had is HTTP 404 (`NotFound`, `code: "not_found"`).
-- A step on a quarantined env is `Conflict` (409, `code: "wrong_state"`): it still exists; release and reset it, or close it.
+- A step or a reset on a quarantined env is `Conflict` (409, `code: "wrong_state"`, `state: "quarantined"`): it still exists;
+  release and reset it, or close it and create a new one. The body carries `reason` (why it was quarantined: the full gate
+  detail) and `next` (the way out). drumsd never restores into a quarantined env by itself, so repeating the reset gets
+  the same 409 at once: a client loop must read the state, not retry.
 
 ## Fork and its saved state
 
