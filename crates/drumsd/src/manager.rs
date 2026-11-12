@@ -413,6 +413,10 @@ pub fn write_dumped_reference(dir: &Path) -> Result<usize, String> {
 
 /// Health warns when the filesystem holding `forgotten_dir` has less than this percentage free.
 const FORGOTTEN_DISK_MIN_FREE_PCT: f64 = 10.0;
+/// How much of a failed gate's detail the quarantine reason keeps (`state.reason`, what a client sees first). The full
+/// detail is always in the record's `gates`. It was 300 characters: the cgroup gate's JSON was cut before the field
+/// that said which check failed (T1-fixed host B s251, R2-3 host B s201-2: the reason ended inside `"limits":{`).
+pub const GATE_DETAIL_CHARS: usize = 4000;
 
 pub fn required_gates() -> Vec<Gate> {
     Gate::ALL.to_vec()
@@ -1381,7 +1385,7 @@ impl Manager {
                     let ff = f.gates.first_failure();
                     let g = ff.map(|g| g.gate.as_str()).unwrap_or("?");
                     let detail = ff.map(|g| g.detail.to_string()).unwrap_or_else(|| f.error.clone());
-                    Outcome::GateFailed { gate: g.into(), detail: detail.chars().take(300).collect() }
+                    Outcome::GateFailed { gate: g.into(), detail: detail.chars().take(GATE_DETAIL_CHARS).collect() }
                 } else {
                     Outcome::Failed { error: f.error.chars().take(300).collect() }
                 };
@@ -3295,12 +3299,22 @@ fn begin_op(slot: &Slot, op: Op) -> Result<SlotState, ApiError> {
 }
 
 /// The error for an operation the env's state does not allow.
+///
+/// For a quarantined env the body also carries `reason` (why it was quarantined) and `next` (what a client can do):
+/// a quarantined env is never restored into again by itself, so a client that keeps sending the same `reset` gets
+/// the same 409 every time (R2-3 host B: 10,325 of them in 50 s from a harness that did not read the state). The
+/// SDK and the gateway turn `next` into release-then-reset or a new env.
 pub fn refused(r: &SlotRecord, e: drumsd_core::state::TransitionError) -> ApiError {
     if matches!(r.state, SlotState::Destroyed | SlotState::Destroying) {
         let drumsd_core::state::TransitionError::NotAllowed { op, .. } = &e;
         return gone_error(r, op);
     }
-    ApiError::new(409, e.to_string()).with(json!({"code": "wrong_state", "state": r.state.name()}))
+    let mut body = json!({"code": "wrong_state", "state": r.state.name()});
+    if let SlotState::Quarantined { reason } = &r.state {
+        body["reason"] = json!(reason);
+        body["next"] = json!("release (POST /v1/slots/{id}/release) then reset, or destroy it and create a new env; the env is not restored into again by itself");
+    }
+    ApiError::new(409, e.to_string()).with(body)
 }
 
 /// 410 `env_gone`: the env was destroyed (by a client's DELETE or by its lease); nothing can be done with it but read its record.
@@ -3837,6 +3851,44 @@ mod tests {
         let q = qrec(SlotState::Quarantined { reason: "x".into() });
         let e = refused(&q, q.state.begin(Op::Step).unwrap_err());
         assert_eq!((e.status, e.detail.unwrap()["code"].clone()), (409, json!("wrong_state")));
+    }
+
+    /// R2-3 Firecracker host B, N=256: env s201-2 quarantined ("gate cgroup failed"), then 10,325 resets refused with
+    /// 409 in 50 s. The refusal now says why the env is quarantined and what to do, so a client need not GET the record
+    /// to find out, and never mistakes the 409 for a transient failure.
+    #[test]
+    fn a_reset_refused_on_a_quarantined_env_names_the_reason_and_the_way_out() {
+        let q = qrec(SlotState::Quarantined { reason: "gate cgroup failed: {\"failed\":[\"outside_cgroup\"]}".into() });
+        let e = refused(&q, q.state.begin(Op::Reset).unwrap_err());
+        assert_eq!(e.status, 409);
+        let d = e.detail.unwrap();
+        assert_eq!(d["code"], "wrong_state");
+        assert_eq!(d["state"], "quarantined");
+        assert_eq!(d["reason"], "gate cgroup failed: {\"failed\":[\"outside_cgroup\"]}");
+        assert!(d["next"].as_str().unwrap().contains("release") && d["next"].as_str().unwrap().contains("create a new env"), "{d}");
+        assert!(e.message.contains("quarantined") && e.message.contains("reset is not allowed"), "{}", e.message);
+        // a down env (a failed restore) is retried in place: no reason, no next
+        let dn = qrec(SlotState::Down { reason: "criu restore failed".into() });
+        let e = refused(&dn, dn.state.begin(Op::Step).unwrap_err());
+        assert!(e.detail.unwrap().get("next").is_none());
+    }
+
+    /// The quarantine reason keeps the whole gate detail (bounded at GATE_DETAIL_CHARS), not its first 300
+    /// characters: the cgroup gate's JSON was cut before the field that said which check failed.
+    #[test]
+    fn the_quarantine_reason_keeps_the_full_gate_detail() {
+        let detail = json!({"failed": ["outside_cgroup"], "cgroup": "/system.slice/drumsbench-pool.scope/drumsbench-rootfs-76bafd47-201-pool.scope/drumsbench-rootfs-76bafd47-201-r2.scope",
+            "init_cgroup": "/system.slice/drumsbench-pool.scope/drumsbench-rootfs-76bafd47-201-pool.scope/drumsbench-rootfs-76bafd47-201-r2.scope",
+            "init_oom_score_adj": 300, "limits": {"memory_max": 4294967296u64, "pids_max": 4096, "cpu_weight": 100}, "want": {"memory_max": 4294967296u64, "pids_max": 4096, "cpu_weight": 100},
+            "members": 61, "outside_cgroup": [412233], "outside_cgroup_procs": [[412233, "sh", "/system.slice/other.scope"]], "want_oom_score_adj": 300, "negative_oom_score_adj": []}).to_string();
+        assert!(detail.len() > 300 && detail.len() < GATE_DETAIL_CHARS, "{}", detail.len());
+        let st = SlotState::finish(Op::Reset, &Outcome::GateFailed { gate: "cgroup".into(), detail: detail.chars().take(GATE_DETAIL_CHARS).collect() });
+        let SlotState::Quarantined { reason } = st else { panic!("{st:?}") };
+        assert_eq!(reason, format!("gate cgroup failed: {detail}"));
+        assert!(reason.contains("outside_cgroup_procs"), "the part that says what failed survives");
+        // the bound still holds for a detail that is longer
+        let long = "x".repeat(GATE_DETAIL_CHARS + 10);
+        assert_eq!(long.chars().take(GATE_DETAIL_CHARS).count(), GATE_DETAIL_CHARS);
     }
 
     #[test]

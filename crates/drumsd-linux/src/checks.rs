@@ -80,6 +80,48 @@ pub fn init_identity(pid: i32, argv_marker: &str, slot_cg_rel: &str) -> GateResu
     }
 }
 
+/// What one read of a process of the slot's pid namespace says about its cgroup membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    /// In the slot's cgroup, or gone from /proc (it exited between the pid listing and the read: it is in no
+    /// cgroup now), or dead (`X`) or a zombie (`Z`), which hold no memory and no CPU the limits could bound.
+    Fine,
+    /// Still alive and in another cgroup: a stray.
+    Stray,
+}
+
+/// The verdict on one process from what /proc said: `cgroup` its `0::` path (None when the read failed or the file
+/// is gone), `state` its state letter (None when gone), `rel` the slot cgroup's path under the cgroup root.
+///
+/// A read that fails is not a stray. Before this, `cgroup_path(p) != Some(rel)` was true for a process that had
+/// exited between the pid listing and the read (the read returns None), and `state_char(p) != Some('Z')` was true
+/// for the same reason, so a short-lived process of the restored desktop (a shell of a panel plugin, a hook) that
+/// ended during the scan counted as outside the cgroup and the env was quarantined. That is the likeliest reading of
+/// "gate cgroup failed" on one env of 256 (T1-fixed host B s251; R2-3 Firecracker host B s201-2): the init was in
+/// the right cgroup and had the right oom_score_adj, the limits are the same for every env, and the field that named
+/// the failed check was cut off the reason (fixed alongside: `failed` comes first now). The scan over every pid of a
+/// 256-env host is slow enough under load for the window to matter.
+pub fn membership(cgroup: Option<&str>, state: Option<char>, rel: &str) -> Membership {
+    match (cgroup, state) {
+        (_, None) | (None, _) => Membership::Fine,
+        (_, Some('Z')) | (_, Some('X')) => Membership::Fine,
+        (Some(c), _) if c == rel => Membership::Fine,
+        _ => Membership::Stray,
+    }
+}
+
+/// The processes of the slot's pid namespace that are alive and outside its cgroup, each one read twice: a stray
+/// of the first pass is looked at again up to `settle` later (`again` reads it anew), and only one that is still a
+/// stray then counts. A process moving between cgroups (CRIU restoring a late thread group) or exiting is not an
+/// escape.
+pub fn confirmed_strays(first: Vec<i32>, settle: std::time::Duration, again: impl Fn(i32) -> Membership) -> Vec<i32> {
+    if first.is_empty() {
+        return first;
+    }
+    std::thread::sleep(settle);
+    first.into_iter().filter(|p| again(*p) == Membership::Stray).collect()
+}
+
 /// `launch.verify_cgroup`: the tree's cgroup is the slot's, the limits are the configured ones, every process of the
 /// pid namespace is in it.
 pub fn cgroup_gate(pid: i32, tree_cg: &Path, limits_cg: &Path, want: &cgroup::Limits) -> GateResult {
@@ -91,17 +133,27 @@ pub fn cgroup_gate(pid: i32, tree_cg: &Path, limits_cg: &Path, want: &cgroup::Li
     });
     let members = procfs::ns_procs(pid);
     let ns = procfs::ns_inode(pid, "pid");
+    let read = |p: i32| membership(procfs::cgroup_path(p).as_deref(), procfs::state_char(p), &rel);
     let mut stray = vec![];
     for p in procfs::pids() {
-        if procfs::ns_inode(p, "pid") == ns && procfs::cgroup_path(p).as_deref() != Some(rel.as_str()) && procfs::state_char(p) != Some('Z') {
+        if procfs::ns_inode(p, "pid") == ns && read(p) == Membership::Stray {
             stray.push(p);
         }
     }
+    // a second read, 50 ms later, of each candidate: it must still be in the namespace and still outside the cgroup
+    let stray = confirmed_strays(stray, std::time::Duration::from_millis(50), |p| if procfs::ns_inode(p, "pid") == ns { read(p) } else { Membership::Fine });
+    let stray_comm: Vec<(i32, Option<String>, Option<String>)> = stray.iter().map(|p| (*p, procfs::comm(*p), procfs::cgroup_path(*p))).collect();
     let init_cg = procfs::cgroup_path(pid);
     let (init_adj, negative) = oom_priority(pid, &procfs::ns_members_and_procs(pid).0);
     let oom_ok = init_adj == Some(cgroup::SLOT_OOM_SCORE_ADJ) && negative.is_empty();
-    let ok = got.as_ref().map(|g| g == want).unwrap_or(false) && init_cg.as_deref() == Some(rel.as_str()) && stray.is_empty() && oom_ok;
-    let d = json!({"cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().map_err(|e| e.to_string()), "want": want, "members": members.len(), "outside_cgroup": stray,
+    let limits_ok = got.as_ref().map(|g| g == want).unwrap_or(false);
+    let init_ok = init_cg.as_deref() == Some(rel.as_str());
+    let ok = limits_ok && init_ok && stray.is_empty() && oom_ok;
+    // `failed` names the checks that failed, first, so a reason cut short still says which one it was
+    let failed: Vec<&str> = [(!limits_ok, "limits"), (!init_ok, "init_cgroup"), (!stray.is_empty(), "outside_cgroup"), (!oom_ok, "oom_score_adj")]
+        .iter().filter(|(f, _)| *f).map(|(_, n)| *n).collect();
+    let d = json!({"failed": failed, "cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().map_err(|e| e.to_string()), "want": want, "members": members.len(),
+                   "outside_cgroup": stray, "outside_cgroup_procs": stray_comm,
                    "init_oom_score_adj": init_adj, "want_oom_score_adj": cgroup::SLOT_OOM_SCORE_ADJ, "negative_oom_score_adj": negative});
     if ok {
         GateResult::pass(Gate::Cgroup, secs(t0), d)
@@ -246,6 +298,37 @@ mod tests {
         // pid had exited between the cgroup listing and the namespace read
         let (f, wait) = foreign_now(vec![(731070, None)], |_| false);
         assert!(f.is_empty() && !wait);
+    }
+
+    #[test]
+    fn a_process_that_exited_mid_scan_is_not_outside_the_cgroup() {
+        // T1-fixed host B s251 and R2-3 host B s201-2: "gate cgroup failed" with the init in the right cgroup; the
+        // membership scan had counted a process whose /proc entries were gone by the time they were read
+        let rel = "/system.slice/drumsbench-pool.scope/drumsbench-rootfs-76bafd47-201-pool.scope/drumsbench-rootfs-76bafd47-201-r2.scope";
+        assert_eq!(membership(None, None, rel), Membership::Fine, "gone between the listing and the read");
+        assert_eq!(membership(Some(rel), None, rel), Membership::Fine, "gone during the state read");
+        assert_eq!(membership(None, Some('R'), rel), Membership::Fine, "the cgroup file could not be read: nothing was observed wrong");
+        assert_eq!(membership(Some("/system.slice/other.scope"), Some('Z'), rel), Membership::Fine, "a zombie holds nothing the limits bound");
+        assert_eq!(membership(Some("/system.slice/other.scope"), Some('X'), rel), Membership::Fine, "dead");
+        assert_eq!(membership(Some(rel), Some('S'), rel), Membership::Fine);
+        assert_eq!(membership(Some("/system.slice/other.scope"), Some('S'), rel), Membership::Stray, "alive and elsewhere: a real stray");
+        assert_eq!(membership(Some("/"), Some('R'), rel), Membership::Stray, "the root cgroup is not the slot's");
+    }
+
+    #[test]
+    fn a_stray_counts_only_when_the_second_read_agrees() {
+        use std::cell::Cell;
+        let no_wait = std::time::Duration::from_millis(0);
+        assert!(confirmed_strays(vec![], no_wait, |_| Membership::Stray).is_empty());
+        // 10 is gone or moved by the second read; 11 is still outside
+        let v = confirmed_strays(vec![10, 11], no_wait, |p| if p == 11 { Membership::Stray } else { Membership::Fine });
+        assert_eq!(v, vec![11]);
+        // the second read happens after the settle time, once per candidate
+        let n = Cell::new(0);
+        let t0 = Instant::now();
+        let v = confirmed_strays(vec![1, 2, 3], std::time::Duration::from_millis(30), |_| { n.set(n.get() + 1); Membership::Stray });
+        assert_eq!((v, n.get()), (vec![1, 2, 3], 3));
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(30));
     }
 
     #[test]

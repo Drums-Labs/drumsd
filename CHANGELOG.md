@@ -1,5 +1,33 @@
 # Changelog
 
+## fix/reliability-r2 (unreleased)
+
+**Reliability** (R2-3 Firecracker study 2026-11-12 and T1-fixed 2026-11-09; both at drumsd 12d1cff = v0.2.0)
+- **A concurrent create no longer fails on a sibling's half-copied `service-plan.json`.** A new slot directory got
+  the origin's records with `fs::copy`, which creates the file empty and fills it afterwards; every create in flight
+  scans every `slot<N>/service-plan.json` to pick a free uid range (hardened profile), so with eight creates at once
+  one scan read a sibling's plan between its creation and its fill and that create failed: `env s101-2 down:
+  /var/lib/drums/state/slot103/service-plan.json: EOF while parsing a value` (host A, rung 8, one of eight). The
+  records are now written under a temporary name and renamed into place (`slotfs::copy_complete`), and the range scan
+  gives a plan that does not parse up to 500 ms to become whole before it fails (`idrange::PLAN_SETTLE`). The same
+  create path serves `POST /v1/slots` from the gateway.
+- **The cgroup gate no longer counts a process that exited during its scan as outside the slot's cgroup.** The
+  membership scan compared `cgroup_path(p) != slot` and `state(p) != 'Z'`; both are true for a pid whose /proc entries
+  were gone by the time they were read, so a short-lived process of the restored desktop ending during the scan (slow
+  on a 256-env host) counted as outside the cgroup. That is the likeliest reading of the two "gate cgroup failed"
+  quarantines (T1-fixed host B s251, R2-3 host B s201-2: init in the right cgroup, right oom_score_adj, the failing
+  field cut off the reason). A read that fails is not an observation; a candidate stray is read again 50 ms
+  later and counts only if it is still alive, still in the namespace and still outside. The isolation gate had the
+  same fix (L32a) already. The detail now starts with `failed: [...]`, the checks that failed, and lists the strays'
+  names and cgroups.
+- **A quarantine reason keeps the whole gate detail** (up to 4000 characters, `GATE_DETAIL_CHARS`), not its first
+  300: the cgroup gate's JSON was cut before the field that said which check failed. The full detail was always in
+  the record's `gates`.
+- **A 409 from a quarantined env says why and what to do.** The body of `wrong_state` from a quarantined slot carries
+  `reason` (the quarantine reason) and `next` (release then reset, or destroy and create a new env). A quarantined env
+  is never restored into again by itself; the R2-3 harness sent 10,325 resets to one in 50 s and got the same 409
+  each time. Clients that loop on a slot must read the state (SDK and gateway follow-ups are in the issue).
+
 ## sota/t6-crash-attr, 2026-11-09
 
 **Correctness**
