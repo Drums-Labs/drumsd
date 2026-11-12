@@ -47,7 +47,8 @@ def api(url, token, method, path, body=None, timeout=900):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--criu-dir", required=True)
-    ap.add_argument("--lab", required=True)
+    ap.add_argument("--py-src", "--lab", dest="py_src", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"),
+                    help="the runtime's Python side (default: this checkout's python/)")
     ap.add_argument("--rootfs-config", required=True)
     ap.add_argument("--drumsd-config", required=True)
     ap.add_argument("--image-id", required=True)
@@ -63,11 +64,11 @@ def main():
     dcfg = json.load(open(a.drumsd_config))
     token = open(dcfg["token_file"]).read().strip()
     url = "http://" + dcfg["listen"].replace("0.0.0.0", "127.0.0.1")
-    env = dict(os.environ, SHAREDOS_ROOTFS_CONFIG=a.rootfs_config, PYTHONPATH=a.lab, PYTHONDONTWRITEBYTECODE="1",
+    env = dict(os.environ, SHAREDOS_ROOTFS_CONFIG=a.rootfs_config, PYTHONPATH=a.py_src, PYTHONDONTWRITEBYTECODE="1",
                OSWORLD_READY_DISPLAY_PROCS="Xorg", PATH=f"{a.criu_dir}:/usr/sbin:/usr/bin:/sbin:/bin")
 
     def verb(module, *args, timeout=900):
-        r = subprocess.run([sys.executable, "-m", module, *args], cwd=a.lab, env=env, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([sys.executable, "-m", module, *args], cwd=a.py_src, env=env, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
             raise RuntimeError(f"{module} {' '.join(args)} rc={r.returncode}: {(r.stderr or '')[-1500:]}")
         return r

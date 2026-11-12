@@ -10,7 +10,7 @@ systemctl disable -q drumsd drums-origin drums-boot
 D=/var/lib/drums
 # run-time state of this builder: slots, checkpoints, records of destroyed envs (the origin is provisioned again at first boot)
 umount -l $D/state 2>/dev/null || true
-PYTHONPATH=/opt/drums/src/drums-lab/benchmark python3 -m sharedos_rootfs.image detach --state $D/image-mount.json >/dev/null 2>&1 || true
+PYTHONPATH=/opt/drums/src/drumsd/python python3 -m sharedos_rootfs.image detach --state $D/image-mount.json >/dev/null 2>&1 || true
 umount -l /mnt/osworld 2>/dev/null || true
 qemu-nbd --disconnect /dev/nbd0 >/dev/null 2>&1 || true
 rm -rf $D/journal/* $D/forgotten $D/state/* $D/image-mount.json $D/bringup.json

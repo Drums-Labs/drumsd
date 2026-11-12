@@ -52,7 +52,7 @@ drums_boot_main() {
   [ "$(id -u)" = 0 ] || die "run as root"
   [ -r "$E/boot.env" ] || die "$E/boot.env missing: install.sh has not completed on this host"
   . "$E/boot.env"     # TMPFS_GIB IMAGE_SHA256 IMAGE_ID
-  local lab="$O/src/drums-lab/benchmark" q="$D/image/Ubuntu.qcow2"
+  local lab="$O/src/drumsd/python" q="$D/image/Ubuntu.qcow2"
   case "${1:-}" in
     prepare)
       drums_mount_state "$TMPFS_GIB"
