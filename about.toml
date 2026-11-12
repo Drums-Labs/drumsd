@@ -1,0 +1,12 @@
+# cargo-about (https://github.com/EmbarkStudios/cargo-about) settings: THIRD_PARTY_LICENSES is generated from this file
+# and about.hbs with `cargo about generate --workspace --all-features about.hbs -o THIRD_PARTY_LICENSES`.
+# Every licence in this list is permissive; a crate under anything else fails the run instead of slipping into the file.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
