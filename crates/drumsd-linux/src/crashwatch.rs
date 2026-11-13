@@ -279,7 +279,15 @@ impl CrashWatch {
             cgroup_from: from,
             chrome_cgroups,
         };
-        tracing::warn!("crash: {} pid {} ({:?}, parent {:?}) died of {} in {:?} (attributed: {how})", ev.tgid, ev.pid, ev.comm, ev.parent_comm, ev.signal_name, ev.cgroup);
+        tracing::warn!(
+            "crash: {} pid {} ({:?}, parent {:?}) died of {} in {:?} (attributed: {how})",
+            ev.tgid,
+            ev.pid,
+            ev.comm,
+            ev.parent_comm,
+            ev.signal_name,
+            ev.cgroup
+        );
         let mut g = self.inner.lock().unwrap();
         *g.attributed.entry(how).or_default() += 1;
         g.events.push_back(ev);
@@ -354,7 +362,13 @@ impl CrashWatch {
         }
         let mut excused = vec![];
         for e in &unattributed {
-            let what = format!("{} (pid {}) died of {} at {:.3} and could not be attributed to a cgroup", e.comm.as_deref().unwrap_or("?"), e.tgid, e.signal_name, e.epoch);
+            let what = format!(
+                "{} (pid {}) died of {} at {:.3} and could not be attributed to a cgroup",
+                e.comm.as_deref().unwrap_or("?"),
+                e.tgid,
+                e.signal_name,
+                e.epoch
+            );
             match &e.chrome_cgroups {
                 Some(c) if !c.is_empty() => {
                     if c.iter().any(|x| mine(x)) {
@@ -532,8 +546,13 @@ mod tests {
     fn parses_exit_records_and_skips_other_events() {
         let d = datagram(&[(PROC_EVENT_EXIT, 10, 10, 4, 5, 5), (0x1, 11, 11, 0, 5, 5), (PROC_EVENT_EXIT, 12, 10, 0x84, 5, 5)]);
         let r = parse_datagram(&d);
-        assert_eq!(r, vec![ExitRecord { pid: 10, tgid: 10, exit_code: 4, parent_pid: 5, parent_tgid: 5 },
-                           ExitRecord { pid: 12, tgid: 10, exit_code: 0x84, parent_pid: 5, parent_tgid: 5 }]);
+        assert_eq!(
+            r,
+            vec![
+                ExitRecord { pid: 10, tgid: 10, exit_code: 4, parent_pid: 5, parent_tgid: 5 },
+                ExitRecord { pid: 12, tgid: 10, exit_code: 0x84, parent_pid: 5, parent_tgid: 5 }
+            ]
+        );
         assert!(parse_datagram(&d[..20]).is_empty(), "a truncated message is ignored");
     }
 
@@ -614,7 +633,13 @@ mod tests {
     const A: &str = "/system.slice/drumsbench-pool.scope/drumsbench-m-1-pool.scope/drumsbench-m-1-r1.scope";
     const B: &str = "/system.slice/drumsbench-pool.scope/drumsbench-m-2-pool.scope/drumsbench-m-2-r1.scope";
     fn comm_of(p: i32) -> Option<String> {
-        Some(match p { 40..=49 => "chrome", _ => "soffice.bin" }.to_string())
+        Some(
+            match p {
+                40..=49 => "chrome",
+                _ => "soffice.bin",
+            }
+            .to_string(),
+        )
     }
 
     #[test]

@@ -102,24 +102,12 @@ impl OsConfig {
                 return Err(format!("pool {}: exactly one of android, windows", p.name));
             }
         }
-        let mut ranges: Vec<(u32, u32, &str)> = self
-            .pools
-            .iter()
-            .map(|p| {
-                (
-                    p.port_base as u32,
-                    p.port_base as u32 + 2 * p.max_desktops as u32,
-                    p.name.as_str(),
-                )
-            })
-            .collect();
+        let mut ranges: Vec<(u32, u32, &str)> =
+            self.pools.iter().map(|p| (p.port_base as u32, p.port_base as u32 + 2 * p.max_desktops as u32, p.name.as_str())).collect();
         ranges.sort();
         for w in ranges.windows(2) {
             if w[0].1 > w[1].0 {
-                return Err(format!(
-                    "pools {} and {} have overlapping port ranges",
-                    w[0].2, w[1].2
-                ));
+                return Err(format!("pools {} and {} have overlapping port ranges", w[0].2, w[1].2));
             }
         }
         Ok(())
@@ -133,10 +121,7 @@ pub struct OsError {
 }
 impl OsError {
     pub fn new(status: u16, m: impl Into<String>) -> OsError {
-        OsError {
-            status,
-            message: m.into(),
-        }
+        OsError { status, message: m.into() }
     }
 }
 type R<T> = Result<T, OsError>;
@@ -213,10 +198,7 @@ pub struct OsPools {
 }
 
 fn now() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
 }
 fn sha(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
@@ -225,11 +207,7 @@ fn sha(s: &str) -> String {
 impl OsPools {
     pub fn new(cfg: OsConfig) -> Result<Arc<OsPools>, String> {
         std::fs::create_dir_all(&cfg.journal_dir).map_err(|e| e.to_string())?;
-        let ev = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(cfg.journal_dir.join("events.jsonl"))
-            .map_err(|e| e.to_string())?;
+        let ev = std::fs::OpenOptions::new().create(true).append(true).open(cfg.journal_dir.join("events.jsonl")).map_err(|e| e.to_string())?;
         let mut pools = BTreeMap::new();
         for p in &cfg.pools {
             let tasks = match &p.tasks_dir {
@@ -268,42 +246,20 @@ impl OsPools {
     pub async fn cleanup_stale(&self) {
         for p in self.pools.values() {
             if let Some(a) = &p.cfg.android {
-                let o = crate::exec::run(
-                    &a.docker,
-                    &["ps", "-aq", "--filter", "name=^drums-os-"],
-                    None,
-                    crate::exec::secs(30.0),
-                )
-                .await;
+                let o = crate::exec::run(&a.docker, &["ps", "-aq", "--filter", "name=^drums-os-"], None, crate::exec::secs(30.0)).await;
                 for id in o.text().split_whitespace() {
-                    let _ = crate::exec::run(
-                        &a.docker,
-                        &["rm", "-f", id],
-                        None,
-                        crate::exec::secs(30.0),
-                    )
-                    .await;
+                    let _ = crate::exec::run(&a.docker, &["rm", "-f", id], None, crate::exec::secs(30.0)).await;
                 }
                 let _ = crate::exec::run(
                     "sh",
-                    &[
-                        "-c",
-                        &format!(
-                            "grep ' {}/' /proc/mounts | cut -d' ' -f2 | xargs -r -n1 umount -l",
-                            a.work_dir.display()
-                        ),
-                    ],
+                    &["-c", &format!("grep ' {}/' /proc/mounts | cut -d' ' -f2 | xargs -r -n1 umount -l", a.work_dir.display())],
                     None,
                     crate::exec::secs(30.0),
                 )
                 .await;
             }
             // per-desktop state of an earlier daemon (overlay uppers, emulator logs, VM overlays) is never reused
-            let wd = p.cfg.android.as_ref().map(|a| a.work_dir.clone()).or(p
-                .cfg
-                .windows
-                .as_ref()
-                .map(|w| w.work_dir.clone()));
+            let wd = p.cfg.android.as_ref().map(|a| a.work_dir.clone()).or(p.cfg.windows.as_ref().map(|w| w.work_dir.clone()));
             if let Some(wd) = wd {
                 // its processes (VMs, emulators) are killed by their recorded process group
                 let n = crate::exec::kill_recorded_groups(&wd);
@@ -313,13 +269,7 @@ impl OsPools {
                 if let Ok(rd) = std::fs::read_dir(&wd) {
                     for e in rd.flatten() {
                         if e.file_name().to_string_lossy().starts_with("drums-os-") {
-                            let _ = crate::exec::run(
-                                "rm",
-                                &["-rf", &e.path().to_string_lossy()],
-                                None,
-                                crate::exec::secs(600.0),
-                            )
-                            .await;
+                            let _ = crate::exec::run("rm", &["-rf", &e.path().to_string_lossy()], None, crate::exec::secs(600.0)).await;
                         }
                     }
                 }
@@ -335,12 +285,7 @@ impl OsPools {
     }
 
     pub fn slot(&self, id: &str) -> R<Arc<Slot>> {
-        self.slots
-            .read()
-            .unwrap()
-            .get(id)
-            .cloned()
-            .ok_or_else(|| OsError::new(404, format!("no env {id}")))
+        self.slots.read().unwrap().get(id).cloned().ok_or_else(|| OsError::new(404, format!("no env {id}")))
     }
 
     fn resolve_task(&self, pool: &PoolRt, task: Option<Value>) -> R<Option<Task>> {
@@ -348,20 +293,12 @@ impl OsPools {
             None | Some(Value::Null) => Ok(None),
             Some(Value::String(id)) => {
                 let t = pool.tasks.get(&id).cloned().or_else(|| {
-                    let m: Vec<_> = pool
-                        .tasks
-                        .values()
-                        .filter(|t| id.len() >= 8 && t.id.starts_with(&id))
-                        .collect();
+                    let m: Vec<_> = pool.tasks.values().filter(|t| id.len() >= 8 && t.id.starts_with(&id)).collect();
                     (m.len() == 1).then(|| m[0].clone())
                 });
-                t.map(Some).ok_or_else(|| {
-                    OsError::new(404, format!("no task {id} in pool {}", pool.cfg.name))
-                })
+                t.map(Some).ok_or_else(|| OsError::new(404, format!("no task {id} in pool {}", pool.cfg.name)))
             }
-            Some(v) => serde_json::from_value(v)
-                .map(Some)
-                .map_err(|e| OsError::new(400, format!("task: {e}"))),
+            Some(v) => serde_json::from_value(v).map(Some).map_err(|e| OsError::new(400, format!("task: {e}"))),
         }
     }
 
@@ -371,26 +308,13 @@ impl OsPools {
         } else if let Some(s) = self.states.read().unwrap().get(image) {
             (self.pools[&s.pool].clone(), Some(s.image.clone()))
         } else {
-            return Err(OsError::new(
-                404,
-                format!("no image or saved state {image}"),
-            ));
+            return Err(OsError::new(404, format!("no image or saved state {image}")));
         };
         let task = self.resolve_task(&pool, task)?;
         if let Some(t) = &task {
-            let os = if pool.cfg.android.is_some() {
-                "android"
-            } else {
-                "windows"
-            };
+            let os = if pool.cfg.android.is_some() { "android" } else { "windows" };
             if t.os != os {
-                return Err(OsError::new(
-                    400,
-                    format!(
-                        "task {} is for {}, pool {} is {os}",
-                        t.id, t.os, pool.cfg.name
-                    ),
-                ));
+                return Err(OsError::new(400, format!("task {} is for {}, pool {} is {os}", t.id, t.os, pool.cfg.name)));
             }
         }
         let n = {
@@ -398,35 +322,18 @@ impl OsPools {
             *g += 1;
             *g
         };
-        let (prefix, os) = if pool.cfg.android.is_some() {
-            ("a", "android")
-        } else {
-            ("w", "windows")
-        };
+        let (prefix, os) = if pool.cfg.android.is_some() { ("a", "android") } else { ("w", "windows") };
         let id = format!("{prefix}{n:05}");
         let name = format!("drums-os-{id}");
         // choose a free index (port) and insert the slot under one write lock: concurrent creates never share a port
         let slot = {
             let mut slots = self.slots.write().unwrap();
-            let used: std::collections::BTreeSet<usize> = slots
-                .values()
-                .filter(|s| {
-                    s.pool.cfg.name == pool.cfg.name && s.view.read().unwrap().state != "destroyed"
-                })
-                .map(|s| s.index)
-                .collect();
+            let used: std::collections::BTreeSet<usize> =
+                slots.values().filter(|s| s.pool.cfg.name == pool.cfg.name && s.view.read().unwrap().state != "destroyed").map(|s| s.index).collect();
             if used.len() >= pool.cfg.max_desktops {
-                return Err(OsError::new(
-                    429,
-                    format!(
-                        "pool {} is full ({} desktops)",
-                        pool.cfg.name, pool.cfg.max_desktops
-                    ),
-                ));
+                return Err(OsError::new(429, format!("pool {} is full ({} desktops)", pool.cfg.name, pool.cfg.max_desktops)));
             }
-            let index = (0..pool.cfg.max_desktops)
-                .find(|i| !used.contains(i))
-                .unwrap();
+            let index = (0..pool.cfg.max_desktops).find(|i| !used.contains(i)).unwrap();
             let (desk, backend, port) = if let Some(a) = &pool.cfg.android {
                 let port = match a.mode {
                     // emulator console ports must be even; adb uses console + 1
@@ -437,20 +344,12 @@ impl OsPools {
                     crate::android::AndroidMode::Emulator => "android-emulator",
                     crate::android::AndroidMode::Redroid => "android-redroid",
                 };
-                (
-                    Desk::A(AndroidDesk::new(a.clone(), name, port)),
-                    backend,
-                    port,
-                )
+                (Desk::A(AndroidDesk::new(a.clone(), name, port)), backend, port)
             } else {
                 let w = pool.cfg.windows.as_ref().unwrap();
                 let port = pool.cfg.port_base + index as u16;
                 let img = win_image.clone().unwrap_or_else(|| WinDesk::clean_image(w));
-                (
-                    Desk::W(WinDesk::new(w.clone(), name, port, img)),
-                    "windows-qemu",
-                    port,
-                )
+                (Desk::W(WinDesk::new(w.clone(), name, port, img)), "windows-qemu", port)
             };
             let view = SlotView {
                 id: id.clone(),
@@ -491,8 +390,7 @@ impl OsPools {
             }
         };
         self.event("create", json!({"slot": id, "pool": pool.cfg.name, "image": image, "ok": r.is_ok(), "timing": r.as_ref().ok(), "error": r.as_ref().err()}));
-        self.begin_episode(&slot, &mut desk, r, "create", op_t0)
-            .await
+        self.begin_episode(&slot, &mut desk, r, "create", op_t0).await
     }
 
     /// After a start or reset: run the gates and the task setup; returns the view.
@@ -529,11 +427,7 @@ impl OsPools {
         gates.push(Gate {
             name: "process".into(),
             ok: Some(alive),
-            detail: if alive {
-                "running".into()
-            } else {
-                "not running".into()
-            },
+            detail: if alive { "running".into() } else { "not running".into() },
             seconds: t.elapsed().as_secs_f64(),
         });
         gates.push(Gate {
@@ -559,17 +453,9 @@ impl OsPools {
                 let h = sha(&text);
                 let want = slot.pool.clean_hash.read().unwrap().clone();
                 match want {
-                    Some(w) if w == h => Gate {
-                        name: "state_hash".into(),
-                        ok: Some(true),
-                        detail: h,
-                        seconds: probe_s,
-                    },
+                    Some(w) if w == h => Gate { name: "state_hash".into(), ok: Some(true), detail: h, seconds: probe_s },
                     Some(w) => {
-                        let p = self
-                            .cfg
-                            .journal_dir
-                            .join(format!("probe-{}-{}.txt", slot.id, episode));
+                        let p = self.cfg.journal_dir.join(format!("probe-{}-{}.txt", slot.id, episode));
                         let _ = std::fs::write(&p, &text);
                         Gate {
                             name: "state_hash".into(),
@@ -580,38 +466,21 @@ impl OsPools {
                     }
                     None => {
                         *slot.pool.clean_hash.write().unwrap() = Some(h.clone());
-                        let p = self
-                            .cfg
-                            .journal_dir
-                            .join(format!("clean-probe-{}.txt", slot.pool.cfg.name));
+                        let p = self.cfg.journal_dir.join(format!("clean-probe-{}.txt", slot.pool.cfg.name));
                         let _ = std::fs::write(&p, &text);
                         self.event("clean_hash_adopted", json!({"pool": slot.pool.cfg.name, "slot": slot.id, "hash": h, "probe": p}));
-                        Gate {
-                            name: "state_hash".into(),
-                            ok: Some(true),
-                            detail: format!("{h} (adopted as the pool's clean hash)"),
-                            seconds: probe_s,
-                        }
+                        Gate { name: "state_hash".into(), ok: Some(true), detail: format!("{h} (adopted as the pool's clean hash)"), seconds: probe_s }
                     }
                 }
             }
-            Err(e) => Gate {
-                name: "state_hash".into(),
-                ok: Some(false),
-                detail: format!("probe failed: {e}"),
-                seconds: probe_s,
-            },
+            Err(e) => Gate { name: "state_hash".into(), ok: Some(false), detail: format!("probe failed: {e}"), seconds: probe_s },
         };
         gates.push(g);
         // isolation: the clean hash proved no other canary is present; this episode's canary was written after the probe
         gates.push(Gate {
             name: "isolation".into(),
             ok: Some(canary_ok),
-            detail: if canary_ok {
-                format!("canary {canary} written")
-            } else {
-                format!("canary {canary} not confirmed")
-            },
+            detail: if canary_ok { format!("canary {canary} written") } else { format!("canary {canary} not confirmed") },
             seconds: 0.0,
         });
         // the desktop is back and proven clean: everything up to here is the reset (or create) latency
@@ -628,10 +497,7 @@ impl OsPools {
                     Ok((0, _)) => {}
                     Ok((rc, o)) => {
                         ok = false;
-                        detail = format!(
-                            "{c:?} exit {rc}: {}",
-                            o.chars().take(300).collect::<String>()
-                        );
+                        detail = format!("{c:?} exit {rc}: {}", o.chars().take(300).collect::<String>());
                         break;
                     }
                     Err(e) => {
@@ -644,11 +510,7 @@ impl OsPools {
             gates.push(Gate {
                 name: "task_setup".into(),
                 ok: Some(ok),
-                detail: if ok {
-                    format!("{} commands", task.setup.len())
-                } else {
-                    detail
-                },
+                detail: if ok { format!("{} commands", task.setup.len()) } else { detail },
                 seconds: t.elapsed().as_secs_f64(),
             });
         }
@@ -658,15 +520,12 @@ impl OsPools {
             detail: format!("judged {:.1} s after ready", slot.pool.cfg.alive_after_s),
             seconds: 0.0,
         });
-        let failed: Vec<String> = gates
-            .iter()
-            .filter(|g| g.ok == Some(false))
-            .map(|g| format!("{}: {}", g.name, g.detail))
-            .collect();
+        let failed: Vec<String> = gates.iter().filter(|g| g.ok == Some(false)).map(|g| format!("{}: {}", g.name, g.detail)).collect();
         {
             let mut v = slot.view.write().unwrap();
             v.gates = gates;
-            v.cost = json!({"op": op, "timing": timing, "ready_s": ready_s, "setup_s": t_setup.elapsed().as_secs_f64(), "total_s": op_t0.elapsed().as_secs_f64()});
+            v.cost =
+                json!({"op": op, "timing": timing, "ready_s": ready_s, "setup_s": t_setup.elapsed().as_secs_f64(), "total_s": op_t0.elapsed().as_secs_f64()});
             if failed.is_empty() {
                 v.state = "ready".into();
                 v.reason = None;
@@ -709,11 +568,7 @@ impl OsPools {
         if let Some(g) = v.gates.iter_mut().find(|g| g.name == "alive_after_resume") {
             g.ok = Some(ok);
             g.seconds = t.elapsed().as_secs_f64();
-            g.detail = if ok {
-                "running and answering".into()
-            } else {
-                "not running or not answering".into()
-            };
+            g.detail = if ok { "running and answering".into() } else { "not running or not answering".into() };
         }
         let all = v.gates.iter().all(|g| g.ok == Some(true));
         if !ok {
@@ -725,12 +580,7 @@ impl OsPools {
         }
     }
 
-    async fn probe(
-        &self,
-        slot: &Slot,
-        desk: &Desk,
-        canary: Option<&str>,
-    ) -> Result<String, String> {
+    async fn probe(&self, slot: &Slot, desk: &Desk, canary: Option<&str>) -> Result<String, String> {
         let pc = &slot.pool.cfg;
         let p = pc.probe.clone().unwrap_or_else(|| match desk {
             Desk::A(_) => AndroidDesk::PROBE.to_string(),
@@ -743,20 +593,10 @@ impl OsPools {
                 .unwrap_or_else(|| WinDesk::PROBE_PY.to_string())
                 .replace("{EXCLUDE}", &pc.probe_exclude)
                 .replace("{CANARY}", canary.unwrap_or(""));
-            let v = d
-                .execute(json!([d.cfg.python, "-c", code]), false, 60.0)
-                .await?;
+            let v = d.execute(json!([d.cfg.python, "-c", code]), false, 60.0).await?;
             let rc = v["returncode"].as_i64().unwrap_or(-1);
             if rc != 0 {
-                return Err(format!(
-                    "probe exit {rc}: {}",
-                    v["error"]
-                        .as_str()
-                        .unwrap_or("")
-                        .chars()
-                        .take(300)
-                        .collect::<String>()
-                ));
+                return Err(format!("probe exit {rc}: {}", v["error"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
             }
             return Ok(v["output"].as_str().unwrap_or("").replace("\r\n", "\n"));
         }
@@ -764,10 +604,7 @@ impl OsPools {
         if let Some(c) = canary {
             cmd = match desk {
                 Desk::A(_) => format!("{cmd}; {} && echo {CANARY_OK}", canary_write(desk, c)),
-                Desk::W(_) => format!(
-                    "{cmd}; {}; if ($?) {{ '{CANARY_OK}' }}",
-                    canary_write(desk, c)
-                ),
+                Desk::W(_) => format!("{cmd}; {}; if ($?) {{ '{CANARY_OK}' }}", canary_write(desk, c)),
             };
         }
         let (rc, out) = self.run_cmd(desk, &cmd, 60.0).await?;
@@ -778,12 +615,7 @@ impl OsPools {
     }
 
     /// Run a command in the desktop (Android sh / Windows PowerShell). Returns (rc, stdout).
-    pub async fn run_cmd(
-        &self,
-        desk: &Desk,
-        cmd: &str,
-        timeout_s: f64,
-    ) -> Result<(i32, String), String> {
+    pub async fn run_cmd(&self, desk: &Desk, cmd: &str, timeout_s: f64) -> Result<(i32, String), String> {
         match desk {
             Desk::A(d) => {
                 let o = d.shell(cmd, timeout_s).await;
@@ -804,12 +636,7 @@ impl OsPools {
             let mut v = slot.view.write().unwrap();
             match v.state.as_str() {
                 "ready" | "down" => v.state = "resetting".into(),
-                s => {
-                    return Err(OsError::new(
-                        409,
-                        format!("env is {s}: reset is allowed from ready, down"),
-                    ))
-                }
+                s => return Err(OsError::new(409, format!("env is {s}: reset is allowed from ready, down"))),
             }
         }
         let r = match &mut *desk {
@@ -817,8 +644,7 @@ impl OsPools {
             Desk::W(d) => d.reset().await,
         };
         self.event("reset", json!({"slot": id, "ok": r.is_ok(), "timing": r.as_ref().ok(), "error": r.as_ref().err()}));
-        self.begin_episode(&slot, &mut desk, r, "reset", op_t0)
-            .await
+        self.begin_episode(&slot, &mut desk, r, "reset", op_t0).await
     }
 
     pub async fn step(self: &Arc<Self>, id: &str, action: Value, screenshot: bool) -> R<Value> {
@@ -883,12 +709,7 @@ impl OsPools {
     /// alive gate, judged now if still pending, and the canary check).
     pub async fn verify(self: &Arc<Self>, id: &str) -> R<Value> {
         let slot = self.slot(id)?;
-        let task = slot
-            .task
-            .read()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| OsError::new(400, "env has no task"))?;
+        let task = slot.task.read().unwrap().clone().ok_or_else(|| OsError::new(400, "env has no task"))?;
         let t0 = std::time::Instant::now();
         let mut desk = slot.desk.lock().await;
         let episode = slot.view.read().unwrap().episode;
@@ -907,10 +728,7 @@ impl OsPools {
         let list = self.run_cmd(&desk, &canary_list(&desk), 30.0).await;
         let iso_ok = match &list {
             Ok((_, out)) => {
-                out.split_whitespace()
-                    .map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s))
-                    .filter(|s| s.starts_with("drums_canary_"))
-                    .collect::<Vec<_>>()
+                out.split_whitespace().map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s)).filter(|s| s.starts_with("drums_canary_")).collect::<Vec<_>>()
                     == vec![mine.as_str()]
             }
             Err(_) => false,
@@ -926,10 +744,7 @@ impl OsPools {
                 v.gates.push(Gate {
                     name: "isolation_end".into(),
                     ok: Some(false),
-                    detail: format!(
-                        "canaries at verify: {:?}",
-                        list.as_ref().map(|x| x.1.trim().to_string())
-                    ),
+                    detail: format!("canaries at verify: {:?}", list.as_ref().map(|x| x.1.trim().to_string())),
                     seconds: 0.0,
                 });
                 v.verdict = "invalid".into();
@@ -937,11 +752,7 @@ impl OsPools {
             if !alive {
                 v.verdict = "invalid".into();
             }
-            if let Some(g) = v
-                .gates
-                .iter_mut()
-                .find(|g| g.name == "alive_after_resume" && g.ok.is_none())
-            {
+            if let Some(g) = v.gates.iter_mut().find(|g| g.name == "alive_after_resume" && g.ok.is_none()) {
                 g.ok = Some(alive);
                 g.detail = "judged at verify".into();
             }
@@ -960,7 +771,10 @@ impl OsPools {
         let slot = self.slot(id)?;
         let mut desk = slot.desk.lock().await;
         let Desk::W(d) = &mut *desk else {
-            return Err(OsError::new(501, "capture is not supported by the android backends (redroid has no memory snapshot; read-only emulators cannot save snapshots)"));
+            return Err(OsError::new(
+                501,
+                "capture is not supported by the android backends (redroid has no memory snapshot; read-only emulators cannot save snapshots)",
+            ));
         };
         if slot.view.read().unwrap().state != "ready" {
             return Err(OsError::new(409, "capture needs ready"));
@@ -971,13 +785,7 @@ impl OsPools {
         }
         let dir = d.cfg.work_dir.join("states").join(&sid);
         let (img, timing) = d.capture(&dir).await.map_err(e500)?;
-        let st = SavedState {
-            id: sid.clone(),
-            pool: slot.pool.cfg.name.clone(),
-            from_slot: id.into(),
-            image: img,
-            created_epoch: now(),
-        };
+        let st = SavedState { id: sid.clone(), pool: slot.pool.cfg.name.clone(), from_slot: id.into(), image: img, created_epoch: now() };
         self.states.write().unwrap().insert(sid.clone(), st.clone());
         let out = json!({"id": sid, "state": st, "timing": timing});
         self.event("capture", out.clone());
@@ -988,21 +796,13 @@ impl OsPools {
         let t0 = std::time::Instant::now();
         let cap = self.capture(id, None).await?;
         let sid = cap["id"].as_str().unwrap().to_string();
-        let task = self
-            .slot(id)?
-            .task
-            .read()
-            .unwrap()
-            .clone()
-            .map(|t| serde_json::to_value(t).unwrap());
+        let task = self.slot(id)?.task.read().unwrap().clone().map(|t| serde_json::to_value(t).unwrap());
         let mut futs = vec![];
         for _ in 0..n {
             let me = self.clone();
             let s = sid.clone();
             let t = task.clone();
-            futs.push(tokio::spawn(
-                async move { me.create_from_state(&s, t).await },
-            ));
+            futs.push(tokio::spawn(async move { me.create_from_state(&s, t).await }));
         }
         let mut children = vec![];
         for f in futs {
@@ -1046,10 +846,7 @@ impl OsPools {
         let slot = self.slot(id)?;
         let mut v = slot.view.write().unwrap();
         if v.state != "quarantined" {
-            return Err(OsError::new(
-                409,
-                format!("env is {}: release needs quarantined", v.state),
-            ));
+            return Err(OsError::new(409, format!("env is {}: release needs quarantined", v.state)));
         }
         v.state = "down".into();
         Ok(v.clone())
@@ -1067,21 +864,12 @@ impl OsPools {
         if let Err(e) = &r {
             v.reason = Some(format!("stop: {e}"));
         }
-        self.event(
-            "destroy",
-            json!({"slot": id, "ok": r.is_ok(), "error": r.err()}),
-        );
+        self.event("destroy", json!({"slot": id, "ok": r.is_ok(), "error": r.err()}));
         Ok(v.clone())
     }
 
     pub fn list(&self, include_destroyed: bool) -> Vec<SlotView> {
-        self.slots
-            .read()
-            .unwrap()
-            .values()
-            .map(|s| s.view.read().unwrap().clone())
-            .filter(|v| include_destroyed || v.state != "destroyed")
-            .collect()
+        self.slots.read().unwrap().values().map(|s| s.view.read().unwrap().clone()).filter(|v| include_destroyed || v.state != "destroyed").collect()
     }
 
     pub fn images(&self) -> Vec<Value> {
@@ -1091,13 +879,14 @@ impl OsPools {
     }
 
     pub fn tasks(&self, os: Option<&str>) -> Vec<Value> {
-        self.pools.values().flat_map(|p| p.tasks.values().map(|t| json!({"id": t.id, "os": t.os, "pool": p.cfg.name, "instruction": t.instruction, "source": t.source}))).filter(|t| os.is_none_or(|o| t["os"] == o)).collect()
-    }
-    pub fn task(&self, id: &str) -> Option<Value> {
         self.pools
             .values()
-            .find_map(|p| p.tasks.get(id))
-            .map(|t| serde_json::to_value(t).unwrap())
+            .flat_map(|p| p.tasks.values().map(|t| json!({"id": t.id, "os": t.os, "pool": p.cfg.name, "instruction": t.instruction, "source": t.source})))
+            .filter(|t| os.is_none_or(|o| t["os"] == o))
+            .collect()
+    }
+    pub fn task(&self, id: &str) -> Option<Value> {
+        self.pools.values().find_map(|p| p.tasks.get(id)).map(|t| serde_json::to_value(t).unwrap())
     }
 
     pub fn health(&self) -> Value {
@@ -1105,29 +894,12 @@ impl OsPools {
         let mut per: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
         for s in slots.values() {
             let v = s.view.read().unwrap();
-            *per.entry(v.pool.clone())
-                .or_default()
-                .entry(v.state.clone())
-                .or_default() += 1;
+            *per.entry(v.pool.clone()).or_default().entry(v.state.clone()).or_default() += 1;
         }
         let mem = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-        let kv = |k: &str| {
-            mem.lines()
-                .find(|l| l.starts_with(k))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0)
-                / 1024
-        };
-        let live: usize = per
-            .values()
-            .map(|m| {
-                m.iter()
-                    .filter(|(k, _)| *k != "destroyed")
-                    .map(|(_, n)| n)
-                    .sum::<usize>()
-            })
-            .sum();
+        let kv =
+            |k: &str| mem.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) / 1024;
+        let live: usize = per.values().map(|m| m.iter().filter(|(k, _)| *k != "destroyed").map(|(_, n)| n).sum::<usize>()).sum();
         json!({"ok": true, "mode": "os", "pools": per, "images": self.images(), "host": {"mem_total_mib": kv("MemTotal:"), "mem_available_mib": kv("MemAvailable:"), "ksm_pages_sharing": std::fs::read_to_string("/sys/kernel/mm/ksm/pages_sharing").ok().map(|s| s.trim().to_string())},
                "live_desktops": live, "host_usd_per_hour": self.cfg.host_usd_per_hour, "usd_per_desktop_hour": if live > 0 { self.cfg.host_usd_per_hour / live as f64 } else { 0.0 }})
     }
@@ -1154,9 +926,7 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 pub fn b64(d: &[u8]) -> String {
     let mut o = String::with_capacity(d.len().div_ceil(3) * 4);
     for c in d.chunks(3) {
-        let n = (c[0] as u32) << 16
-            | (*c.get(1).unwrap_or(&0) as u32) << 8
-            | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= c.len() {
                 o.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -1182,19 +952,12 @@ mod tests {
     #[test]
     fn config_validation() {
         let a = r#"{"mode":"redroid","image":"x","golden_data":"/g","work_dir":"/w"}"#;
-        let mk = |pools: &str| {
-            serde_json::from_str::<OsConfig>(&format!(
-                r#"{{"journal_dir":"/j","pools":[{pools}]}}"#
-            ))
-            .unwrap()
-        };
-        assert!(mk(&format!(
-            r#"{{"name":"a","port_base":6000,"max_desktops":10,"android":{a}}}"#
-        ))
-        .validate()
-        .is_ok());
+        let mk = |pools: &str| serde_json::from_str::<OsConfig>(&format!(r#"{{"journal_dir":"/j","pools":[{pools}]}}"#)).unwrap();
+        assert!(mk(&format!(r#"{{"name":"a","port_base":6000,"max_desktops":10,"android":{a}}}"#)).validate().is_ok());
         assert!(mk(&format!(r#"{{"name":"a","port_base":6000,"android":{a}}},{{"name":"a","port_base":9000,"android":{a}}}"#)).validate().is_err());
-        assert!(mk(&format!(r#"{{"name":"a","port_base":6000,"max_desktops":10,"android":{a}}},{{"name":"b","port_base":6010,"android":{a}}}"#)).validate().is_err());
+        assert!(mk(&format!(r#"{{"name":"a","port_base":6000,"max_desktops":10,"android":{a}}},{{"name":"b","port_base":6010,"android":{a}}}"#))
+            .validate()
+            .is_err());
         assert!(mk(r#"{"name":"a","port_base":6000}"#).validate().is_err());
     }
 }

@@ -33,7 +33,11 @@ pub fn lock_gates(slot_dir: &Path, images: &Path, hook_dir: &Path, restore_log_t
     let want_sha = rec["filelocks_img_sha256"].as_str().map(String::from);
     let applied = locks::applied_from_log(restore_log_text);
     let a = if now_sha != want_sha {
-        GateResult::fail(Gate::LockApplied, secs(t0), json!({"error": "filelocks.img changed between the dump and the restore", "now": now_sha, "dumped": want_sha}))
+        GateResult::fail(
+            Gate::LockApplied,
+            secs(t0),
+            json!({"error": "filelocks.img changed between the dump and the restore", "now": now_sha, "dumped": want_sha}),
+        )
     } else if !locks::same_entries(&applied, &dumped) {
         GateResult::fail(Gate::LockApplied, secs(t0), json!({"applied": applied, "dumped": dumped}))
     } else {
@@ -67,7 +71,9 @@ pub fn init_identity(pid: i32, argv_marker: &str, slot_cg_rel: &str) -> GateResu
             continue;
         }
         if let Some(a) = procfs::cmdline(p) {
-            if procfs::argv_has_marker(&a, "sharedos_rootfs.tree", argv_marker) && procfs::nspid(p).map(|n| n.len() >= 2 && n.last().unwrap() == "1").unwrap_or(false) {
+            if procfs::argv_has_marker(&a, "sharedos_rootfs.tree", argv_marker)
+                && procfs::nspid(p).map(|n| n.len() >= 2 && n.last().unwrap() == "1").unwrap_or(false)
+            {
                 found.push(p);
             }
         }
@@ -127,9 +133,17 @@ pub fn confirmed_strays(first: Vec<i32>, settle: std::time::Duration, again: imp
 pub fn cgroup_gate(pid: i32, tree_cg: &Path, limits_cg: &Path, want: &cgroup::Limits) -> GateResult {
     let t0 = Instant::now();
     let rel = tree_cg.strip_prefix(cgroup::CG_ROOT).map(|p| format!("/{}", p.display())).unwrap_or_default();
-    let got = cgroup::read_limits(tree_cg).and_then(|leaf| if limits_cg == tree_cg { Ok(leaf) } else {
-        let slot = cgroup::read_limits(limits_cg)?;
-        if slot == leaf { Ok(leaf) } else { Err(std::io::Error::other(format!("slot cgroup limits {slot:?} != tree cgroup limits {leaf:?}"))) }
+    let got = cgroup::read_limits(tree_cg).and_then(|leaf| {
+        if limits_cg == tree_cg {
+            Ok(leaf)
+        } else {
+            let slot = cgroup::read_limits(limits_cg)?;
+            if slot == leaf {
+                Ok(leaf)
+            } else {
+                Err(std::io::Error::other(format!("slot cgroup limits {slot:?} != tree cgroup limits {leaf:?}")))
+            }
+        }
     });
     let members = procfs::ns_procs(pid);
     let ns = procfs::ns_inode(pid, "pid");
@@ -151,7 +165,10 @@ pub fn cgroup_gate(pid: i32, tree_cg: &Path, limits_cg: &Path, want: &cgroup::Li
     let ok = limits_ok && init_ok && stray.is_empty() && oom_ok;
     // `failed` names the checks that failed, first, so a reason cut short still says which one it was
     let failed: Vec<&str> = [(!limits_ok, "limits"), (!init_ok, "init_cgroup"), (!stray.is_empty(), "outside_cgroup"), (!oom_ok, "oom_score_adj")]
-        .iter().filter(|(f, _)| *f).map(|(_, n)| *n).collect();
+        .iter()
+        .filter(|(f, _)| *f)
+        .map(|(_, n)| *n)
+        .collect();
     let d = json!({"failed": failed, "cgroup": rel, "init_cgroup": init_cg, "limits": got.as_ref().map_err(|e| e.to_string()), "want": want, "members": members.len(),
                    "outside_cgroup": stray, "outside_cgroup_procs": stray_comm,
                    "init_oom_score_adj": init_adj, "want_oom_score_adj": cgroup::SLOT_OOM_SCORE_ADJ, "negative_oom_score_adj": negative});
@@ -220,11 +237,7 @@ pub fn netns_gate(pid: i32, slot_dir: &Path) -> GateResult {
                 GateResult::fail(Gate::Netns, secs(t0), json!({"diff": d}))
             }
         }
-        (l, a, r, w) => GateResult::fail(
-            Gate::Netns,
-            secs(t0),
-            json!({"error": [l.err(), a.err(), r.err()], "checkpoint_record": w.is_some()}),
-        ),
+        (l, a, r, w) => GateResult::fail(Gate::Netns, secs(t0), json!({"error": [l.err(), a.err(), r.err()], "checkpoint_record": w.is_some()})),
     }
 }
 
@@ -326,7 +339,10 @@ mod tests {
         // the second read happens after the settle time, once per candidate
         let n = Cell::new(0);
         let t0 = Instant::now();
-        let v = confirmed_strays(vec![1, 2, 3], std::time::Duration::from_millis(30), |_| { n.set(n.get() + 1); Membership::Stray });
+        let v = confirmed_strays(vec![1, 2, 3], std::time::Duration::from_millis(30), |_| {
+            n.set(n.get() + 1);
+            Membership::Stray
+        });
         assert_eq!((v, n.get()), (vec![1, 2, 3], 3));
         assert!(t0.elapsed() >= std::time::Duration::from_millis(30));
     }

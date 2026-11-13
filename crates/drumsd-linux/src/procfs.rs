@@ -20,9 +20,7 @@ impl ProcFs for RealProc {
 }
 
 pub fn pids() -> Vec<i32> {
-    fs::read_dir("/proc")
-        .map(|d| d.filter_map(|e| e.ok()).filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok())).collect())
-        .unwrap_or_default()
+    fs::read_dir("/proc").map(|d| d.filter_map(|e| e.ok()).filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok())).collect()).unwrap_or_default()
 }
 
 pub fn cmdline(pid: i32) -> Option<Vec<String>> {

@@ -213,14 +213,7 @@ fn pack(src: &Path, dest: &Path, name: &str) -> io::Result<(PathBuf, u64)> {
     let part = dest.join(format!("{name}.tar.zst.partial"));
     let parent = src.parent().ok_or_else(|| io::Error::other("no parent"))?;
     let base = src.file_name().ok_or_else(|| io::Error::other("no name"))?;
-    let o = Command::new("tar")
-        .arg("--zstd")
-        .arg("-cf")
-        .arg(&part)
-        .arg("-C")
-        .arg(parent)
-        .arg(base)
-        .output()?;
+    let o = Command::new("tar").arg("--zstd").arg("-cf").arg(&part).arg("-C").arg(parent).arg(base).output()?;
     if !o.status.success() {
         let _ = fs::remove_file(&part);
         return Err(io::Error::other(format!("tar --zstd: {}", String::from_utf8_lossy(&o.stderr).trim())));
@@ -401,7 +394,10 @@ mod tests {
     }
 
     fn summ() -> Disposition {
-        Disposition::Summary { record: json!({"gates": {"gates": [{"gate": "alive", "status": "pass"}]}, "timings": {"restore_s": 1.5}}), reason: "valid".into() }
+        Disposition::Summary {
+            record: json!({"gates": {"gates": [{"gate": "alive", "status": "pass"}]}, "timings": {"restore_s": 1.5}}),
+            reason: "valid".into(),
+        }
     }
 
     fn put_old(p: &Path, bytes: usize, age_s: u64) {

@@ -290,7 +290,9 @@ fn d_state_warn_pct() -> f64 {
 
 impl Config {
     pub fn forgotten_dir(&self) -> PathBuf {
-        self.forgotten_dir.clone().unwrap_or_else(|| self.journal_dir.parent().map(|p| p.join("forgotten")).unwrap_or_else(|| self.journal_dir.join("forgotten")))
+        self.forgotten_dir
+            .clone()
+            .unwrap_or_else(|| self.journal_dir.parent().map(|p| p.join("forgotten")).unwrap_or_else(|| self.journal_dir.join("forgotten")))
     }
 }
 
@@ -509,5 +511,4 @@ mod tests {
         let c: Config = serde_json::from_value(v).unwrap();
         assert_eq!(c.retention.summary_max_gib, Some(2.0), "unset fields keep their defaults");
     }
-
 }

@@ -92,7 +92,8 @@ fn clear_soft_dirty(dir: &str, tree: Option<Vec<i64>>) {
     let t0 = crate::now_epoch();
     // the base's time for CRIU's pid-reuse check (--prev-images-uptime): read before the first clear, so every task
     // restored here started before it and any task started after the restore is dumped in full
-    let uptime_us: Option<u64> = fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())).map(|s| (s * 1e6) as u64);
+    let uptime_us: Option<u64> =
+        fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())).map(|s| (s * 1e6) as u64);
     let root = std::env::var("CRTOOLS_INIT_PID").unwrap_or_default();
     let mut errs: Vec<String> = vec![];
     let mut done: Vec<i64> = vec![];

@@ -65,14 +65,7 @@ pub struct Task {
 pub fn judge(c: &Check, stdout: &str, rc: i32) -> (bool, String) {
     let s = stdout.trim();
     let short: String = s.chars().take(200).collect();
-    if rc != 0
-        && c.equals.is_none()
-        && c.regex.is_none()
-        && c.contains.is_none()
-        && c.not_contains.is_none()
-        && c.min.is_none()
-        && c.max.is_none()
-    {
+    if rc != 0 && c.equals.is_none() && c.regex.is_none() && c.contains.is_none() && c.not_contains.is_none() && c.min.is_none() && c.max.is_none() {
         return (false, format!("exit {rc}"));
     }
     if let Some(e) = &c.equals {
@@ -113,20 +106,12 @@ pub fn judge(c: &Check, stdout: &str, rc: i32) -> (bool, String) {
 pub fn load_dir(dir: &Path) -> Result<BTreeMap<String, Task>, String> {
     let mut out = BTreeMap::new();
     let rd = std::fs::read_dir(dir).map_err(|e| format!("tasks dir {}: {e}", dir.display()))?;
-    let mut files: Vec<_> = rd
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
+    let mut files: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     files.sort();
     for f in files {
         let b = std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
         let v: Value = serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", f.display()))?;
-        let list = if v.is_array() {
-            v.as_array().unwrap().clone()
-        } else {
-            vec![v]
-        };
+        let list = if v.is_array() { v.as_array().unwrap().clone() } else { vec![v] };
         for t in list {
             let t: Task = serde_json::from_value(t).map_err(|e| format!("{}: {e}", f.display()))?;
             if out.insert(t.id.clone(), t.clone()).is_some() {
@@ -141,106 +126,18 @@ pub fn load_dir(dir: &Path) -> Result<BTreeMap<String, Task>, String> {
 mod tests {
     use super::*;
     fn c() -> Check {
-        Check {
-            cmd: "x".into(),
-            equals: None,
-            regex: None,
-            contains: None,
-            not_contains: None,
-            min: None,
-            max: None,
-        }
+        Check { cmd: "x".into(), equals: None, regex: None, contains: None, not_contains: None, min: None, max: None }
     }
     #[test]
     fn judges() {
-        assert!(
-            judge(
-                &Check {
-                    equals: Some("255".into()),
-                    ..c()
-                },
-                "255\n",
-                0
-            )
-            .0
-        );
-        assert!(
-            !judge(
-                &Check {
-                    equals: Some("255".into()),
-                    ..c()
-                },
-                "254",
-                0
-            )
-            .0
-        );
-        assert!(
-            judge(
-                &Check {
-                    regex: Some("^name=Ada$".into()),
-                    ..c()
-                },
-                "x\nname=Ada\ny",
-                0
-            )
-            .0
-        );
-        assert!(
-            !judge(
-                &Check {
-                    contains: Some("a".into()),
-                    ..c()
-                },
-                "b",
-                0
-            )
-            .0
-        );
-        assert!(
-            !judge(
-                &Check {
-                    not_contains: Some("a".into()),
-                    ..c()
-                },
-                "a",
-                0
-            )
-            .0
-        );
-        assert!(
-            judge(
-                &Check {
-                    min: Some(1.3),
-                    ..c()
-                },
-                "1.5",
-                0
-            )
-            .0
-        );
-        assert!(
-            !judge(
-                &Check {
-                    min: Some(1.3),
-                    ..c()
-                },
-                "1.0",
-                0
-            )
-            .0
-        );
-        assert!(
-            !judge(
-                &Check {
-                    min: Some(1.3),
-                    ..c()
-                },
-                "abc",
-                0
-            )
-            .0
-        );
+        assert!(judge(&Check { equals: Some("255".into()), ..c() }, "255\n", 0).0);
+        assert!(!judge(&Check { equals: Some("255".into()), ..c() }, "254", 0).0);
+        assert!(judge(&Check { regex: Some("^name=Ada$".into()), ..c() }, "x\nname=Ada\ny", 0).0);
+        assert!(!judge(&Check { contains: Some("a".into()), ..c() }, "b", 0).0);
+        assert!(!judge(&Check { not_contains: Some("a".into()), ..c() }, "a", 0).0);
+        assert!(judge(&Check { min: Some(1.3), ..c() }, "1.5", 0).0);
+        assert!(!judge(&Check { min: Some(1.3), ..c() }, "1.0", 0).0);
+        assert!(!judge(&Check { min: Some(1.3), ..c() }, "abc", 0).0);
         // bare check: exit status
         assert!(judge(&c(), "", 0).0);
         assert!(!judge(&c(), "", 1).0);
@@ -248,23 +145,11 @@ mod tests {
     #[test]
     fn loads_dir() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(
-            d.path().join("a.json"),
-            r#"{"id":"a/1","os":"android","instruction":"i","check":[{"cmd":"true"}]}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            d.path().join("b.json"),
-            r#"[{"id":"a/2","os":"android","instruction":"i","check":[{"cmd":"true"}]}]"#,
-        )
-        .unwrap();
+        std::fs::write(d.path().join("a.json"), r#"{"id":"a/1","os":"android","instruction":"i","check":[{"cmd":"true"}]}"#).unwrap();
+        std::fs::write(d.path().join("b.json"), r#"[{"id":"a/2","os":"android","instruction":"i","check":[{"cmd":"true"}]}]"#).unwrap();
         let m = load_dir(d.path()).unwrap();
         assert_eq!(m.len(), 2);
-        std::fs::write(
-            d.path().join("c.json"),
-            r#"{"id":"a/2","os":"android","instruction":"i","check":[{"cmd":"true"}]}"#,
-        )
-        .unwrap();
+        std::fs::write(d.path().join("c.json"), r#"{"id":"a/2","os":"android","instruction":"i","check":[{"cmd":"true"}]}"#).unwrap();
         assert!(load_dir(d.path()).is_err());
     }
 }

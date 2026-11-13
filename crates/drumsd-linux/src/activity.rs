@@ -178,7 +178,8 @@ impl ActivityWatch {
     /// Remember the cgroup of every thread group running now (the watch's start), so the exit of a process that
     /// started before the watch is attributed even when it is reaped before the event is read.
     pub fn seed(&self, read_cgroup: impl Fn(i32) -> Option<String>) -> usize {
-        let pids: Vec<i32> = std::fs::read_dir("/proc").map(|d| d.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok())).collect()).unwrap_or_default();
+        let pids: Vec<i32> =
+            std::fs::read_dir("/proc").map(|d| d.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok())).collect()).unwrap_or_default();
         let found: Vec<(i32, String)> = pids.into_iter().filter_map(|p| read_cgroup(p).map(|c| (p, c))).collect();
         let n = found.len();
         let mut g = self.inner.lock().unwrap();

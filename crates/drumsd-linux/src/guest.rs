@@ -21,7 +21,8 @@ fn dechunk(mut b: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = vec![];
     loop {
         let i = b.windows(2).position(|w| w == b"\r\n").ok_or_else(|| io::Error::other("bad chunk"))?;
-        let n = usize::from_str_radix(std::str::from_utf8(&b[..i]).map_err(io::Error::other)?.split(';').next().unwrap().trim(), 16).map_err(io::Error::other)?;
+        let n =
+            usize::from_str_radix(std::str::from_utf8(&b[..i]).map_err(io::Error::other)?.split(';').next().unwrap().trim(), 16).map_err(io::Error::other)?;
         b = &b[i + 2..];
         if n == 0 {
             return Ok(out);
@@ -55,10 +56,9 @@ impl Guest {
     /// temporarily unavailable (os error 11)": that is how 479 slow state-hash replies at 256 envs were reported.)
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> io::Result<Response> {
         self.request_inner(method, path, body).map_err(|e| match e.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("guest did not answer {method} {path} within {:.1} s ({e})", self.timeout.as_secs_f64()),
-            ),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                io::Error::new(io::ErrorKind::TimedOut, format!("guest did not answer {method} {path} within {:.1} s ({e})", self.timeout.as_secs_f64()))
+            }
             _ => e,
         })
     }

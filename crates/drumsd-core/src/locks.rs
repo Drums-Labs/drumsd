@@ -120,11 +120,7 @@ pub fn census(p: &dyn ProcFs, tree: &[i64]) -> Result<Vec<HeldLock>, String> {
         fds.sort_by_key(|f| f.parse::<i64>().unwrap_or(i64::MAX));
         for fd in fds {
             let Ok(info) = p.read(&format!("/proc/{pid}/fdinfo/{fd}")) else { continue };
-            let mnt = info
-                .lines()
-                .find(|l| l.starts_with("mnt_id:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|x| x.parse::<i64>().ok());
+            let mnt = info.lines().find(|l| l.starts_with("mnt_id:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|x| x.parse::<i64>().ok());
             for line in info.lines() {
                 if let Some(body) = line.strip_prefix("lock:") {
                     let body = body.trim();
@@ -307,7 +303,10 @@ mod tests {
     #[test]
     fn parses_fdinfo_and_proc_locks_lines() {
         let l = parse_lock("1: POSIX  ADVISORY  WRITE 1234 00:2e:5678 0 EOF").unwrap();
-        assert_eq!((l.kind.as_str(), l.typ.as_str(), l.owner, l.dev.as_str(), l.ino, l.start, l.end.as_str()), ("posix", "WRITE", 1234, "0:46", 5678, 0, "EOF"));
+        assert_eq!(
+            (l.kind.as_str(), l.typ.as_str(), l.owner, l.dev.as_str(), l.ino, l.start, l.end.as_str()),
+            ("posix", "WRITE", 1234, "0:46", 5678, 0, "EOF")
+        );
         let b = parse_lock("2: -> FLOCK  ADVISORY  READ 9 08:01:7 0 EOF").unwrap();
         assert!(b.blocked);
         assert_eq!(b.kind, "flock");

@@ -86,11 +86,19 @@ pub struct Host {
 pub enum EnvStatus {
     Live,
     /// Its host died; a replacement is being made.
-    Replacing { from_host: String, since: f64 },
+    Replacing {
+        from_host: String,
+        since: f64,
+    },
     /// Replaced on a new host: every request except reset/close/get answers 409 episode_lost until a reset.
-    NeedsReset { from_host: String, at: f64 },
+    NeedsReset {
+        from_host: String,
+        at: f64,
+    },
     /// Its host died and no replacement could be made.
-    Lost { reason: String },
+    Lost {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -445,7 +453,14 @@ impl Pool {
 
     // ---------------------------------------------------------------------------------------------- upstream
     /// One request to a host. Gives up at once if the host is declared dead meanwhile (Err "host_dead").
-    pub async fn upstream(&self, host: &str, method: reqwest::Method, path: &str, body: Option<&Value>, timeout_s: f64) -> Result<(u16, Vec<u8>, String), String> {
+    pub async fn upstream(
+        &self,
+        host: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        timeout_s: f64,
+    ) -> Result<(u16, Vec<u8>, String), String> {
         let (url, token, mut dead, gen) = self.host_conn(host).ok_or_else(|| "host_unknown".to_string())?;
         if *dead.borrow() != gen {
             return Err("host_dead".into());
@@ -516,9 +531,22 @@ impl Pool {
                     let total = ad["mem_total_mib"].as_f64().unwrap_or(0.0);
                     let avail = ad["mem_available_mib"].as_f64().or_else(|| v["host_mem_available_bytes"].as_f64().map(|b| b / 1048576.0)).unwrap_or(0.0);
                     let load1 = v["loadavg"].as_str().and_then(|s| s.split_whitespace().next()).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
-                    let live = v["slots_by_state"].as_object().map(|m| m.iter().filter(|(k, _)| k.as_str() != "destroyed").map(|(_, n)| n.as_u64().unwrap_or(0)).sum::<u64>()).unwrap_or(0) as u32;
+                    let live = v["slots_by_state"]
+                        .as_object()
+                        .map(|m| m.iter().filter(|(k, _)| k.as_str() != "destroyed").map(|(_, n)| n.as_u64().unwrap_or(0)).sum::<u64>())
+                        .unwrap_or(0) as u32;
                     let refusals = v["admission"]["counts"].as_object().map(|m| m.values().filter_map(|x| x.as_f64()).sum::<f64>()).unwrap_or(0.0);
-                    let snap = Snap { mem_total_mib: total, mem_avail_mib: avail, psi_mem: ad["memory_psi_some_avg10"].as_f64().unwrap_or(0.0), load1, live_slots: live, health_ok: v["ok"].as_bool().unwrap_or(false), rtt_s: rtt, admission_refusals: refusals, raw: v.clone() };
+                    let snap = Snap {
+                        mem_total_mib: total,
+                        mem_avail_mib: avail,
+                        psi_mem: ad["memory_psi_some_avg10"].as_f64().unwrap_or(0.0),
+                        load1,
+                        live_slots: live,
+                        health_ok: v["ok"].as_bool().unwrap_or(false),
+                        rtt_s: rtt,
+                        admission_refusals: refusals,
+                        raw: v.clone(),
+                    };
                     if live == 0 && total > 0.0 {
                         h.base_used_mib = Some(total - avail);
                     }
@@ -554,7 +582,10 @@ impl Pool {
                         hs = self.hosts.lock().unwrap();
                     }
                     let h = hs.get_mut(&name).unwrap();
-                    if matches!(h.state, HostState::Suspect | HostState::Healthy | HostState::Draining | HostState::Joining) && down_s >= self.cfg.dead_after_s && h.last_ok.is_some() {
+                    if matches!(h.state, HostState::Suspect | HostState::Healthy | HostState::Draining | HostState::Joining)
+                        && down_s >= self.cfg.dead_after_s
+                        && h.last_ok.is_some()
+                    {
                         h.state = HostState::Dead;
                         h.dead_gen += 1;
                         let g = h.dead_gen;
@@ -585,7 +616,14 @@ impl Pool {
     /// then let it take envs again.
     pub async fn rejoin(self: P, name: String) {
         // envs still bound to this host and live (a Replacing env's old slot here is an orphan)
-        let owned: std::collections::HashSet<String> = self.envs.lock().unwrap().values().filter(|e| e.host == name && matches!(e.status, EnvStatus::Live | EnvStatus::NeedsReset { .. })).map(|e| e.slot.clone()).collect();
+        let owned: std::collections::HashSet<String> = self
+            .envs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.host == name && matches!(e.status, EnvStatus::Live | EnvStatus::NeedsReset { .. }))
+            .map(|e| e.slot.clone())
+            .collect();
         let mut deleted = 0;
         let mut failed = 0;
         let listed = self.upstream(&name, reqwest::Method::GET, "/v1/slots", None, 30.0).await;
@@ -634,7 +672,11 @@ impl Pool {
             let mut v = vec![];
             for e in envs.values_mut().filter(|e| e.host == dead) {
                 let replace = self.cfg.failover == "replace" && !e.checkpoint.starts_with("ps-");
-                e.status = if replace { EnvStatus::Replacing { from_host: dead.clone(), since: now_epoch() } } else { EnvStatus::Lost { reason: format!("host {dead} died") } };
+                e.status = if replace {
+                    EnvStatus::Replacing { from_host: dead.clone(), since: now_epoch() }
+                } else {
+                    EnvStatus::Lost { reason: format!("host {dead} died") }
+                };
                 if replace {
                     v.push(e.clone());
                 } else {
@@ -657,12 +699,19 @@ impl Pool {
             let dead = dead.clone();
             tasks.spawn(async move {
                 let t = Instant::now();
-                let r = me.make_env(&e.checkpoint, None, e.task.clone(), e.setup, e.idle_timeout_s, e.ttl_s, true, me.cfg.queue_timeout_s).await.map(|(h, s, mut rec)| {
-                    me.pool_view(&mut rec, &e.id, &h, &s);
-                    (h, s, rec)
-                });
+                let r = me.make_env(&e.checkpoint, None, e.task.clone(), e.setup, e.idle_timeout_s, e.ttl_s, true, me.cfg.queue_timeout_s).await.map(
+                    |(h, s, mut rec)| {
+                        me.pool_view(&mut rec, &e.id, &h, &s);
+                        (h, s, rec)
+                    },
+                );
                 // decide under the lock, act (metrics, deletes) after it
-                enum Act { Replaced, Surplus(String, String), Failed, Nothing }
+                enum Act {
+                    Replaced,
+                    Surplus(String, String),
+                    Failed,
+                    Nothing,
+                }
                 let act = {
                     let mut envs = me.envs.lock().unwrap();
                     match (r, envs.get_mut(&e.id)) {
@@ -717,7 +766,17 @@ impl Pool {
     // ---------------------------------------------------------------------------------------------- create
     /// Make one env (wait for capacity in the queue first). Returns (host, slot id, host record).
     #[allow(clippy::too_many_arguments)]
-    pub async fn make_env(self: &P, checkpoint: &str, host_ckpt: Option<(String, String)>, task: Option<Value>, setup: Option<bool>, idle: f64, ttl: f64, priority: bool, queue_timeout_s: f64) -> Result<(String, String, Value), MakeErr> {
+    pub async fn make_env(
+        self: &P,
+        checkpoint: &str,
+        host_ckpt: Option<(String, String)>,
+        task: Option<Value>,
+        setup: Option<bool>,
+        idle: f64,
+        ttl: f64,
+        priority: bool,
+        queue_timeout_s: f64,
+    ) -> Result<(String, String, Value), MakeErr> {
         let deadline = Instant::now() + Duration::from_secs_f64(queue_timeout_s.max(0.0));
         let host_lease = |x: f64| if x > 0.0 { x + self.cfg.host_lease_margin_s } else { 0.0 };
         let mut attempts = 0;
@@ -736,7 +795,10 @@ impl Pool {
             let t = Instant::now();
             let res = match &warm {
                 Some(slot) => match &task {
-                    Some(tk) if setup != Some(false) => self.upstream(&host, reqwest::Method::POST, &format!("/v1/slots/{slot}/task"), Some(&json!({"task": tk})), self.cfg.create_timeout_s).await,
+                    Some(tk) if setup != Some(false) => {
+                        self.upstream(&host, reqwest::Method::POST, &format!("/v1/slots/{slot}/task"), Some(&json!({"task": tk})), self.cfg.create_timeout_s)
+                            .await
+                    }
                     _ => self.upstream(&host, reqwest::Method::GET, &format!("/v1/slots/{slot}"), None, 30.0).await,
                 },
                 None => {
@@ -910,7 +972,11 @@ impl Pool {
     fn remove_drained(&self) {
         let busy: std::collections::HashSet<String> = self.envs.lock().unwrap().values().map(|e| e.host.clone()).collect();
         let mut hs = self.hosts.lock().unwrap();
-        let gone: Vec<String> = hs.iter().filter(|(n, h)| h.state == HostState::Draining && h.inflight == 0 && h.warm.is_empty() && h.warm_inflight == 0 && !busy.contains(*n)).map(|(n, _)| n.clone()).collect();
+        let gone: Vec<String> = hs
+            .iter()
+            .filter(|(n, h)| h.state == HostState::Draining && h.inflight == 0 && h.warm.is_empty() && h.warm_inflight == 0 && !busy.contains(*n))
+            .map(|(n, _)| n.clone())
+            .collect();
         for n in &gone {
             hs.remove(n);
         }
@@ -1014,7 +1080,24 @@ impl Pool {
     pub fn update_gauges(&self) {
         let now = Instant::now();
         let m = &self.metrics;
-        for g in ["pool_host_up", "pool_host_state", "pool_host_envs", "pool_host_warm", "pool_host_inflight", "pool_host_mem_total_bytes", "pool_host_mem_available_bytes", "pool_host_load1", "pool_host_cpus", "pool_host_saturation", "pool_host_env_mem_mib_estimate", "pool_host_slots_live", "pool_host_max_envs", "pool_host_headroom", "pool_host_health_rtt_seconds", "pool_host_admission_refusals"] {
+        for g in [
+            "pool_host_up",
+            "pool_host_state",
+            "pool_host_envs",
+            "pool_host_warm",
+            "pool_host_inflight",
+            "pool_host_mem_total_bytes",
+            "pool_host_mem_available_bytes",
+            "pool_host_load1",
+            "pool_host_cpus",
+            "pool_host_saturation",
+            "pool_host_env_mem_mib_estimate",
+            "pool_host_slots_live",
+            "pool_host_max_envs",
+            "pool_host_headroom",
+            "pool_host_health_rtt_seconds",
+            "pool_host_admission_refusals",
+        ] {
             m.clear_gauge(g);
         }
         let mut by_state: HashMap<&'static str, u32> = HashMap::new();
@@ -1042,8 +1125,16 @@ impl Pool {
                     let floor = s.mem_total_mib * self.cfg.mem_floor_pct / 100.0;
                     let memsat = 1.0 - ((s.mem_avail_mib - floor) / (s.mem_total_mib - floor).max(1.0)).clamp(0.0, 1.0);
                     m.set("pool_host_saturation", &[("host", n), ("region", r), ("resource", "memory")], memsat);
-                    m.set("pool_host_saturation", &[("host", n), ("region", r), ("resource", "cpu")], s.load1 / (h.spec.cpus.max(1) as f64 * self.cfg.max_load_per_cpu));
-                    m.set("pool_host_saturation", &[("host", n), ("region", r), ("resource", "slots")], (h.owned as f64 + h.warm.len() as f64).max(s.live_slots as f64) / h.spec.max_envs.max(1) as f64);
+                    m.set(
+                        "pool_host_saturation",
+                        &[("host", n), ("region", r), ("resource", "cpu")],
+                        s.load1 / (h.spec.cpus.max(1) as f64 * self.cfg.max_load_per_cpu),
+                    );
+                    m.set(
+                        "pool_host_saturation",
+                        &[("host", n), ("region", r), ("resource", "slots")],
+                        (h.owned as f64 + h.warm.len() as f64).max(s.live_slots as f64) / h.spec.max_envs.max(1) as f64,
+                    );
                 }
                 m.set("pool_host_headroom", &l, headroom(&self.cfg, h, now).unwrap_or(0.0));
             }

@@ -74,11 +74,7 @@ impl Registry {
         self.inner.lock().unwrap().entry(name.into()).or_insert((help.into(), Family::Gauge(BTreeMap::new())));
     }
     pub fn histogram(&self, name: &str, help: &str, buckets: &[f64]) {
-        self.inner
-            .lock()
-            .unwrap()
-            .entry(name.into())
-            .or_insert((help.into(), Family::Histogram(buckets.to_vec(), BTreeMap::new())));
+        self.inner.lock().unwrap().entry(name.into()).or_insert((help.into(), Family::Histogram(buckets.to_vec(), BTreeMap::new())));
     }
 
     pub fn inc(&self, name: &str, l: &[(&str, &str)], by: f64) {
@@ -98,9 +94,7 @@ impl Registry {
     pub fn observe(&self, name: &str, l: &[(&str, &str)], v: f64) {
         let mut g = self.inner.lock().unwrap();
         if let Some((_, Family::Histogram(b, m))) = g.get_mut(name) {
-            let h = m
-                .entry(labels(l))
-                .or_insert_with(|| Hist { buckets: b.clone(), counts: vec![0; b.len()], sum: 0.0, count: 0 });
+            let h = m.entry(labels(l)).or_insert_with(|| Hist { buckets: b.clone(), counts: vec![0; b.len()], sum: 0.0, count: 0 });
             for (i, ub) in h.buckets.iter().enumerate() {
                 if v <= *ub {
                     h.counts[i] += 1;

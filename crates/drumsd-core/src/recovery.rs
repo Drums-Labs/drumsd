@@ -151,7 +151,15 @@ mod tests {
     fn cost_counts_failed_attempts() {
         let c = CostRecord {
             attempts: vec![
-                Attempt { n: 1, mode: "template".into(), seconds: 0.7, ok: false, class: Some(FailureClass::DetachRace), error: Some("e".into()), action: Some(Action::Retry) },
+                Attempt {
+                    n: 1,
+                    mode: "template".into(),
+                    seconds: 0.7,
+                    ok: false,
+                    class: Some(FailureClass::DetachRace),
+                    error: Some("e".into()),
+                    action: Some(Action::Retry),
+                },
                 Attempt { n: 2, mode: "template".into(), seconds: 0.6, ok: true, class: None, error: None, action: None },
             ],
         };

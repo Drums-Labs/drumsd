@@ -117,12 +117,20 @@ pub fn decide(c: &AdmissionConfig, h: &HostMem, in_flight_mib: u64, need: Need) 
     let floor = floor_mib(c, h);
     let refuse = |reason: &str, message: String| Refusal { reason: reason.into(), message, need_mib, in_flight_mib, host: h.clone(), floor_mib: floor };
     if h.memory_psi_some_avg10 > c.max_memory_psi_some_avg10 {
-        return Err(refuse("memory_pressure", format!("memory pressure {:.1} % (PSI some avg10) is above {:.1} %", h.memory_psi_some_avg10, c.max_memory_psi_some_avg10)));
+        return Err(refuse(
+            "memory_pressure",
+            format!("memory pressure {:.1} % (PSI some avg10) is above {:.1} %", h.memory_psi_some_avg10, c.max_memory_psi_some_avg10),
+        ));
     }
     let left = h.mem_available_mib as i64 - in_flight_mib as i64 - need_mib as i64;
     if left < floor as i64 {
-        return Err(refuse("memory", format!("{} MiB available, {} MiB promised to running operations, {} MiB needed: {} MiB would remain, below the floor of {} MiB",
-                                            h.mem_available_mib, in_flight_mib, need_mib, left, floor)));
+        return Err(refuse(
+            "memory",
+            format!(
+                "{} MiB available, {} MiB promised to running operations, {} MiB needed: {} MiB would remain, below the floor of {} MiB",
+                h.mem_available_mib, in_flight_mib, need_mib, left, floor
+            ),
+        ));
     }
     if let Some(free) = h.state_free_mib {
         let state_need = need.captures * c.capture_mib + need.envs * 256;
@@ -135,7 +143,8 @@ pub fn decide(c: &AdmissionConfig, h: &HostMem, in_flight_mib: u64, need: Need) 
 
 /// Parse /proc/meminfo (MemTotal, MemAvailable) and /proc/pressure/memory (some avg10).
 pub fn parse_host(meminfo: &str, psi_memory: &str) -> HostMem {
-    let kb = |key: &str| meminfo.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let kb =
+        |key: &str| meminfo.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     let psi = psi_memory
         .lines()
         .find(|l| l.starts_with("some"))
@@ -194,8 +203,10 @@ mod tests {
 
     #[test]
     fn parses_proc_files() {
-        let h = parse_host("MemTotal:       519850128 kB\nMemFree:  2585216 kB\nMemAvailable:    6875704 kB\n",
-                           "some avg10=47.66 avg60=34.71 avg300=24.70 total=2933293261\nfull avg10=5.42 avg60=2.98 avg300=1.26 total=1\n");
+        let h = parse_host(
+            "MemTotal:       519850128 kB\nMemFree:  2585216 kB\nMemAvailable:    6875704 kB\n",
+            "some avg10=47.66 avg60=34.71 avg300=24.70 total=2933293261\nfull avg10=5.42 avg60=2.98 avg300=1.26 total=1\n",
+        );
         assert_eq!(h.mem_total_mib, 507666);
         assert_eq!(h.mem_available_mib, 6714);
         assert!((h.memory_psi_some_avg10 - 47.66).abs() < 1e-9);
