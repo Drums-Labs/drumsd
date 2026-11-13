@@ -1,0 +1,24 @@
+drumsd
+Copyright 2026 Drums Labs, Inc.
+
+This product includes software developed by Drums Labs, Inc. and is licensed under the Apache License, Version 2.0
+(LICENSE). The Rust crates it is built from are listed with their licences in THIRD_PARTY_LICENSES.
+
+Components with other licences, which this product uses but does not incorporate:
+
+- drums-criu (https://github.com/Drums-Labs/drums-criu), the CRIU fork that performs checkpoint and restore, is
+  GPL-2.0 like upstream CRIU. drumsd runs it as a separate process over its command line and files; it is not linked
+  into drumsd. The installer builds it on the host from the source bundle shipped in the release
+  (sources/drums-criu.bundle, the commit pinned in install/lock.json), so the GPL-2.0 source accompanies every release.
+
+- The BPF program crates/drumsd-linux/bpf/sysinfo.bpf.c (and the committed object sysinfo.bpf.o built from it) is
+  dual-licensed GPL-2.0-only OR MIT (its SPDX header). It is loaded into the kernel by drumsd and is not part of the
+  Apache-2.0 licensed Rust code.
+
+- The installer creates a Python virtual environment with OSWorld's dependencies (install/osw-requirements.lock,
+  hash-pinned) and a checkout of OSWorld (https://github.com/xlang-ai/OSWorld, Apache-2.0) at the commit pinned in
+  install/lock.json, and downloads the OSWorld Ubuntu desktop image from the xlangai/ubuntu_osworld dataset. Each of
+  these is under its own licence and terms; none is redistributed in the release tarball.
+
+- python/ holds the runtime's Python side, written by Drums Labs (imported from the drums-lab repository) and licensed
+  under the Apache License, Version 2.0 with the rest of this product.

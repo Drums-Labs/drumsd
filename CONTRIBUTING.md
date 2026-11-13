@@ -110,6 +110,8 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
   user. See `docs/security.md`.
 - Keep the SDK, `api/openapi.json` and `docs/` in step: a new route or field appears in all three.
 - Plain commit messages: what changed and why, in sentences. No generated attribution lines.
+- Sign off every commit (`git commit -s`, the Developer Certificate of Origin, https://developercertificate.org): by
+  signing off you certify you have the right to submit the change under the Apache License 2.0 (LICENSE).
 - No secrets, tokens, private hostnames, instance ids or customer names in code, tests, fixtures, docs or logs.
 - `cargo fmt` and `cargo clippy --release` clean. There is no CI on this repository yet; the PR author runs the tests
   and says which ones in the PR.
