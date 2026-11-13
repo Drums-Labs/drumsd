@@ -5,7 +5,7 @@ template server. Nothing a trainer forgets may hold the host forever. This page 
 
 ## Env states
 
-```
+```text
 create ──> ready ──step/observe/verify──> ready
              │  └─ fork / save (a saved state is made; the env keeps running)
              ├─ reset ──> ready (a new episode)

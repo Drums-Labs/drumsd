@@ -1,6 +1,7 @@
-# Drums RC1
+# Drums release
 
-Release candidate 1 for evaluation and rollout support (drumsd 0.4.2 line; see CHANGES-RC1.md and RC1-VALIDATION.md).
+This directory is a Drums release: the installer, its pinned inputs and the user docs. The version is in `CHANGELOG.md`
+and `RELEASE_COMMIT`; the source is [github.com/Drums-Labs/drumsd](https://github.com/Drums-Labs/drumsd).
 
 Drums runs isolated Linux desktops (the OSWorld Ubuntu image) as checkpointed process trees on one host, for
 computer-use RL. You create environments, act in them with pyautogui code or shell commands, fork a reached state into
@@ -11,14 +12,16 @@ valid: restored correctly, isolated, never quarantined.
 
 1. Check the host: [docs/host-requirements.md](docs/host-requirements.md) (Ubuntu 24.04 x86_64, 16 vCPU / 32 GiB /
    150 GiB disk recommended, outbound HTTPS during install).
-2. Install and run your first env: [QUICKSTART.md](QUICKSTART.md).
+2. Install and run your first env: [docs/install.md](docs/install.md).
 
 ## In this release
 
 | path | what |
 |---|---|
 | `install.sh` | the installer (`sudo ./install.sh`; `--help` for options) |
-| `QUICKSTART.md` | install, connect, a first loop |
+| `docs/install.md` | install, connect, a first loop |
+| `docs/architecture.md` | how drumsd works: checkpoints, template servers, slots, what a reset does, validity, crash safety |
+| `docs/reward-audit.md` | the `audit` block on every reward |
 | `docs/host-requirements.md` | OS, CPU, RAM, disk, network, how many envs a host holds |
 | `docs/actions-and-observations.md` | screen size, coordinates, action types, who `execute` runs as, screenshots |
 | `docs/validity.md` | the gates and what `Reward.valid` means |
@@ -28,8 +31,8 @@ valid: restored correctly, isolated, never quarantined.
 | `docs/lifecycle.md` | env states, leases, cleanup, fork states, records, reboots, metrics windows |
 | `examples/` | `rl_loop.py` (a minimal leak-free loop), `fork_and_verify.py`, `concurrency.py` |
 | `api/openapi.json` | the HTTP API (also served at `GET /openapi.json`) |
-| `sdk/drums-0.2.5-py3-none-any.whl` | the Python SDK (standard library only) |
-| `CHANGELOG.md` | what changed |
+| `sdk/` | the Python SDK wheel (standard library only; the same package is `drums-sdk` on PyPI) |
+| `CHANGELOG.md`, `docs/release-notes/` | what changed |
 | `install/`, `sources/`, `SHA256SUMS`, `RELEASE_COMMIT` | pinned inputs and source bundles the installer checks |
 
 ## Names
@@ -41,4 +44,5 @@ checkpoint too, one that is never deleted.
 
 ## Not supported
 
-More than one host, GPUs, images other than the pinned OSWorld Ubuntu image, network access from inside the desktop.
+GPUs, images other than the pinned OSWorld Ubuntu image, network access from inside the desktop. Many hosts behind
+one API is `drums-pool` (in the source repository, experimental), not part of this release's install.

@@ -1,6 +1,19 @@
 # Changelog
 
-## fix/reliability-r2 (unreleased)
+Releases are tagged `vX.Y.Z` on this repository (the Cargo crate version, 0.4.2, is the internal line the daemon
+came from; aligning it with the release tags is proposed for v0.2.2). Entries say what changed, correctness first, then security,
+then performance, then pins.
+
+## v0.2.2 (unreleased)
+
+- Repository: README, `docs/install.md` (was `QUICKSTART.md`), `docs/architecture.md`, `docs/release-notes/` (the
+  RC1 and v0.2.0 notes, from the root), `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and PR templates, Dependabot,
+  CI (`cargo fmt --check`, `cargo clippy -D warnings`, the non-root `cargo test`, shellcheck, the Python tests).
+  `rustfmt.toml` and a format-only pass over the workspace; clippy-clean under `-D warnings` (dead helpers removed
+  from `drums-pool`, no behaviour change). `docs/security.md` describes the per-env uid ranges and the tenant
+  boundary as the code has them.
+
+## v0.2.1, 2026-11-12
 
 **Reliability** (R2-3 Firecracker study 2026-11-12 and T1-fixed 2026-11-09; both at drumsd 12d1cff = v0.2.0)
 - **A concurrent create no longer fails on a sibling's half-copied `service-plan.json`.** A new slot directory got
@@ -28,7 +41,15 @@
   is never restored into again by itself; the R2-3 harness sent 10,325 resets to one in 50 s and got the same 409
   each time. Clients that loop on a slot must read the state (SDK and gateway follow-ups are in the issue).
 
-## sota/t6-crash-attr, 2026-11-09
+## v0.2.0, 2026-11-11
+
+The first tagged release: the November 2026 branches (reliability, per-env uid ranges, the reward audit, crash
+attribution, event-based quiescence, incremental capture and prefork, the multi-host pool, the Android and Windows
+pools) merged into one build on top of RC1. How they were combined and what collided:
+[docs/release-notes/v0.2.0-integration.md](docs/release-notes/v0.2.0-integration.md). The entries below are the
+branches' own.
+
+### sota/t6-crash-attr, 2026-11-09
 
 **Correctness**
 - **One unattributed crash no longer invalidates every running episode.** The crash watch read the dead process's
@@ -46,9 +67,10 @@
   signal still ends it). It thaws the cgroup once it is empty, and again in `ensure_slot_leaves`, so a restore never
   lands in a frozen leaf.
 
-## RC1, 2026-10-31
+### RC1, 2026-10-31
 
-Release candidate 1: one build of the pieces that were on separate branches (CHANGES-RC1.md lists every commit), and
+Release candidate 1: one build of the pieces that were on separate branches
+([docs/release-notes/rc1.md](docs/release-notes/rc1.md) lists every commit), and
 no new features beyond the profile switch below.
 - **Envs run in the hardened profile by default** ([docs/security.md](docs/security.md)). Each desktop runs in its own
   user namespace (root in it is host uid 100000), with no_new_privs, an 18-capability bounding set, a seccomp blocklist
@@ -65,7 +87,7 @@ no new features beyond the profile switch below.
 - **drums-lab rc1:** harness/reset-failures and harness/oom-inotify (reset, capture and restore failures under load;
   template servers protected from the OOM killer).
 
-## fork-chrome-crash (on daily-use; SDK 0.2.5), 2026-10-31
+### fork-chrome-crash (on daily-use; SDK 0.2.5), 2026-10-31
 
 **Correctness**
 - **Fork children restored Chrome without its memory protection keys.** Chrome 130 keeps memory under protection key 1
@@ -93,7 +115,7 @@ no new features beyond the profile switch below.
 - **`upload_file` reads only under `/var/lib/drums/assets`** (symlinks resolved; `osw.assets_dir`). Before, a task
   could copy any host file the checker user could read (e.g. `/etc/drums/drumsd.json`) into a desktop.
 
-## daily-use (on 0.4.2), 2026-10-31
+### daily-use (on 0.4.2), 2026-10-31
 
 What an outside lab's own (non-OSWorld) tasks needed.
 - **Lab verifiers:** a task's evaluator may be `{"func": "drums_verifier", "verifier": NAME, "function": FN,
@@ -106,7 +128,7 @@ What an outside lab's own (non-OSWorld) tasks needed.
 - New doc `docs/custom-tasks.md`: the task format, the setup steps and who runs them, host files for setup, lab
   verifiers, one-time setup via a saved state.
 
-## 0.4.2 (SDK 0.2.4), 2026-10-30
+## 0.4.2 (SDK 0.2.4), 2026-10-30 (internal line, before the v0.2 tags)
 
 A patch release: fixes for what an outside user hit with 0.4.1. Same pins: drums-lab 15e29e4, drums-criu fbbd7c20a,
 OSWorld 044bc339.
