@@ -54,6 +54,7 @@ fn main() {
 /// Raise the soft open-files limit to the hard one. Each env holds listeners, guest connections, pidfds and journal
 /// writes; at 64 envs drumsd ran past the default soft limit of 1024 and failed restores, gates, checker spawns and
 /// journal writes with EMFILE. Returns (soft, hard) after the change.
+#[allow(clippy::unnecessary_cast)] // rlim_t is u64 on Linux; the cast keeps other targets building
 pub fn raise_nofile() -> (u64, u64) {
     let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     unsafe {
@@ -107,6 +108,7 @@ async fn serve(cfg: config::Config) {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[allow(clippy::unnecessary_cast)]
     fn nofile_soft_limit_is_raised_to_the_hard_limit() {
         let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) };

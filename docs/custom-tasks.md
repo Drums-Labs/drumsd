@@ -46,7 +46,7 @@ under the assets directory** `/var/lib/drums/assets` (created by the installer; 
 overrides it). Symlinks are resolved first, so a link out of the directory is refused too; any other path fails the
 setup (`TaskSetupFailed`: "... is outside the assets directory"). The host's operator installs a task's files there:
 
-```
+```bash
 sudo install -d -m 0755 /var/lib/drums/assets/acme/app /var/lib/drums/assets/acme/data
 sudo install -m 0644 acme_app.py /var/lib/drums/assets/acme/app/ && sudo install -m 0644 q3_sales.xlsx /var/lib/drums/assets/acme/data/
 ```
@@ -74,7 +74,7 @@ drumsd.json to use another directory). The file and its directory must be **owne
 or others**, or drumsd refuses to load it. A task names the verifier and a function, plus JSON `options`. It never
 carries code.
 
-```
+```bash
 sudo install -m 0644 -o root -g root acme.py /etc/drums/verifiers/acme.py
 ```
 

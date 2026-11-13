@@ -55,7 +55,15 @@ pub struct RestoreSpec {
 
 /// The `criu restore ...` argv (argv[0] = "criu"), identical to criu_root.restore_argv's CRIU part.
 pub fn criu_argv(s: &RestoreSpec) -> Vec<String> {
-    let mut v: Vec<String> = vec!["criu".into(), "restore".into(), "-D".into(), s.images.display().to_string(), "--root".into(), s.croot.display().to_string(), "--restore-detached".into()];
+    let mut v: Vec<String> = vec![
+        "criu".into(),
+        "restore".into(),
+        "-D".into(),
+        s.images.display().to_string(),
+        "--root".into(),
+        s.croot.display().to_string(),
+        "--restore-detached".into(),
+    ];
     if s.file_locks {
         v.push("--file-locks".into());
     }
@@ -156,7 +164,12 @@ pub fn run(self_exe: &Path, s: &RestoreSpec, timeout: Duration) -> io::Result<Re
     };
     let text = fs::read_to_string(&s.out).unwrap_or_default();
     let tail: String = text.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
-    Ok(RestoreRun { ok: status.map(|s| s.success()).unwrap_or(false), seconds: t0.elapsed().as_secs_f64(), exit: status.and_then(|s| s.code()), out_tail: tail })
+    Ok(RestoreRun {
+        ok: status.map(|s| s.success()).unwrap_or(false),
+        seconds: t0.elapsed().as_secs_f64(),
+        exit: status.and_then(|s| s.code()),
+        out_tail: tail,
+    })
 }
 
 /// Last bytes of the CRIU log (errors are at the end).
@@ -279,10 +292,7 @@ fn client_inner(args: &[String]) -> io::Result<i32> {
     fs::write(Path::new(&cg).join("cgroup.procs"), std::process::id().to_string())?;
     // 2. a private mount namespace (unshare --mount --propagation private)
     check(unsafe { libc::unshare(libc::CLONE_NEWNS) }, "unshare(CLONE_NEWNS)")?;
-    check(
-        unsafe { libc::mount(std::ptr::null(), cstr("/").as_ptr(), std::ptr::null(), libc::MS_REC | libc::MS_PRIVATE, std::ptr::null()) },
-        "make / private",
-    )?;
+    check(unsafe { libc::mount(std::ptr::null(), cstr("/").as_ptr(), std::ptr::null(), libc::MS_REC | libc::MS_PRIVATE, std::ptr::null()) }, "make / private")?;
     // 3. the overlay root CRIU restores into (--root), visible only in this namespace
     fs::create_dir_all(&root)?;
     let o = cstr(&ovl);

@@ -9,11 +9,11 @@
 
 use crate::config::Config;
 use drumsd_core::alive;
-use drumsd_core::quiesce as q;
 use drumsd_core::gates::{Gate, GateReport, GateResult, GateStatus, Validity};
 use drumsd_core::journal::Journal;
 use drumsd_core::lease::Lease;
 use drumsd_core::metrics::{Registry, LATENCY_BUCKETS};
+use drumsd_core::quiesce as q;
 use drumsd_core::recovery::{self, Action, Attempt, CostRecord, FailureClass, Policy};
 use drumsd_core::state::{Op, Outcome, SlotState};
 use drumsd_core::statehash;
@@ -163,7 +163,8 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
     match &c.provenance {
         None => Some("made before provenance was recorded (drumsd < 0.4): re-provision the origin".into()),
         Some(p) if p != current => {
-            let diff: Vec<&str> = ["source_sha256", "inspection_sha256", "procview_dir", "harden"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
+            let diff: Vec<&str> =
+                ["source_sha256", "inspection_sha256", "procview_dir", "harden"].into_iter().filter(|k| p.get(*k) != current.get(*k)).collect();
             Some(format!("made by other {} than this drumsd runs with: re-provision the origin", diff.join(" and ")))
         }
         _ => None,
@@ -174,10 +175,8 @@ pub fn stale_reason(c: &CheckpointRecord, current: &Value) -> Option<String> {
 /// inspection file named by the Python config (`inspection`), whose facts (user, session, login) the origin was made from.
 pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
     let cfg = std::fs::read(py_config).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-    let insp = cfg.as_ref()
-        .and_then(|v| v.get("inspection").and_then(|x| x.as_str()).map(PathBuf::from))
-        .and_then(|p| std::fs::read(p).ok())
-        .map(|b| hex_sha256(&b));
+    let insp =
+        cfg.as_ref().and_then(|v| v.get("inspection").and_then(|x| x.as_str()).map(PathBuf::from)).and_then(|p| std::fs::read(p).ok()).map(|b| hex_sha256(&b));
     let mut v = json!({"source_sha256": source_sha, "inspection_sha256": insp});
     // whether the origin's tree binds the per-env view: an origin made with the other setting is stale (re-provisioned)
     if let Some(pv) = cfg.as_ref().and_then(|c| c.get("procview_dir")).filter(|x| !x.is_null()) {
@@ -195,9 +194,9 @@ pub fn provenance(source_sha: &str, py_config: &Path) -> Value {
 pub fn is_mounted(mp: &Path) -> bool {
     let want = mp.to_string_lossy();
     let want = want.trim_end_matches('/');
-    std::fs::read_to_string("/proc/self/mountinfo").map(|m| m.lines().any(|l| {
-        l.split(' ').nth(4).map(|f| f.replace("\\040", " ").trim_end_matches('/') == want).unwrap_or(false)
-    })).unwrap_or(false)
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|m| m.lines().any(|l| l.split(' ').nth(4).map(|f| f.replace("\\040", " ").trim_end_matches('/') == want).unwrap_or(false)))
+        .unwrap_or(false)
 }
 
 /// Why a checkpoint's state is gone (None: all of it is there). After a host reboot the state dir (a tmpfs) is empty and
@@ -219,15 +218,13 @@ pub fn state_lost(c: &CheckpointRecord, state_dir: &Path, lower: &Path, lower_mo
     if !lower_mounted {
         gone.push(format!("the image mount {} is not mounted", lower.display()));
     }
-    (!gone.is_empty()).then(|| format!("state_lost: {} (the host was restarted or its state dir emptied: run the installer or drums-boot.service to re-provision)", gone.join("; ")))
+    (!gone.is_empty()).then(|| {
+        format!("state_lost: {} (the host was restarted or its state dir emptied: run the installer or drums-boot.service to re-provision)", gone.join("; "))
+    })
 }
 
-/// What the API returns for a checkpoint: its record plus `stale` (and why).
-pub fn ckpt_view(c: &CheckpointRecord, current: &Value) -> Value {
-    ckpt_view_on(c, current, None)
-}
-
-/// As `ckpt_view`, with the reason its state is lost (`state_lost`), which comes before a provenance mismatch.
+/// What the API returns for a checkpoint: its record plus `stale` (and why). `lost` is the reason its state is
+/// lost (`state_lost`), which comes before a provenance mismatch.
 pub fn ckpt_view_on(c: &CheckpointRecord, current: &Value, lost: Option<String>) -> Value {
     let mut v = serde_json::to_value(c).unwrap();
     let why = lost.or_else(|| stale_reason(c, current));
@@ -502,12 +499,15 @@ impl Manager {
         let criu_sha256 = std::fs::read(&cfg.criu).map(|b| hex_sha256(&b)).unwrap_or_else(|e| format!("unreadable: {e}"));
         // the crash watch starts before any env is adopted or made: an episode it did not see from its start is never
         // vouched for (judge() reports it incomplete)
-        let crash = if cfg.crash_watch {
-            Some(drumsd_linux::crashwatch::start(vec![cgroup::pool()]).map_err(|e| format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on"))?)
-        } else {
-            tracing::warn!("crash_watch is off: an app that crashes in an env does not make its episode invalid");
-            None
-        };
+        let crash =
+            if cfg.crash_watch {
+                Some(drumsd_linux::crashwatch::start(vec![cgroup::pool()]).map_err(|e| {
+                    format!("crash watch (process events connector): {e}; set \"crash_watch\": false only on a host where no reward is trained on")
+                })?)
+            } else {
+                tracing::warn!("crash_watch is off: an app that crashes in an env does not make its episode invalid");
+                None
+            };
         let activity = if cfg.quiesce.events {
             match drumsd_linux::activity::start() {
                 Ok(w) => Some(w),
@@ -566,8 +566,10 @@ impl Manager {
 
     // ------------------------------------------------------------------------------------------------ admission
     fn host_mem(&self) -> drumsd_core::admission::HostMem {
-        let mut h = drumsd_core::admission::parse_host(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
-                                                       &std::fs::read_to_string("/proc/pressure/memory").unwrap_or_default());
+        let mut h = drumsd_core::admission::parse_host(
+            &std::fs::read_to_string("/proc/meminfo").unwrap_or_default(),
+            &std::fs::read_to_string("/proc/pressure/memory").unwrap_or_default(),
+        );
         h.state_free_mib = statvfs_free(&self.cfg.state_dir).map(|b| b / (1024 * 1024));
         h
     }
@@ -715,15 +717,18 @@ impl Manager {
     /// Start the ledger flusher (one thread, every second).
     pub fn start_flusher(self: &Arc<Self>) {
         let w = Arc::downgrade(self);
-        std::thread::Builder::new().name("ledger-flush".into()).spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(1));
-            match w.upgrade() {
-                Some(m) => {
-                    m.flush_ledgers();
+        std::thread::Builder::new()
+            .name("ledger-flush".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                match w.upgrade() {
+                    Some(m) => {
+                        m.flush_ledgers();
+                    }
+                    None => return,
                 }
-                None => return,
-            }
-        }).expect("ledger flusher thread");
+            })
+            .expect("ledger flusher thread");
     }
 
     pub fn slot(&self, id: &str) -> R<Arc<Slot>> {
@@ -772,13 +777,26 @@ impl Manager {
     // ------------------------------------------------------------------------------------------------ checkpoints
     /// Adopt a checkpoint slot made by the existing desktop setup (`candidate snapshot`, `capture`), and keep a
     /// template server warm for it.
-    pub async fn adopt_checkpoint(self: &Arc<Self>, id: String, slot: u32, expected_hash: Option<String>, captured_from: Option<String>) -> R<CheckpointRecord> {
+    pub async fn adopt_checkpoint(
+        self: &Arc<Self>,
+        id: String,
+        slot: u32,
+        expected_hash: Option<String>,
+        captured_from: Option<String>,
+    ) -> R<CheckpointRecord> {
         self.adopt_checkpoint_from(id, slot, expected_hash, None, captured_from).await
     }
 
     /// adopt_checkpoint; `hash_port`: read the state-hash reference from the guest server on that port (the captured
     /// parent's) while the template server loads the images, instead of before it.
-    pub async fn adopt_checkpoint_from(self: &Arc<Self>, id: String, slot: u32, expected_hash: Option<String>, hash_port: Option<u16>, captured_from: Option<String>) -> R<CheckpointRecord> {
+    pub async fn adopt_checkpoint_from(
+        self: &Arc<Self>,
+        id: String,
+        slot: u32,
+        expected_hash: Option<String>,
+        hash_port: Option<u16>,
+        captured_from: Option<String>,
+    ) -> R<CheckpointRecord> {
         if self.ckpts.read().unwrap().contains_key(&id) {
             return Err(ApiError::new(409, format!("checkpoint {id} exists")));
         }
@@ -853,15 +871,24 @@ impl Manager {
     pub async fn delete_checkpoint(self: &Arc<Self>, id: &str, installed: bool) -> R<Value> {
         let c = self.ckpt(id)?;
         if c.captured_from.is_none() && !installed {
-            return Err(ApiError::new(409, format!("checkpoint {id} is an installed image, not a saved state (installed=true deletes it; the installer re-provisions it)")));
+            return Err(ApiError::new(
+                409,
+                format!("checkpoint {id} is an installed image, not a saved state (installed=true deletes it; the installer re-provisions it)"),
+            ));
         }
         // a checkpoint whose state is gone (host restart) can be deleted though envs made from it are still on record: the
         // ones that are down hold nothing of it any more
         let lost = state_lost(&c, &self.cfg.state_dir, &self.cfg.lower, is_mounted(&self.cfg.lower)).is_some();
-        let users: Vec<String> = self.slots.read().unwrap().values().filter_map(|s| {
-            let v = s.view.read().unwrap();
-            (v.checkpoint == id && blocks_checkpoint_delete(&v.state, lost)).then(|| v.id.clone())
-        }).collect();
+        let users: Vec<String> = self
+            .slots
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|s| {
+                let v = s.view.read().unwrap();
+                (v.checkpoint == id && blocks_checkpoint_delete(&v.state, lost)).then(|| v.id.clone())
+            })
+            .collect();
         if !users.is_empty() {
             return Err(ApiError::new(409, format!("checkpoint {id} is used by envs {users:?}: close them first")));
         }
@@ -877,7 +904,19 @@ impl Manager {
             let _ = std::fs::remove_file(template::pidfile_for(&c2.socket));
             let _ = kill_slot(&slotfs::marker_for(&me.cfg.state_dir, c2.slot));
             let mut freed = 0u64;
-            for d in ["images", "upper", "upper.snap", "work", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root", "softdirty-base", "softdirty-base.new"] {
+            for d in [
+                "images",
+                "upper",
+                "upper.snap",
+                "work",
+                "upper.next",
+                "work.next",
+                "upper.next.tmp",
+                "trash",
+                "criu-root",
+                "softdirty-base",
+                "softdirty-base.new",
+            ] {
                 let p = sp.dir.join(d);
                 if p.symlink_metadata().is_ok() {
                     freed += dir_bytes(&p);
@@ -924,10 +963,16 @@ impl Manager {
         // checkpoint, anything still on disk under it (its directory or its cgroup), or a reservation in flight: a
         // create between alloc and its slot record, a capture until its verb has made (or failed to make) the dir.
         let mut reserved = self.alloc.lock().unwrap();
-        let mut held: BTreeSet<u32> = self.slots.read().unwrap().values().filter_map(|s| {
-            let v = s.view.read().unwrap();
-            (!v.state.is_terminal()).then_some(v.num)
-        }).collect();
+        let mut held: BTreeSet<u32> = self
+            .slots
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|s| {
+                let v = s.view.read().unwrap();
+                (!v.state.is_terminal()).then_some(v.num)
+            })
+            .collect();
         held.extend(self.ckpts.read().unwrap().values().map(|c| c.slot));
         let sd = self.cfg.state_dir.clone();
         let on_disk = |n: u32| slotfs::paths(&sd, n).dir.symlink_metadata().is_ok() || cgroup::slot_cg(&slotfs::marker_for(&sd, n)).exists();
@@ -1045,7 +1090,14 @@ impl Manager {
             dirty_depth: 0,
             dirty_base_uptime_us: None,
         };
-        let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec), targets, proxies: StdMutex::new(handles) , inputs: std::sync::atomic::AtomicU64::new(0) });
+        let slot = Arc::new(Slot {
+            id: id.clone(),
+            op: Mutex::new(()),
+            view: RwLock::new(rec),
+            targets,
+            proxies: StdMutex::new(handles),
+            inputs: std::sync::atomic::AtomicU64::new(0),
+        });
         self.slots.write().unwrap().insert(id.clone(), slot.clone());
         self.release_num(num); // the live slot record holds the number now
         let _g = slot.op.lock().await;
@@ -1136,7 +1188,11 @@ impl Manager {
     /// The cgroup that holds the slot's running tree (its leaf, or the slot cgroup itself without leaves).
     fn episode_cg(&self, num: u32, leaf: u8) -> PathBuf {
         let marker = slotfs::marker_for(&self.cfg.state_dir, num);
-        if leaf == 0 { cgroup::slot_cg(&marker) } else { cgroup::slot_leaf(&marker, leaf) }
+        if leaf == 0 {
+            cgroup::slot_cg(&marker)
+        } else {
+            cgroup::slot_leaf(&marker, leaf)
+        }
     }
 
     /// What the crash watch says about the slot's current episode. None when there is no episode, or no watch.
@@ -1230,13 +1286,19 @@ impl Manager {
             let me = self.clone();
             let s2 = slot.clone();
             let ta = Instant::now();
-            let res = tokio::task::spawn_blocking(move || me.restore_once(&s2, private, permit))
-            .await
-            .map_err(e500)?;
+            let res = tokio::task::spawn_blocking(move || me.restore_once(&s2, private, permit)).await.map_err(e500)?;
             let mode = if private { "private" } else { "template" };
             match res {
                 Ok(ok) => {
-                    cost.attempts.push(Attempt { n: attempt, mode: mode.into(), seconds: round3(ta.elapsed().as_secs_f64()), ok: true, class: None, error: None, action: None });
+                    cost.attempts.push(Attempt {
+                        n: attempt,
+                        mode: mode.into(),
+                        seconds: round3(ta.elapsed().as_secs_f64()),
+                        ok: true,
+                        class: None,
+                        error: None,
+                        action: None,
+                    });
                     self.metrics.inc("drumsd_restore_attempts_total", &[("mode", mode), ("class", "ok")], 1.0);
                     break Ok(ok);
                 }
@@ -1426,7 +1488,12 @@ impl Manager {
     fn restore_once(&self, slot: &Slot, private: bool, permit: tokio::sync::OwnedSemaphorePermit) -> Result<RestoreOk, RestoreFailure> {
         let mut t: BTreeMap<String, f64> = BTreeMap::new();
         let mut gates = GateReport::default();
-        let fail = |class: FailureClass, error: String, gates: &GateReport, t: &BTreeMap<String, f64>| RestoreFailure { class, error, gates: gates.clone(), timings: t.clone() };
+        let fail = |class: FailureClass, error: String, gates: &GateReport, t: &BTreeMap<String, f64>| RestoreFailure {
+            class,
+            error,
+            gates: gates.clone(),
+            timings: t.clone(),
+        };
         let (num, ckpt_id, task) = {
             let v = slot.view.read().unwrap();
             (v.num, v.checkpoint.clone(), v.task.clone())
@@ -1445,7 +1512,8 @@ impl Manager {
         }
         let ts = Instant::now();
         let (cg, new_leaf, old_cg) = if self.cfg.async_kill {
-            let (_, l1, l2) = cgroup::ensure_slot_leaves(&marker, &self.limits).map_err(|e| fail(FailureClass::Infra, format!("slot cgroups: {e}"), &gates, &t))?;
+            let (_, l1, l2) =
+                cgroup::ensure_slot_leaves(&marker, &self.limits).map_err(|e| fail(FailureClass::Infra, format!("slot cgroups: {e}"), &gates, &t))?;
             let (old, new, nl) = if cur_leaf == 1 { (l1, l2, 2u8) } else { (l2, l1, 1u8) };
             cgroup::kill_nowait(&old).map_err(|e| fail(FailureClass::Infra, e.to_string(), &gates, &t))?;
             let w = cgroup::wait_empty(&new, Duration::from_secs(20)).map_err(|e| fail(FailureClass::Infra, e.to_string(), &gates, &t))?;
@@ -1482,7 +1550,8 @@ impl Manager {
         }
         if self.cfg.restore_cpu_boost {
             let rec = json!({"paths": [cg, slot_cg], "cpu_max": self.limits.cpu_max});
-            std::fs::write(hook_dir.join("cpu-restore.json"), serde_json::to_vec(&rec).unwrap()).map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
+            std::fs::write(hook_dir.join("cpu-restore.json"), serde_json::to_vec(&rec).unwrap())
+                .map_err(|e| fail(FailureClass::Infra, format!("hook: {e}"), &gates, &t))?;
             for d in [&slot_cg, &cg] {
                 cgroup::set_cpu_max(d, "max 100000").map_err(|e| fail(FailureClass::Infra, format!("boost: {e}"), &gates, &t))?;
             }
@@ -1500,8 +1569,10 @@ impl Manager {
             }
         };
         // the lower layer the checkpoint ran on: the idmapped view of the image for a hardened slot (own user namespace)
-        let (lower, userxattr) = slotfs::restore_lower(&sp.dir, &self.cfg.lower, is_mounted).map_err(|e| fail(FailureClass::Infra, format!("restore lower: {e}"), &gates, &t))?;
-        let ids = drumsd_linux::idrange::restore_args(&sp.dir, &slotfs::paths(&self.cfg.state_dir, c.slot).dir).map_err(|e| fail(FailureClass::Infra, format!("uid range: {e}"), &gates, &t))?;
+        let (lower, userxattr) =
+            slotfs::restore_lower(&sp.dir, &self.cfg.lower, is_mounted).map_err(|e| fail(FailureClass::Infra, format!("restore lower: {e}"), &gates, &t))?;
+        let ids = drumsd_linux::idrange::restore_args(&sp.dir, &slotfs::paths(&self.cfg.state_dir, c.slot).dir)
+            .map_err(|e| fail(FailureClass::Infra, format!("uid range: {e}"), &gates, &t))?;
         let spec = restore::RestoreSpec {
             images: sp.images.clone(),
             croot: sp.croot.clone(),
@@ -1527,7 +1598,8 @@ impl Manager {
         // 4. CRIU restore (template server fork, or private)
         let ts = Instant::now();
         let spawn_epoch = drumsd_linux::now_epoch();
-        let run = restore::run(&self.exe, &spec, Duration::from_secs(300)).map_err(|e| fail(FailureClass::Infra, format!("restore client: {e}"), &gates, &t))?;
+        let run =
+            restore::run(&self.exe, &spec, Duration::from_secs(300)).map_err(|e| fail(FailureClass::Infra, format!("restore client: {e}"), &gates, &t))?;
         t.insert("restore".into(), round3(ts.elapsed().as_secs_f64()));
         // client stamps (relative to the spawn): start, mounted, sent, result
         for l in run.out_tail.lines() {
@@ -1556,7 +1628,12 @@ impl Manager {
         }
         if !run.ok || pid.is_none() {
             let tail = restore::log_tail(&log, 3000);
-            let error = format!("criu restore failed (exit {:?}): {} | log: {}", run.exit, run.out_tail.trim(), tail.lines().rev().take(6).collect::<Vec<_>>().join(" / "));
+            let error = format!(
+                "criu restore failed (exit {:?}): {} | log: {}",
+                run.exit,
+                run.out_tail.trim(),
+                tail.lines().rev().take(6).collect::<Vec<_>>().join(" / ")
+            );
             let class = recovery::classify(&error, &tail);
             // nothing of a failed restore may keep running
             let _ = cgroup::kill_and_wait(&cg, Duration::from_secs(20));
@@ -1643,8 +1720,12 @@ impl Manager {
                 self.put_ckpt(&c2);
                 gates.push(GateResult::pass(Gate::StateHash, hs, json!({"hash": h, "reference": "this restore defined it", "sections_s": sections_s})));
             }
-            (Err(e), _) => gates.push(GateResult::fail(Gate::StateHash, hs, json!({"error": e, "sections_s": sections_s,
-                                                                                    "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64()}))),
+            (Err(e), _) => gates.push(GateResult::fail(
+                Gate::StateHash,
+                hs,
+                json!({"error": e, "sections_s": sections_s,
+                                                                                    "timeout_s": STATE_HASH_TIMEOUT.as_secs_f64()}),
+            )),
         }
         // one line per state-hash gate with the host's load at that moment: the 60 s budget must not hide overload
         // (the gate's own seconds and each guest request's are what a report computes the 10/30/60 s tails from)
@@ -1699,8 +1780,22 @@ impl Manager {
         let sd = if self.cfg.incremental_capture { slotfs::read_json(&hook_dir.join("softdirty-clear.done")).ok() } else { None };
         let softdirty_uptime_us = sd.as_ref().filter(|v| v["ok"].as_bool() == Some(true)).and_then(|v| v["uptime_us"].as_u64());
         let softdirty_ok = softdirty_uptime_us.is_some();
-        Ok(RestoreOk { leaf: new_leaf, old_cg, pid, start_ticks, gates, timings: t, hook_dir, ready_at, ready_epoch, upper_warm: swap.warm, spawn_epoch,
-                       softdirty_ok, softdirty_uptime_us, images: sp.images.clone() })
+        Ok(RestoreOk {
+            leaf: new_leaf,
+            old_cg,
+            pid,
+            start_ticks,
+            gates,
+            timings: t,
+            hook_dir,
+            ready_at,
+            ready_epoch,
+            upper_warm: swap.warm,
+            spawn_epoch,
+            softdirty_ok,
+            softdirty_uptime_us,
+            images: sp.images.clone(),
+        })
     }
 
     /// After a restore: the alive gate at ready + alive_after_s, the next warm spare, trash removal.
@@ -1819,7 +1914,10 @@ impl Manager {
         let slot = self.slot(id)?;
         self.gone_check(&slot, "screenshot")?;
         let port = slot.view.read().unwrap().port;
-        tokio::task::spawn_blocking(move || Guest::new(port, Duration::from_secs(30)).screenshot()).await.map_err(e500)?.map_err(|e| ApiError::new(502, e.to_string()))
+        tokio::task::spawn_blocking(move || Guest::new(port, Duration::from_secs(30)).screenshot())
+            .await
+            .map_err(e500)?
+            .map_err(|e| ApiError::new(502, e.to_string()))
     }
 
     /// 410 `env_gone` if the env is destroyed or being destroyed.
@@ -1858,8 +1956,11 @@ impl Manager {
         self.metrics.inc("drumsd_ops_total", &[("op", "capture"), ("outcome", "not_quiescent")], 1.0);
         self.event(json!({"slot": id, "not_quiescent": report}));
         let unstable = report["unstable"].clone();
-        ApiError::new(409, format!("env {id} is not quiescent, nothing was captured: {why}; unstable: {}", unstable.to_string().chars().take(600).collect::<String>()))
-            .with(json!({"code": "not_quiescent", "unstable": unstable, "quiescence": report}))
+        ApiError::new(
+            409,
+            format!("env {id} is not quiescent, nothing was captured: {why}; unstable: {}", unstable.to_string().chars().take(600).collect::<String>()),
+        )
+        .with(json!({"code": "not_quiescent", "unstable": unstable, "quiescence": report}))
     }
 
     /// Wait until the slot's tree is quiescent (no task leaving, no process or thread starting or exiting for the
@@ -1888,7 +1989,14 @@ impl Manager {
     /// and the capture waits and dumps again; when no good dump is possible in time it fails with `not_quiescent`
     /// and the env stays ready. Nothing is captured silently: every attempt is in the checkpoint's `quiescence`.
     /// `lo`: the saved state's lease; `delete_with_children`: delete it when its last env closes.
-    pub async fn capture_leased(self: &Arc<Self>, id: &str, ckpt_id: Option<String>, o: QuiesceOpts, lo: LeaseOpts, delete_with_children: bool) -> R<CheckpointRecord> {
+    pub async fn capture_leased(
+        self: &Arc<Self>,
+        id: &str,
+        ckpt_id: Option<String>,
+        o: QuiesceOpts,
+        lo: LeaseOpts,
+        delete_with_children: bool,
+    ) -> R<CheckpointRecord> {
         for x in [lo.idle_timeout_s, lo.ttl_s].into_iter().flatten() {
             if !x.is_finite() || x < 0.0 {
                 return Err(ApiError::new(400, "state idle_timeout_s and ttl_s must be >= 0 (0 = no limit)"));
@@ -1966,7 +2074,10 @@ impl Manager {
             att["incremental"] = json!(base.as_ref().map(|b| b.display().to_string()));
             if base.is_some() && matches!(res, Ok(Err(_))) {
                 // the incremental dump failed: its attempt is kept under forgotten/, then the same capture in full
-                let why = match &res { Ok(Err(e)) => e.chars().take(400).collect::<String>(), _ => String::new() };
+                let why = match &res {
+                    Ok(Err(e)) => e.chars().take(400).collect::<String>(),
+                    _ => String::new(),
+                };
                 let me = self.clone();
                 let kept = tokio::task::spawn_blocking(move || me.discard_dump(into)).await.unwrap_or_else(|e| format!("not moved: {e}"));
                 self.event(json!({"slot": id, "incremental_capture_failed": why, "into": into, "records": kept, "retry": "full dump"}));
@@ -2242,12 +2353,25 @@ impl Manager {
                 extra.push(u.to_string());
             }
         }
-        let mut argv: Vec<String> = ["capture", "--slot", &slot.to_string(), "--into", &into.to_string(), "--leave-running", "--no-continue",
-                                     "--dump-log-level", &self.cfg.criu_log_level.clamp(3, 4).to_string()].iter().map(|x| x.to_string()).collect();
+        let mut argv: Vec<String> = [
+            "capture",
+            "--slot",
+            &slot.to_string(),
+            "--into",
+            &into.to_string(),
+            "--leave-running",
+            "--no-continue",
+            "--dump-log-level",
+            &self.cfg.criu_log_level.clamp(3, 4).to_string(),
+        ]
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
         argv.extend(extra);
         let cmd = |args: &[&str]| {
             let mut c = std::process::Command::new(&py);
-            c.args(["-m", "sharedos_rootfs.capture"]).args(args)
+            c.args(["-m", "sharedos_rootfs.capture"])
+                .args(args)
                 .current_dir(&self.cfg.py_src)
                 .env("SHAREDOS_ROOTFS_CONFIG", &self.cfg.py_config)
                 .env("PYTHONPATH", &self.cfg.py_src)
@@ -2275,7 +2399,15 @@ impl Manager {
     /// Capture the slot's current state and start `n` children from it, concurrently. `child`: the children's lease;
     /// `state`: the saved state's lease; `delete_state_with_children`: the state the fork made is deleted as soon as
     /// its last env (child or other) is closed.
-    pub async fn branch_leased(self: &Arc<Self>, id: &str, n: usize, o: QuiesceOpts, child: LeaseOpts, state: LeaseOpts, delete_state_with_children: bool) -> R<Value> {
+    pub async fn branch_leased(
+        self: &Arc<Self>,
+        id: &str,
+        n: usize,
+        o: QuiesceOpts,
+        child: LeaseOpts,
+        state: LeaseOpts,
+        delete_state_with_children: bool,
+    ) -> R<Value> {
         if n == 0 || n > 64 {
             return Err(ApiError::new(400, "n must be 1..64"));
         }
@@ -2324,7 +2456,9 @@ impl Manager {
         let secs = t0.elapsed().as_secs_f64();
         let all_up = children.iter().all(|c| c["state"] == "ready");
         self.account(Some(&parent), |l| l.op("fork", secs, all_up));
-        Ok(json!({"checkpoint": c, "state": c.id, "delete_state_with_children": delete_state_with_children, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(secs - t_cap), "seconds": round3(secs)}))
+        Ok(
+            json!({"checkpoint": c, "state": c.id, "delete_state_with_children": delete_state_with_children, "children": children, "capture_s": round3(t_cap), "children_ready_s": round3(secs - t_cap), "seconds": round3(secs)}),
+        )
     }
 
     /// The env took an input (step, reset, task load, destroy): a prefork of it no longer matches its state and is
@@ -2341,7 +2475,15 @@ impl Manager {
 
     /// Start a fork of the env now, in the background, for the next fork call (see `Prefork`). A prefork already
     /// prepared for this env is discarded first.
-    pub async fn prefork(self: &Arc<Self>, id: &str, n: usize, o: QuiesceOpts, child: LeaseOpts, state: LeaseOpts, delete_state_with_children: bool) -> R<Value> {
+    pub async fn prefork(
+        self: &Arc<Self>,
+        id: &str,
+        n: usize,
+        o: QuiesceOpts,
+        child: LeaseOpts,
+        state: LeaseOpts,
+        delete_state_with_children: bool,
+    ) -> R<Value> {
         if n == 0 || n > 64 {
             return Err(ApiError::new(400, "n must be 1..64"));
         }
@@ -2360,8 +2502,14 @@ impl Manager {
             tokio::spawn(async move { me.discard_prefork(&id2, p, "replaced by a new prefork").await });
         }
         let (tx, rx) = tokio::sync::watch::channel(None);
-        let p = Prefork { n, delete_state_with_children, inputs_at_start: slot.inputs.load(std::sync::atomic::Ordering::SeqCst), started: Instant::now(),
-                          started_epoch: drumsd_linux::now_epoch(), done: rx };
+        let p = Prefork {
+            n,
+            delete_state_with_children,
+            inputs_at_start: slot.inputs.load(std::sync::atomic::Ordering::SeqCst),
+            started: Instant::now(),
+            started_epoch: drumsd_linux::now_epoch(),
+            done: rx,
+        };
         let started_epoch = p.started_epoch;
         self.preforks.lock().unwrap().insert(id.to_string(), p);
         let me = self.clone();
@@ -2390,7 +2538,10 @@ impl Manager {
         let slot = self.slot(id).ok()?;
         let why: String = 'check: {
             if p.n != n || p.delete_state_with_children != delete_state_with_children {
-                break 'check format!("asked fork({n}, delete_state_with_children={delete_state_with_children}), prepared fork({}, {})", p.n, p.delete_state_with_children);
+                break 'check format!(
+                    "asked fork({n}, delete_state_with_children={delete_state_with_children}), prepared fork({}, {})",
+                    p.n, p.delete_state_with_children
+                );
             }
             let mut rx = p.done.clone();
             let in_flight = rx.borrow().is_none();
@@ -2435,10 +2586,13 @@ impl Manager {
                 break 'check format!("{} of {n} children came up", kids.len());
             }
             for k in &kids {
-                let ok = self.slot(k).map(|s| {
-                    let r = s.view.read().unwrap();
-                    r.state == SlotState::Ready && !matches!(r.validity, Validity::Invalid { .. })
-                }).unwrap_or(false);
+                let ok = self
+                    .slot(k)
+                    .map(|s| {
+                        let r = s.view.read().unwrap();
+                        r.state == SlotState::Ready && !matches!(r.validity, Validity::Invalid { .. })
+                    })
+                    .unwrap_or(false);
                 if !ok {
                     break 'check format!("child {k} is no longer ready and valid");
                 }
@@ -2599,10 +2753,15 @@ impl Manager {
 
     /// Envs made from this state that are not destroyed.
     fn state_users(&self, ckpt: &str) -> Vec<String> {
-        self.slots.read().unwrap().values().filter_map(|s| {
-            let v = s.view.read().unwrap();
-            (v.checkpoint == ckpt && !v.state.is_terminal()).then(|| v.id.clone())
-        }).collect()
+        self.slots
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|s| {
+                let v = s.view.read().unwrap();
+                (v.checkpoint == ckpt && !v.state.is_terminal()).then(|| v.id.clone())
+            })
+            .collect()
     }
 
     /// An env made from `ckpt` closed: the saved state's idle time starts now, and a state made by a fork with
@@ -2677,18 +2836,21 @@ impl Manager {
             }
         }
         let mut done = vec![];
-        let futs: Vec<_> = envs.into_iter().map(|(id, why, text)| {
-            let me = self.clone();
-            tokio::spawn(async move {
-                let r = me.destroy_why(&id, Some(text)).await;
-                if r.is_ok() {
-                    me.metrics.inc("drumsd_lease_reaped_total", &[("kind", "env"), ("reason", why)], 1.0);
-                    *me.lease_reaped.lock().unwrap().entry(format!("env:{why}")).or_default() += 1;
-                    me.event(json!({"lease_reaped": {"env": id, "reason": why}}));
-                }
-                json!({"env": id, "reason": why, "ok": r.is_ok(), "error": r.err().map(|e| e.message)})
+        let futs: Vec<_> = envs
+            .into_iter()
+            .map(|(id, why, text)| {
+                let me = self.clone();
+                tokio::spawn(async move {
+                    let r = me.destroy_why(&id, Some(text)).await;
+                    if r.is_ok() {
+                        me.metrics.inc("drumsd_lease_reaped_total", &[("kind", "env"), ("reason", why)], 1.0);
+                        *me.lease_reaped.lock().unwrap().entry(format!("env:{why}")).or_default() += 1;
+                        me.event(json!({"lease_reaped": {"env": id, "reason": why}}));
+                    }
+                    json!({"env": id, "reason": why, "ok": r.is_ok(), "error": r.err().map(|e| e.message)})
+                })
             })
-        }).collect();
+            .collect();
         for f in futs {
             if let Ok(v) = f.await {
                 done.push(v);
@@ -2696,16 +2858,20 @@ impl Manager {
         }
         // saved states (never installed images): only once no env made from them exists
         let pinned = self.pinned_states.lock().unwrap().clone();
-        let cands: Vec<CheckpointRecord> = self.ckpts.read().unwrap().values().filter(|c| c.captured_from.is_some() && !pinned.contains(&c.id)).cloned().collect();
-        let states: Vec<(String, &'static str)> = cands.iter().filter_map(|c| {
-            if !self.state_users(&c.id).is_empty() {
-                return None;
-            }
-            if c.delete_with_children {
-                return Some((c.id.clone(), "children_closed"));
-            }
-            self.state_lease(c).expired(c.created_epoch, c.last_used_epoch.unwrap_or(c.created_epoch), now).map(|w| (c.id.clone(), w))
-        }).collect();
+        let cands: Vec<CheckpointRecord> =
+            self.ckpts.read().unwrap().values().filter(|c| c.captured_from.is_some() && !pinned.contains(&c.id)).cloned().collect();
+        let states: Vec<(String, &'static str)> = cands
+            .iter()
+            .filter_map(|c| {
+                if !self.state_users(&c.id).is_empty() {
+                    return None;
+                }
+                if c.delete_with_children {
+                    return Some((c.id.clone(), "children_closed"));
+                }
+                self.state_lease(c).expired(c.created_epoch, c.last_used_epoch.unwrap_or(c.created_epoch), now).map(|w| (c.id.clone(), w))
+            })
+            .collect();
         for (id, why) in states {
             self.reap_state(&id, why).await;
             done.push(json!({"state": id, "reason": why}));
@@ -2766,10 +2932,20 @@ impl Manager {
                          "provision_url": format!("http://127.0.0.1:{port}/provision/{token}")});
         let timeout = Duration::from_secs(if verb == "evaluate" { o.eval_timeout_s } else { o.setup_timeout_s });
         let mut cmd = std::process::Command::new(&o.python);
-        cmd.arg("-I").arg(&o.helper).arg(verb).current_dir(&o.osworld_dir).env_clear()
-            .env("PATH", "/usr/bin:/bin").env("HOME", &o.cache_dir).env("PYTHONDONTWRITEBYTECODE", "1").env("OSWORLD_DIR", &o.osworld_dir)
-            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
-            .uid(o.uid).gid(o.gid);
+        cmd.arg("-I")
+            .arg(&o.helper)
+            .arg(verb)
+            .current_dir(&o.osworld_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &o.cache_dir)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("OSWORLD_DIR", &o.osworld_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .uid(o.uid)
+            .gid(o.gid);
         unsafe {
             // its own process group, so a timeout kills the helper and anything it started
             // (std drops supplementary groups itself when a uid is set; this runs after the uid change)
@@ -2798,7 +2974,11 @@ impl Manager {
         match reply {
             Some(v) if v["ok"] == true => Ok(v),
             Some(v) => Err(v["error"].as_str().unwrap_or("helper reported failure").chars().take(1500).collect()),
-            None => Err(format!("osw {verb} exit {:?}, no reply; stderr: {}", out.status.code(), stderr.chars().rev().take(1200).collect::<String>().chars().rev().collect::<String>())),
+            None => Err(format!(
+                "osw {verb} exit {:?}, no reply; stderr: {}",
+                out.status.code(),
+                stderr.chars().rev().take(1200).collect::<String>().chars().rev().collect::<String>()
+            )),
         }
     }
 
@@ -2839,12 +3019,17 @@ impl Manager {
             timeout: Duration::from_secs(120),
             userns: drumsd_linux::provision::own_userns(init_pid),
         };
-        let out = tokio::task::spawn_blocking(move || drumsd_linux::provision::run(&spec)).await.map_err(e500)?.map_err(|e| ApiError::new(500, format!("provisioning: {e}")))?;
+        let out = tokio::task::spawn_blocking(move || drumsd_linux::provision::run(&spec))
+            .await
+            .map_err(e500)?
+            .map_err(|e| ApiError::new(500, format!("provisioning: {e}")))?;
         // the command itself is not logged (OSWorld commands carry {CLIENT_PASSWORD}); its exit and timing are
         self.event(json!({"slot": id, "provision_step": {"returncode": out.returncode, "timed_out": out.timed_out, "seconds": round3(out.seconds)}}));
         self.account(Some(&slot), |l| l.op("provision_step", out.seconds, out.returncode == Some(0)));
         if out.timed_out {
-            return Ok(json!({"status": "error", "message": "provisioning step timed out after 120 s", "output": out.output, "error": out.error, "returncode": null}));
+            return Ok(
+                json!({"status": "error", "message": "provisioning step timed out after 120 s", "output": out.output, "error": out.error, "returncode": null}),
+            );
         }
         Ok(json!({"status": "success", "output": out.output, "error": out.error, "returncode": out.returncode}))
     }
@@ -2964,7 +3149,23 @@ impl Manager {
             "seconds": round3(secs),
         });
         self.event(json!({"slot": v.id, "verify": {"episode": v.episode, "task": tid, "score": score, "valid": valid, "error": err}}));
-        self.metrics.inc("drumsd_verify_total", &[("valid", if valid { "true" } else { "false" }), ("scored", if score.is_some() { "true" } else if skipped { "skipped" } else { "false" })], 1.0);
+        self.metrics.inc(
+            "drumsd_verify_total",
+            &[
+                ("valid", if valid { "true" } else { "false" }),
+                (
+                    "scored",
+                    if score.is_some() {
+                        "true"
+                    } else if skipped {
+                        "skipped"
+                    } else {
+                        "false"
+                    },
+                ),
+            ],
+            1.0,
+        );
         self.put_slot(&slot, |r| r.verified = Some(out.clone()));
         Ok(out)
     }
@@ -3027,10 +3228,19 @@ impl Manager {
     // ------------------------------------------------------------------------------------------------ metrics
     fn slot_seconds_now(&self, window_start: f64) -> f64 {
         let now = drumsd_linux::now_epoch();
-        self.slots.read().unwrap().values().map(|s| {
-            let v = s.view.read().unwrap();
-            if v.closed_epoch.is_some() || v.state.is_terminal() { 0.0 } else { (now - v.created_epoch.max(window_start)).max(0.0) }
-        }).sum()
+        self.slots
+            .read()
+            .unwrap()
+            .values()
+            .map(|s| {
+                let v = s.view.read().unwrap();
+                if v.closed_epoch.is_some() || v.state.is_terminal() {
+                    0.0
+                } else {
+                    (now - v.created_epoch.max(window_start)).max(0.0)
+                }
+            })
+            .sum()
     }
 
     /// Aggregate metrics for the current window (see drumsd_core::usage for every definition).
@@ -3081,11 +3291,17 @@ impl Manager {
     }
 
     pub fn health(&self) -> Value {
-        let ck: Vec<Value> = self.ckpts.read().unwrap().values().map(|c| {
-            let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
-            json!({"id": c.id, "template_server": template::adopt(&c.socket, &sp.images), "task": c.task.as_ref().map(|t| t["id"].clone()),
+        let ck: Vec<Value> = self
+            .ckpts
+            .read()
+            .unwrap()
+            .values()
+            .map(|c| {
+                let sp = slotfs::paths(&self.cfg.state_dir, c.slot);
+                json!({"id": c.id, "template_server": template::adopt(&c.socket, &sp.images), "task": c.task.as_ref().map(|t| t["id"].clone()),
                    "stale_reason": self.stale(c)})
-        }).collect();
+            })
+            .collect();
         let mut states: BTreeMap<&'static str, u64> = BTreeMap::new();
         for s in self.slots.read().unwrap().values() {
             *states.entry(s.view.read().unwrap().state.name()).or_default() += 1;
@@ -3095,7 +3311,7 @@ impl Manager {
             let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
             (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
         };
-        let ok = ck.iter().all(|c| !c["template_server"].is_null() && c["stale_reason"].as_str().map_or(true, |w| !w.starts_with("state_lost")));
+        let ok = ck.iter().all(|c| !c["template_server"].is_null() && c["stale_reason"].as_str().is_none_or(|w| !w.starts_with("state_lost")));
         let mut warnings: Vec<String> = vec![];
         for c in &ck {
             if let Some(w) = c["stale_reason"].as_str() {
@@ -3107,7 +3323,13 @@ impl Manager {
             self.metrics.set("drumsd_state_dir_free_bytes", &[], f as f64);
             let pct = 100.0 * f as f64 / t.max(1) as f64;
             if pct < self.cfg.state_warn_free_pct {
-                warnings.push(format!("state dir {} is {:.1}% free ({} MiB; restores are refused below {} MiB)", self.cfg.state_dir.display(), pct, f >> 20, self.cfg.state_min_free_mib));
+                warnings.push(format!(
+                    "state dir {} is {:.1}% free ({} MiB; restores are refused below {} MiB)",
+                    self.cfg.state_dir.display(),
+                    pct,
+                    f >> 20,
+                    self.cfg.state_min_free_mib
+                ));
             }
         }
         let fd = self.cfg.forgotten_dir();
@@ -3130,17 +3352,28 @@ impl Manager {
             if let (Some(f), Some(t)) = (forget::free_bytes(&probe), forget::total_bytes(&probe)) {
                 let pct = 100.0 * f as f64 / t.max(1) as f64;
                 if pct < FORGOTTEN_DISK_MIN_FREE_PCT {
-                    warnings.push(format!("the filesystem of forgotten_dir {} is {:.1}% free ({} MiB): kept records may stop being written", fd.display(), pct, f >> 20));
+                    warnings.push(format!(
+                        "the filesystem of forgotten_dir {} is {:.1}% free ({} MiB): kept records may stop being written",
+                        fd.display(),
+                        pct,
+                        f >> 20
+                    ));
                 }
             }
         }
         match &self.crash {
             None => warnings.push("crash_watch is off: an env whose app crashed can return a valid reward".into()),
-            Some(w) if !w.summary()["running"].as_bool().unwrap_or(false) => warnings.push("the crash watch stopped: every episode since then is invalid (no_app_crash)".into()),
+            Some(w) if !w.summary()["running"].as_bool().unwrap_or(false) => {
+                warnings.push("the crash watch stopped: every episode since then is invalid (no_app_crash)".into())
+            }
             _ => {}
         }
         if left_on_tmpfs > 0 {
-            warnings.push(format!("{} MiB of env records could not be packed and are on the state dir ({}/forgotten)", left_on_tmpfs >> 20, self.cfg.state_dir.display()));
+            warnings.push(format!(
+                "{} MiB of env records could not be packed and are on the state dir ({}/forgotten)",
+                left_on_tmpfs >> 20,
+                self.cfg.state_dir.display()
+            ));
         }
         {
             use std::os::unix::fs::MetadataExt;
@@ -3150,14 +3383,19 @@ impl Manager {
             }
         }
         let pv_live = drumsd_linux::procview::fuse::is_live(&self.cfg.procview_dir);
-        let pv_needed = self.ckpts.read().unwrap().values().any(|c| !view_externals(&slotfs::paths(&self.cfg.state_dir, c.slot).dir, &self.cfg.procview_dir).is_empty());
+        let pv_needed =
+            self.ckpts.read().unwrap().values().any(|c| !view_externals(&slotfs::paths(&self.cfg.state_dir, c.slot).dir, &self.cfg.procview_dir).is_empty());
         self.metrics.set("drumsd_procview_live", &[], if pv_live { 1.0 } else { 0.0 });
         if pv_needed && !pv_live {
-            warnings.push(format!("the per-env memory/CPU view at {} is not live (drums-procview.service): restores of checkpoints that bind it fail closed", self.cfg.procview_dir.display()));
+            warnings.push(format!(
+                "the per-env memory/CPU view at {} is not live (drums-procview.service): restores of checkpoints that bind it fail closed",
+                self.cfg.procview_dir.display()
+            ));
         }
         let pv_status: Value = std::fs::read(drumsd_linux::procview::STATUS).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         if pv_needed && pv_live && pv_status["sysinfo"].as_str() != Some("attached") {
-            warnings.push(format!("the per-env view serves files but not sysinfo(2): {} (sysconf(_SC_PHYS_PAGES) in envs reports the host)", pv_status["sysinfo"]));
+            warnings
+                .push(format!("the per-env view serves files but not sysinfo(2): {} (sysconf(_SC_PHYS_PAGES) in envs reports the host)", pv_status["sysinfo"]));
         }
         json!({"ok": ok, "version": env!("CARGO_PKG_VERSION"),
                "procview": {"dir": self.cfg.procview_dir, "live": pv_live, "used_by_checkpoints": pv_needed, "status": pv_status}, "uptime_s": round3(drumsd_linux::now_epoch() - self.started_epoch),
@@ -3244,7 +3482,9 @@ impl Manager {
             let num = rec.num;
             let alive = rec.init_pid.map(|p| {
                 procfs::start_ticks(p) == rec.init_start_ticks
-                    && procfs::cgroup_path(p).map(|c| c.contains(&format!("/drumsbench-{}-pool.scope", slotfs::marker_for(&self.cfg.state_dir, num)))).unwrap_or(false)
+                    && procfs::cgroup_path(p)
+                        .map(|c| c.contains(&format!("/drumsbench-{}-pool.scope", slotfs::marker_for(&self.cfg.state_dir, num))))
+                        .unwrap_or(false)
             });
             let alive = alive.unwrap_or(false);
             let mut rec2 = rec.clone();
@@ -3261,7 +3501,16 @@ impl Manager {
                 action = "transient -> cleaned";
             } else if matches!(rec.state, SlotState::Ready) && !alive {
                 let gone = !slotfs::paths(&self.cfg.state_dir, num).dir.exists();
-                rec2.state = SlotState::Down { reason: if gone { format!("state_lost: slot directory {} is gone and the tree is not running (the host was restarted)", slotfs::paths(&self.cfg.state_dir, num).dir.display()) } else { "tree not running after daemon restart".into() } };
+                rec2.state = SlotState::Down {
+                    reason: if gone {
+                        format!(
+                            "state_lost: slot directory {} is gone and the tree is not running (the host was restarted)",
+                            slotfs::paths(&self.cfg.state_dir, num).dir.display()
+                        )
+                    } else {
+                        "tree not running after daemon restart".into()
+                    },
+                };
                 rec2.init_pid = None;
                 action = "ready but dead -> down";
             } else {
@@ -3272,17 +3521,29 @@ impl Manager {
                     let _ = t.set_pid(rec.init_pid.unwrap());
                 }
             }
-            let slot = Arc::new(Slot { id: id.clone(), op: Mutex::new(()), view: RwLock::new(rec2.clone()), targets, proxies: StdMutex::new(handles) , inputs: std::sync::atomic::AtomicU64::new(0) });
+            let slot = Arc::new(Slot {
+                id: id.clone(),
+                op: Mutex::new(()),
+                view: RwLock::new(rec2.clone()),
+                targets,
+                proxies: StdMutex::new(handles),
+                inputs: std::sync::atomic::AtomicU64::new(0),
+            });
             self.slots.write().unwrap().insert(id.clone(), slot.clone());
             self.put_slot(&slot, |_| {});
             // a pending alive gate of a still-running episode is judged now
             if matches!(rec2.state, SlotState::Ready) && rec2.gates.get(Gate::AliveAfterResume).map(|g| g.status == GateStatus::Pending).unwrap_or(false) {
-                let gen = slotfs::read_json(&slotfs::paths(&self.cfg.state_dir, num).slot_json).ok().and_then(|v| v["restore_generation"].as_u64()).unwrap_or(0);
+                let gen =
+                    slotfs::read_json(&slotfs::paths(&self.cfg.state_dir, num).slot_json).ok().and_then(|v| v["restore_generation"].as_u64()).unwrap_or(0);
                 let hook_dir = slotfs::paths(&self.cfg.state_dir, num).dir.join(format!("lock-hook-{gen}"));
                 let me = self.clone();
                 let s2 = slot.clone();
                 let ep = rec2.episode;
-                tokio::task::spawn_blocking(move || me.judge_alive(&s2, ep, &hook_dir, Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now))).await.map_err(|e| e.to_string())?;
+                tokio::task::spawn_blocking(move || {
+                    me.judge_alive(&s2, ep, &hook_dir, Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now))
+                })
+                .await
+                .map_err(|e| e.to_string())?;
             }
             report.push(json!({"slot": id, "was": rec.state.name(), "now": slot.view.read().unwrap().state.name(), "action": action}));
         }
@@ -3312,7 +3573,8 @@ pub fn refused(r: &SlotRecord, e: drumsd_core::state::TransitionError) -> ApiErr
     let mut body = json!({"code": "wrong_state", "state": r.state.name()});
     if let SlotState::Quarantined { reason } = &r.state {
         body["reason"] = json!(reason);
-        body["next"] = json!("release (POST /v1/slots/{id}/release) then reset, or destroy it and create a new env; the env is not restored into again by itself");
+        body["next"] =
+            json!("release (POST /v1/slots/{id}/release) then reset, or destroy it and create a new env; the env is not restored into again by itself");
     }
     ApiError::new(409, e.to_string()).with(body)
 }
@@ -3350,7 +3612,9 @@ pub fn invalid_reasons(r: &SlotRecord) -> Vec<String> {
         let d = r.gates.get(*g).map(|x| &x.detail);
         out.push(match g {
             Gate::NotQuarantined => format!("quarantined: {}", d.and_then(|d| d["reason"].as_str()).unwrap_or("?")),
-            Gate::NoOomKill => format!("no_oom_kill: the OOM killer took {} task(s) of the env", d.map(|d| d["oom_kills"].to_string()).unwrap_or_else(|| "?".into())),
+            Gate::NoOomKill => {
+                format!("no_oom_kill: the OOM killer took {} task(s) of the env", d.map(|d| d["oom_kills"].to_string()).unwrap_or_else(|| "?".into()))
+            }
             Gate::NoAppCrash => format!("no_app_crash: {}", d.map(app_crash_words).unwrap_or_else(|| "?".into())),
             _ if r.gates.get(*g).is_none() => format!("gate {} missing", g.as_str()),
             _ => format!("gate {} failed", g.as_str()),
@@ -3384,7 +3648,11 @@ pub fn app_crash_words(d: &Value) -> String {
     for s in d["incomplete"].as_array().into_iter().flatten() {
         parts.push(s.as_str().unwrap_or("?").to_string());
     }
-    if parts.is_empty() { "?".into() } else { parts.join("; ") }
+    if parts.is_empty() {
+        "?".into()
+    } else {
+        parts.join("; ")
+    }
 }
 
 /// Key in slot.json that marks an env that failed at some point (value: the first reason seen).
@@ -3425,7 +3693,7 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
     if mode == forget::Mode::KeepAll {
         return Full;
     }
-    if slot_json.map_or(false, |j| j.get(FAILURE_SEEN).is_some()) {
+    if slot_json.is_some_and(|j| j.get(FAILURE_SEEN).is_some()) {
         return Full;
     }
     match basis {
@@ -3435,10 +3703,13 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
             if !clean {
                 return Full;
             }
-            Summary { record: serde_json::to_value(r).unwrap_or(Value::Null), reason: "env ended valid (closed from ready, valid verdict, no failed gate, never quarantined)".into() }
+            Summary {
+                record: serde_json::to_value(r).unwrap_or(Value::Null),
+                reason: "env ended valid (closed from ready, valid verdict, no failed gate, never quarantined)".into(),
+            }
         }
         ForgetBasis::Checkpoint(c) => {
-            let rejected = c.quiescence.as_ref().and_then(|q| q["attempts"].as_array()).map_or(false, |a| a.iter().any(|x| !x["rejected"].is_null()));
+            let rejected = c.quiescence.as_ref().and_then(|q| q["attempts"].as_array()).is_some_and(|a| a.iter().any(|x| !x["rejected"].is_null()));
             if c.captured_from.is_none() || rejected {
                 return Full; // installed images and saved states that needed a rejected dump keep their logs
             }
@@ -3451,7 +3722,7 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
 /// restart), an env that is down or quarantined holds nothing of it: no tree runs (drums-scale, 2026-10-30: 115 down
 /// and quarantined envs from before a reboot blocked the boot unit's re-provisioning with 409 "used by envs").
 pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
-    !state.is_terminal() && !(lost && matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
+    !state.is_terminal() && (!lost || !matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
 }
 
 /// The host device binds of a hardened slot's checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments
@@ -3477,7 +3748,9 @@ pub fn retire_slot_dir(state_dir: &Path, num: u32, now_ms: u64, forget: impl FnO
     if sp.dir.symlink_metadata().is_err() {
         return Ok(PathBuf::from(format!("slot{num}-* (moved by an earlier, interrupted destroy)")));
     }
-    for d in ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root", "softdirty-base", "softdirty-base.new"] {
+    for d in
+        ["upper", "upper.snap", "work", "images", "upper.next", "work.next", "upper.next.tmp", "trash", "criu-root", "softdirty-base", "softdirty-base.new"]
+    {
         let p = sp.dir.join(d);
         if p.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&p)?;
@@ -3549,7 +3822,10 @@ pub fn hex_sha256(b: &[u8]) -> String {
 pub const UNSUPPORTED_AGENT_ROOT: [(&str, &str); 3] = [
     ("5812b315-e7bd-4265-b51f-863c02174c28", "the agent must create a system user with SSH access (useradd, /etc/ssh): agent root is not available"),
     ("94d95f96-9699-4208-98ba-3c3119edf9c2", "the agent must install a system package (Spotify: apt or snap): agent root is not available"),
-    ("b6781586-6346-41cd-935a-a6b1487918fc", "the agent must change the system time zone (timedatectl): agent root is not available (its setup also needs systemd, which a slot does not run)"),
+    (
+        "b6781586-6346-41cd-935a-a6b1487918fc",
+        "the agent must change the system time zone (timedatectl): agent root is not available (its setup also needs systemd, which a slot does not run)",
+    ),
 ];
 
 pub fn unsupported_reason(task_id: &str) -> Option<&'static str> {
@@ -3594,7 +3870,12 @@ pub const STATE_HASH_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn load_snapshot() -> Value {
     let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
     let threads = rd("/proc/self/status").lines().find_map(|l| l.strip_prefix("Threads:").and_then(|v| v.trim().parse::<u64>().ok()));
-    let psi = |p: &str| rd(p).lines().find(|l| l.starts_with("some")).and_then(|l| l.split_whitespace().find_map(|f| f.strip_prefix("avg10=").and_then(|v| v.parse::<f64>().ok())));
+    let psi = |p: &str| {
+        rd(p)
+            .lines()
+            .find(|l| l.starts_with("some"))
+            .and_then(|l| l.split_whitespace().find_map(|f| f.strip_prefix("avg10=").and_then(|v| v.parse::<f64>().ok())))
+    };
     let la = rd("/proc/loadavg").split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
     json!({"drumsd_threads": threads, "mem_psi_some_avg10": psi("/proc/pressure/memory"), "cpu_psi_some_avg10": psi("/proc/pressure/cpu"), "loadavg1": la})
 }
@@ -3606,11 +3887,16 @@ pub fn state_hash(g: &Guest) -> Result<String, String> {
 /// The state hash and each section's seconds (how long the guest took to answer it).
 pub fn state_hash_timed(g: &Guest) -> (Result<String, String>, Vec<f64>) {
     let outs: Vec<(Result<String, String>, f64)> = std::thread::scope(|s| {
-        let hs: Vec<_> = statehash::STATE_SECTIONS.iter().map(|c| s.spawn(move || {
-            let t = Instant::now();
-            let r = g.sh(c).map_err(|e| e.to_string());
-            (r, round3(t.elapsed().as_secs_f64()))
-        })).collect();
+        let hs: Vec<_> = statehash::STATE_SECTIONS
+            .iter()
+            .map(|c| {
+                s.spawn(move || {
+                    let t = Instant::now();
+                    let r = g.sh(c).map_err(|e| e.to_string());
+                    (r, round3(t.elapsed().as_secs_f64()))
+                })
+            })
+            .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     let secs: Vec<f64> = outs.iter().map(|x| x.1).collect();
@@ -3633,7 +3919,11 @@ pub fn run_action(g: &Guest, a: &Value) -> std::io::Result<Value> {
         "launch" => {
             let r = g.request("POST", "/setup/launch", Some(&json!({"command": a["command"], "shell": a["shell"].as_bool().unwrap_or(false)})))?;
             if r.status != 200 {
-                return Err(std::io::Error::other(format!("/setup/launch HTTP {}: {}", r.status, String::from_utf8_lossy(&r.body).chars().take(300).collect::<String>())));
+                return Err(std::io::Error::other(format!(
+                    "/setup/launch HTTP {}: {}",
+                    r.status,
+                    String::from_utf8_lossy(&r.body).chars().take(300).collect::<String>()
+                )));
             }
             Ok(json!({"status": "success"}))
         }
@@ -3765,11 +4055,40 @@ mod tests {
         for g in Gate::ALL {
             gates.push(GateResult::pass(g, 0.0, json!({})));
         }
-        SlotRecord { id: "s147".into(), num: 147, checkpoint: "osworld-ubuntu".into(), state, episode: 1, init_pid: Some(1), init_start_ticks: None,
-                     restore_generation: 1, leaf: 1, mode: "template".into(), port: 25147, extra_ports: vec![], validity: gates.validity(&required_gates()), gates,
-                     cost: CostRecord::default(), timings: BTreeMap::new(), last_error: None, task: None, ready_epoch: None, episode_start_epoch: None, created_epoch: 0.0,
-                     updated_epoch: 0.0, task_setup_on_restore: false, usage: Ledger::default(), verified: None, closed_epoch: None, lease: None,
-                     last_used_epoch: None, closed_reason: None, dirty_base: None, dirty_depth: 0, dirty_base_uptime_us: None }
+        SlotRecord {
+            id: "s147".into(),
+            num: 147,
+            checkpoint: "osworld-ubuntu".into(),
+            state,
+            episode: 1,
+            init_pid: Some(1),
+            init_start_ticks: None,
+            restore_generation: 1,
+            leaf: 1,
+            mode: "template".into(),
+            port: 25147,
+            extra_ports: vec![],
+            validity: gates.validity(&required_gates()),
+            gates,
+            cost: CostRecord::default(),
+            timings: BTreeMap::new(),
+            last_error: None,
+            task: None,
+            ready_epoch: None,
+            episode_start_epoch: None,
+            created_epoch: 0.0,
+            updated_epoch: 0.0,
+            task_setup_on_restore: false,
+            usage: Ledger::default(),
+            verified: None,
+            closed_epoch: None,
+            lease: None,
+            last_used_epoch: None,
+            closed_reason: None,
+            dirty_base: None,
+            dirty_depth: 0,
+            dirty_base_uptime_us: None,
+        }
     }
 
     #[test]
@@ -3903,10 +4222,25 @@ mod tests {
     }
 
     fn ck(captured_from: Option<&str>, provenance: Option<Value>) -> CheckpointRecord {
-        CheckpointRecord { id: "osworld-ubuntu".into(), slot: 0, socket: "/s".into(), server_pid: None, argv_marker: "m".into(),
-                           expected_state_hash: None, hash_reference: "r".into(), captured_from: captured_from.map(|s| s.into()),
-                           created_epoch: 0.0, server_ready_s: 0.0, task: None, quiescence: None, provenance,
-                           lease: None, delete_with_children: false, last_used_epoch: None, crash_taint: None }
+        CheckpointRecord {
+            id: "osworld-ubuntu".into(),
+            slot: 0,
+            socket: "/s".into(),
+            server_pid: None,
+            argv_marker: "m".into(),
+            expected_state_hash: None,
+            hash_reference: "r".into(),
+            captured_from: captured_from.map(|s| s.into()),
+            created_epoch: 0.0,
+            server_ready_s: 0.0,
+            task: None,
+            quiescence: None,
+            provenance,
+            lease: None,
+            delete_with_children: false,
+            last_used_epoch: None,
+            crash_taint: None,
+        }
     }
 
     #[test]
@@ -3921,7 +4255,7 @@ mod tests {
         assert!(r.contains("source_sha256 and inspection_sha256"), "{r}");
         // a saved state is the user's data: never stale, whatever made it
         assert_eq!(stale_reason(&ck(Some("s101"), None), &cur), None);
-        let v = ckpt_view(&ck(None, None), &cur);
+        let v = ckpt_view_on(&ck(None, None), &cur, None);
         assert_eq!(v["stale"], json!(true));
         assert!(v["stale_reason"].is_string());
         // a v0.3 journal record (no provenance field) still loads
@@ -3983,7 +4317,9 @@ mod tests {
                     let mut buf = [0u8; 4096];
                     while !got.windows(4).any(|w| w == b"\r\n\r\n") || !got.ends_with(b"}") {
                         let n = c.read(&mut buf).unwrap();
-                        if n == 0 { return; }
+                        if n == 0 {
+                            return;
+                        }
                         got.extend_from_slice(&buf[..n]);
                     }
                     std::thread::sleep(delay);
@@ -4014,11 +4350,13 @@ mod tests {
     #[test]
     fn pyautogui_actions_run_with_osworlds_prefix() {
         // the text of OSWorld 044bc339 PYAUTOGUI_PKGS_PREFIX with {command} at its end
-        let osw = concat!("import pyautogui; import time; import platform; pyautogui.FAILSAFE = False; ",
-                          "_osworld_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\"<>?'; ",
-                          "_osworld_linux_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\">?'; ",
-                          "pyautogui.isShiftCharacter = lambda character: character.isupper() or ",
-                          "character in (_osworld_linux_shift_chars if platform.system() == 'Linux' else _osworld_shift_chars); {command}");
+        let osw = concat!(
+            "import pyautogui; import time; import platform; pyautogui.FAILSAFE = False; ",
+            "_osworld_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\"<>?'; ",
+            "_osworld_linux_shift_chars = '~!@#$%^&*()_+' + chr(123) + chr(125) + '|:\">?'; ",
+            "pyautogui.isShiftCharacter = lambda character: character.isupper() or ",
+            "character in (_osworld_linux_shift_chars if platform.system() == 'Linux' else _osworld_shift_chars); {command}"
+        );
         assert_eq!(pyautogui_command("{command}"), osw);
         let c = pyautogui_command("pyautogui.hotkey('ctrl', 't'); time.sleep(1)");
         assert!(c.contains("import time;") && c.ends_with("time.sleep(1)"));
@@ -4103,7 +4441,10 @@ mod tests {
         let fd = d.join("disk-forgotten");
         let k = retire_slot_dir(&d, 887, 1, |dir, n| forget::forget(&d, &fd, dir, n, forget::Disposition::Full).map(|f| f.at)).unwrap();
         assert!(k.ends_with("full/slot887-1.tar.zst") && k.exists() && !sp.dir.exists(), "{k:?}");
-        assert!(retire_slot_dir(&d, 887, 2, |dir, n| forget::forget(&d, &fd, dir, n, forget::Disposition::Full).map(|f| f.at)).is_ok(), "the retry must not fail");
+        assert!(
+            retire_slot_dir(&d, 887, 2, |dir, n| forget::forget(&d, &fd, dir, n, forget::Disposition::Full).map(|f| f.at)).is_ok(),
+            "the retry must not fail"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -4123,7 +4464,8 @@ mod tests {
         // L128a: the permit was held through gates, guest probe and task setup, so creates queued ~56 s for one.
         // restore_once must drop it once CRIU's restore is done (the pid is read) and before the kernel gates.
         let src = include_str!("manager.rs");
-        let f = src.find("fn restore_once(&self, slot: &Slot, private: bool, permit: tokio::sync::OwnedSemaphorePermit)").expect("restore_once takes the permit");
+        let f =
+            src.find("fn restore_once(&self, slot: &Slot, private: bool, permit: tokio::sync::OwnedSemaphorePermit)").expect("restore_once takes the permit");
         let body = &src[f..];
         let drop_at = body.find("drop(permit);").expect("restore_once drops the permit");
         let restore_at = body.find("restore::run(").unwrap();
@@ -4142,7 +4484,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300)); // gates and setup, without the permit
         });
         let t = Instant::now();
-        let _p2 = tokio::time::timeout(Duration::from_millis(200), sem.clone().acquire_owned()).await.expect("next restore must not wait for the gates").unwrap();
+        let _p2 =
+            tokio::time::timeout(Duration::from_millis(200), sem.clone().acquire_owned()).await.expect("next restore must not wait for the gates").unwrap();
         assert!(t.elapsed() < Duration::from_millis(200));
         held.join().unwrap();
     }
@@ -4160,7 +4503,8 @@ mod tests {
         serde_json::from_value(json!({"id": "s-1", "num": 900, "checkpoint": "c", "state": state.name(), "reason": "x", "episode": 2, "init_pid": null,
             "init_start_ticks": null, "restore_generation": 1, "mode": "template", "port": 1, "extra_ports": [],
             "gates": {"gates": []}, "validity": {"verdict": "valid"}, "cost": CostRecord::default(), "timings": {"restore_s": 1.0},
-            "last_error": null, "task": null, "ready_epoch": null, "created_epoch": 1.0, "updated_epoch": 2.0})).unwrap()
+            "last_error": null, "task": null, "ready_epoch": null, "created_epoch": 1.0, "updated_epoch": 2.0}))
+        .unwrap()
     }
 
     fn is_summary(d: &forget::Disposition) -> bool {
@@ -4207,7 +4551,9 @@ mod tests {
     fn retire_keeps_full_for_a_quarantined_env_and_a_summary_for_a_valid_one() {
         let d = std::env::temp_dir().join(format!("drumsd-retire-class-{}", std::process::id()));
         let fd = d.join("disk");
-        for (num, state, want) in [(881u32, SlotState::Ready, forget::Class::Summary), (882, SlotState::Quarantined { reason: "gate".into() }, forget::Class::Full)] {
+        for (num, state, want) in
+            [(881u32, SlotState::Ready, forget::Class::Summary), (882, SlotState::Quarantined { reason: "gate".into() }, forget::Class::Full)]
+        {
             let sp = slotfs::paths(&d, num);
             std::fs::create_dir_all(sp.dir.join("upper")).unwrap();
             std::fs::write(sp.dir.join("slot.json"), "{}").unwrap();

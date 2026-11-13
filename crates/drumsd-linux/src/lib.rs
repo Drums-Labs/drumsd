@@ -7,6 +7,9 @@
 
 pub mod activity;
 pub mod cgroup;
+pub mod checks;
+pub mod crashwatch;
+pub mod forget;
 pub mod guest;
 pub mod hook;
 pub mod idrange;
@@ -18,9 +21,6 @@ pub mod proxy;
 pub mod quiesce;
 pub mod restore;
 pub mod slotfs;
-pub mod checks;
-pub mod crashwatch;
-pub mod forget;
 pub mod template;
 
 pub fn now_epoch() -> f64 {

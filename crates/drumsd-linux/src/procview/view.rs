@@ -141,13 +141,66 @@ pub fn slot_view(cg_root: &Path, rel: &str, host: &HostFacts) -> io::Result<Slot
 /// The meminfo field names, in the 7.0 kernel's order. Every value is derived from the slot (or is an
 /// architecture constant); a field with no slot equivalent is 0. No host value is ever copied.
 pub const MEMINFO_FIELDS: [&str; 60] = [
-    "MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached", "SwapCached", "Active", "Inactive", "Active(anon)", "Inactive(anon)",
-    "Active(file)", "Inactive(file)", "Unevictable", "Mlocked", "SwapTotal", "SwapFree", "Zswap", "Zswapped", "Dirty", "Writeback",
-    "AnonPages", "Mapped", "Shmem", "KReclaimable", "Slab", "SReclaimable", "SUnreclaim", "KernelStack", "PageTables", "SecPageTables",
-    "NFS_Unstable", "Bounce", "WritebackTmp", "CommitLimit", "Committed_AS", "VmallocTotal", "VmallocUsed", "VmallocChunk", "Percpu",
-    "HardwareCorrupted", "AnonHugePages", "ShmemHugePages", "ShmemPmdMapped", "FileHugePages", "FilePmdMapped", "CmaTotal", "CmaFree",
-    "Unaccepted", "Balloon", "GPUActive", "GPUReclaim", "HugePages_Total", "HugePages_Free", "HugePages_Rsvd", "HugePages_Surp",
-    "Hugepagesize", "Hugetlb", "DirectMap4k", "DirectMap2M", "DirectMap1G",
+    "MemTotal",
+    "MemFree",
+    "MemAvailable",
+    "Buffers",
+    "Cached",
+    "SwapCached",
+    "Active",
+    "Inactive",
+    "Active(anon)",
+    "Inactive(anon)",
+    "Active(file)",
+    "Inactive(file)",
+    "Unevictable",
+    "Mlocked",
+    "SwapTotal",
+    "SwapFree",
+    "Zswap",
+    "Zswapped",
+    "Dirty",
+    "Writeback",
+    "AnonPages",
+    "Mapped",
+    "Shmem",
+    "KReclaimable",
+    "Slab",
+    "SReclaimable",
+    "SUnreclaim",
+    "KernelStack",
+    "PageTables",
+    "SecPageTables",
+    "NFS_Unstable",
+    "Bounce",
+    "WritebackTmp",
+    "CommitLimit",
+    "Committed_AS",
+    "VmallocTotal",
+    "VmallocUsed",
+    "VmallocChunk",
+    "Percpu",
+    "HardwareCorrupted",
+    "AnonHugePages",
+    "ShmemHugePages",
+    "ShmemPmdMapped",
+    "FileHugePages",
+    "FilePmdMapped",
+    "CmaTotal",
+    "CmaFree",
+    "Unaccepted",
+    "Balloon",
+    "GPUActive",
+    "GPUReclaim",
+    "HugePages_Total",
+    "HugePages_Free",
+    "HugePages_Rsvd",
+    "HugePages_Surp",
+    "Hugepagesize",
+    "Hugetlb",
+    "DirectMap4k",
+    "DirectMap2M",
+    "DirectMap1G",
 ];
 
 /// x86_64 constants (the same in every x86_64 guest): the vmalloc area size and the huge page size, in kB.
@@ -282,7 +335,11 @@ pub fn render_stat(v: &SlotView, host: &HostFacts) -> String {
 pub fn render_swaps(v: &SlotView) -> String {
     let mut out = String::from("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
     if v.swap_limit > 0 {
-        out.push_str(&format!("/swap                                   file\t\t{}\t\t{}\t\t-2\n", v.swap_limit / 1024, v.swap_current.min(v.swap_limit) / 1024));
+        out.push_str(&format!(
+            "/swap                                   file\t\t{}\t\t{}\t\t-2\n",
+            v.swap_limit / 1024,
+            v.swap_current.min(v.swap_limit) / 1024
+        ));
     }
     out
 }
@@ -299,11 +356,16 @@ pub fn render_cpu_list(n: u32) -> String {
 impl HostFacts {
     pub fn read(proc: &Path) -> io::Result<HostFacts> {
         let mi = fs::read_to_string(proc.join("meminfo"))?;
-        let kb = |name: &str| mi.lines().find(|l| l.starts_with(name)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024;
+        let kb = |name: &str| {
+            mi.lines().find(|l| l.starts_with(name)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024
+        };
         let cpuinfo = fs::read_to_string(proc.join("cpuinfo"))?;
         let cpus = cpuinfo.lines().filter(|l| l.starts_with("processor")).count().max(1) as u32;
         let uptime_s = fs::read_to_string(proc.join("uptime")).ok().and_then(|u| u.split_whitespace().next().and_then(|x| x.parse().ok())).unwrap_or(0.0);
-        let btime = fs::read_to_string(proc.join("stat")).ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ").and_then(|v| v.trim().parse().ok()))).unwrap_or(0);
+        let btime = fs::read_to_string(proc.join("stat"))
+            .ok()
+            .and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ").and_then(|v| v.trim().parse().ok())))
+            .unwrap_or(0);
         let overcommit_ratio = read_trim(&proc.join("sys/vm/overcommit_ratio")).ok().and_then(|v| v.parse().ok()).unwrap_or(50);
         Ok(HostFacts { mem_total: kb("MemTotal:"), swap_total: kb("SwapTotal:"), cpus, cpuinfo, uptime_s, btime, overcommit_ratio })
     }
@@ -342,7 +404,15 @@ processor\t: 1\nvendor_id\t: GenuineIntel\nmodel name\t: Xeon\nphysical id\t: 0\
 processor\t: 2\nvendor_id\t: GenuineIntel\nmodel name\t: Xeon\nphysical id\t: 0\nsiblings\t: 64\ncore id\t\t: 1\ncpu cores\t: 32\napicid\t\t: 2\ninitial apicid\t: 2\nflags\t\t: fpu sse\n\n";
 
     fn host() -> HostFacts {
-        HostFacts { mem_total: 496 << 30, swap_total: 32 << 30, cpus: 64, cpuinfo: HOST_CPUINFO.into(), uptime_s: 1000.0, btime: 1793350000, overcommit_ratio: 50 }
+        HostFacts {
+            mem_total: 496 << 30,
+            swap_total: 32 << 30,
+            cpus: 64,
+            cpuinfo: HOST_CPUINFO.into(),
+            uptime_s: 1000.0,
+            btime: 1793350000,
+            overcommit_ratio: 50,
+        }
     }
 
     /// A pool layout: pool/slot (limits)/leaf (the tree).

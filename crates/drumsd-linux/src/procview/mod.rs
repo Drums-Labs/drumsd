@@ -106,7 +106,16 @@ pub fn main(args: &[String]) -> i32 {
             Err(e) => {
                 eprintln!("drumsd procview: sysinfo program not attached, sysinfo(2) in envs reports the host: {e}");
                 // a verifier refusal carries its whole log: keep the start and the reason at the end
-                let why = e.lines().find(|l| l.contains("cannot use helper") || l.contains("unknown func") || l.contains("not allowed") || l.contains("not supported") || l.contains("invalid")).unwrap_or("");
+                let why = e
+                    .lines()
+                    .find(|l| {
+                        l.contains("cannot use helper")
+                            || l.contains("unknown func")
+                            || l.contains("not allowed")
+                            || l.contains("not supported")
+                            || l.contains("invalid")
+                    })
+                    .unwrap_or("");
                 let short = if e.len() > 600 { format!("{} ... {why}", &e[..e.char_indices().nth(160).map(|x| x.0).unwrap_or(0)]) } else { e.clone() };
                 (None, format!("unavailable: {short}"))
             }
@@ -139,7 +148,10 @@ mod tests {
             ["/etc/passwd".to_string(), fuse::FSTYPE.into(), "/meminfo".into()],
         ];
         let v = restore_externals(&rows, Path::new("/run/drums/procview"));
-        assert_eq!(v, vec!["--external", "mnt[drums-pv-meminfo]:/run/drums/procview/meminfo", "--external", "mnt[drums-pv-cpu_online]:/run/drums/procview/cpu_online"]);
+        assert_eq!(
+            v,
+            vec!["--external", "mnt[drums-pv-meminfo]:/run/drums/procview/meminfo", "--external", "mnt[drums-pv-cpu_online]:/run/drums/procview/cpu_online"]
+        );
         assert!(restore_externals(&rows[..2], Path::new("/x")).is_empty());
     }
 }

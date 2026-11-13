@@ -1,13 +1,13 @@
 //! HTTP/JSON API (spec: api/openapi.json, served at GET /openapi.json).
 
 use crate::manager::{view, ApiError, LeaseOpts, Manager, QuiesceOpts};
-use drumsd_core::admission::Need;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use drumsd_core::admission::Need;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -223,9 +223,20 @@ async fn auth(State(m): S, req: Request, next: Next) -> Response {
     if req.uri().path() == "/healthz" || req.uri().path().starts_with("/provision/") {
         return next.run(req).await;
     }
-    let ok = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|t| token_eq(t.trim().as_bytes(), m.token.as_bytes())).unwrap_or(false);
+    let ok = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| token_eq(t.trim().as_bytes(), m.token.as_bytes()))
+        .unwrap_or(false);
     if !ok {
-        return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], Json(json!({"error": "missing or wrong bearer token (Authorization: Bearer <token from the install>)"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            Json(json!({"error": "missing or wrong bearer token (Authorization: Bearer <token from the install>)"})),
+        )
+            .into_response();
     }
     // every request that names an env is a use of it (its lease's idle clock), at the start and at the end
     let env = env_of(req.uri().path()).map(|s| s.to_string());
@@ -324,7 +335,7 @@ async fn create(State(m): S, Json(r): Json<CreateReq>) -> Result<(StatusCode, Js
 }
 async fn get_slot(State(m): S, Path(id): Path<String>) -> J {
     let s = m.slot(&id)?;
-    m.check_crash(&s);      // the verdict a client reads includes any crash since the last step
+    m.check_crash(&s); // the verdict a client reads includes any crash since the last step
     let v = view(&s.view.read().unwrap());
     Ok(Json(v))
 }

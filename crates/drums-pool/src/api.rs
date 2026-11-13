@@ -6,7 +6,7 @@
 //! `episode_lost` (reset continues on a new host) or 410 `host_lost`.
 
 use crate::config::HostSpec;
-use crate::pool::{now_epoch, EnvStatus, HostState, MakeErr, PoolEnv, SavedState, P};
+use crate::pool::{EnvStatus, HostState, MakeErr, PoolEnv, SavedState, P};
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
@@ -77,7 +77,7 @@ async fn handle(State(p): State<P>, req: Request) -> Response {
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let headers = req.headers().clone();
-    let segs: Vec<String> = path.trim_matches('/').split('/').map(|s| percent_decode(s)).collect();
+    let segs: Vec<String> = path.trim_matches('/').split('/').map(percent_decode).collect();
     let segs_ref: Vec<&str> = segs.iter().map(|s| s.as_str()).collect();
     let op = op_of(&method, &segs_ref);
     if path == "/healthz" {
@@ -92,7 +92,9 @@ async fn handle(State(p): State<P>, req: Request) -> Response {
         Ok(b) => b,
         Err(e) => return jerr(400, format!("body: {e}"), json!({})),
     };
-    let jbody: Option<Value> = if body.is_empty() { None } else {
+    let jbody: Option<Value> = if body.is_empty() {
+        None
+    } else {
         match serde_json::from_slice(&body) {
             Ok(v) => Some(v),
             Err(e) => return jerr(400, format!("body is not JSON: {e}"), json!({})),
@@ -160,7 +162,8 @@ fn enc(s: &str) -> String {
 
 fn healthy_hosts(p: &P) -> Vec<String> {
     let hs = p.hosts.lock().unwrap();
-    let mut v: Vec<(f64, String)> = hs.iter().filter(|(_, h)| h.state == HostState::Healthy).map(|(n, h)| (h.snap.as_ref().map(|s| s.rtt_s).unwrap_or(9.0), n.clone())).collect();
+    let mut v: Vec<(f64, String)> =
+        hs.iter().filter(|(_, h)| h.state == HostState::Healthy).map(|(n, h)| (h.snap.as_ref().map(|s| s.rtt_s).unwrap_or(9.0), n.clone())).collect();
     v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     v.into_iter().map(|x| x.1).collect()
 }
@@ -246,20 +249,24 @@ fn health(p: &P) -> Value {
 fn hosts_view(p: &P) -> Value {
     let now = Instant::now();
     let hs = p.hosts.lock().unwrap();
-    let v: Vec<Value> = hs.iter().map(|(n, h)| {
-        let s = h.snap.clone().unwrap_or_default();
-        json!({"name": n, "url": h.spec.url, "region": h.spec.region, "state": h.state.name(), "cpus": h.spec.cpus, "max_envs": h.spec.max_envs,
+    let v: Vec<Value> = hs
+        .iter()
+        .map(|(n, h)| {
+            let s = h.snap.clone().unwrap_or_default();
+            json!({"name": n, "url": h.spec.url, "region": h.spec.region, "state": h.state.name(), "cpus": h.spec.cpus, "max_envs": h.spec.max_envs,
                "owned": h.owned, "warm": h.warm.len(), "inflight": h.inflight, "warm_inflight": h.warm_inflight,
                "mem_total_mib": s.mem_total_mib, "mem_available_mib": s.mem_avail_mib, "load1": s.load1, "live_slots": s.live_slots,
                "env_mib_estimate": h.env_mib_est, "health_rtt_s": s.rtt_s, "fails": h.fails,
                "headroom": crate::pool::headroom(&p.cfg, h, now).map_err(|b| b.name())})
-    }).collect();
+        })
+        .collect();
     json!({"hosts": v})
 }
 
 fn envs_view(p: &P) -> Value {
     let envs = p.envs.lock().unwrap();
-    let v: Vec<Value> = envs.values().map(|e| json!({"id": e.id, "host": e.host, "slot": e.slot, "status": format!("{:?}", e.status), "failovers": e.failovers})).collect();
+    let v: Vec<Value> =
+        envs.values().map(|e| json!({"id": e.id, "host": e.host, "slot": e.slot, "status": format!("{:?}", e.status), "failovers": e.failovers})).collect();
     json!({"envs": v})
 }
 
@@ -359,32 +366,28 @@ fn rewrite_ckpt(v: &mut Value, pool_id: &str, host: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------- envs
-fn region_of(p: &P, host: &str) -> String {
-    p.hosts.lock().unwrap().get(host).map(|h| h.spec.region.clone()).unwrap_or_default()
-}
-
 fn rewrite_slot(p: &P, v: &mut Value, pool_id: &str, host: &str, slot: &str) {
     p.pool_view(v, pool_id, host, slot)
-}
-
-fn state_pool_id(p: &P, host: &str, host_id: &str) -> Option<String> {
-    p.states.lock().unwrap().values().find(|s| s.host == host && s.host_id == host_id).map(|s| s.id.clone())
 }
 
 fn list(p: &P, query: &str) -> Response {
     let envs = p.envs.lock().unwrap();
     let mut v: Vec<&PoolEnv> = envs.values().collect();
     v.sort_by(|a, b| a.id.cmp(&b.id));
-    let recs: Vec<Value> = v.iter().map(|e| {
-        let mut r = e.record.clone();
-        if !r.is_object() {
-            r = json!({"id": e.id});
-        }
-        r["id"] = json!(e.id);
-        r
-    }).collect();
+    let recs: Vec<Value> = v
+        .iter()
+        .map(|e| {
+            let mut r = e.record.clone();
+            if !r.is_object() {
+                r = json!({"id": e.id});
+            }
+            r["id"] = json!(e.id);
+            r
+        })
+        .collect();
     drop(envs);
-    let q: std::collections::HashMap<String, String> = query.trim_start_matches('?').split('&').filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
+    let q: std::collections::HashMap<String, String> =
+        query.trim_start_matches('?').split('&').filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
     if let Some(limit) = q.get("limit").and_then(|l| l.parse::<usize>().ok()) {
         let after = q.get("after").cloned();
         let items: Vec<Value> = recs.into_iter().filter(|r| after.as_ref().is_none_or(|a| r["id"].as_str().unwrap_or("") > a.as_str())).take(limit).collect();
@@ -424,11 +427,29 @@ async fn create(p: &P, headers: &HeaderMap, body: Option<Value>, up: &mut f64) -
             let id = p.new_env_id();
             rewrite_slot(p, &mut rec, &id, &host, &slot);
             let now = Instant::now();
-            p.envs.lock().unwrap().insert(id.clone(), PoolEnv { id: id.clone(), host, slot, checkpoint: ck, task, setup, idle_timeout_s: idle, ttl_s: ttl,
-                created_epoch: now_epoch(), created: now, last_used: now, status: EnvStatus::Live, record: rec.clone(), failovers: 0 });
+            p.envs.lock().unwrap().insert(
+                id.clone(),
+                PoolEnv {
+                    id: id.clone(),
+                    host,
+                    slot,
+                    checkpoint: ck,
+                    task,
+                    setup,
+                    idle_timeout_s: idle,
+                    ttl_s: ttl,
+                    created: now,
+                    last_used: now,
+                    status: EnvStatus::Live,
+                    record: rec.clone(),
+                    failovers: 0,
+                },
+            );
             jok(rec)
         }
-        Err(MakeErr::QueueTimeout) => jerr(503, format!("no capacity in the pool within {qt} s (backpressure: the create waited in the queue)"), json!({"code": "queue_timeout"})),
+        Err(MakeErr::QueueTimeout) => {
+            jerr(503, format!("no capacity in the pool within {qt} s (backpressure: the create waited in the queue)"), json!({"code": "queue_timeout"}))
+        }
         Err(MakeErr::QueueFull) => jerr(503, "the pool's create queue is full", json!({"code": "queue_full"})),
         Err(MakeErr::StateLost) => jerr(410, format!("saved state {ck} is gone (its host died)"), json!({"code": "state_lost"})),
         Err(MakeErr::Unavailable(e)) => jerr(503, e, json!({"code": "host_unavailable"})),
@@ -546,7 +567,11 @@ async fn env_op(p: &P, m: &Method, id: &str, op: &str, query: &str, body: Option
                 }
                 return jerr(409, lost_msg(id, &e.host), json!({"code": "episode_lost", "from_host": e.host}));
             }
-            return jerr(503, format!("host {} unreachable on {} {}: {err} (the outcome is unknown; GET the env)", e.host, m, op), json!({"code": "host_unreachable"}));
+            return jerr(
+                503,
+                format!("host {} unreachable on {} {}: {err} (the outcome is unknown; GET the env)", e.host, m, op),
+                json!({"code": "host_unreachable"}),
+            );
         }
     };
     if is_close && (st < 300 || st == 404 || st == 410) {
@@ -595,8 +620,24 @@ async fn env_op(p: &P, m: &Method, id: &str, op: &str, query: &str, body: Option
                     let cid = p.new_env_id();
                     rewrite_slot(p, c, &cid, &e.host, &cslot);
                     let now = Instant::now();
-                    p.envs.lock().unwrap().insert(cid.clone(), PoolEnv { id: cid, host: e.host.clone(), slot: cslot, checkpoint: sid.clone(), task: e.task.clone(), setup: e.setup,
-                        idle_timeout_s: cidle, ttl_s: cttl, created_epoch: now_epoch(), created: now, last_used: now, status: EnvStatus::Live, record: c.clone(), failovers: 0 });
+                    p.envs.lock().unwrap().insert(
+                        cid.clone(),
+                        PoolEnv {
+                            id: cid,
+                            host: e.host.clone(),
+                            slot: cslot,
+                            checkpoint: sid.clone(),
+                            task: e.task.clone(),
+                            setup: e.setup,
+                            idle_timeout_s: cidle,
+                            ttl_s: cttl,
+                            created: now,
+                            last_used: now,
+                            status: EnvStatus::Live,
+                            record: c.clone(),
+                            failovers: 0,
+                        },
+                    );
                     if let Some(h) = p.hosts.lock().unwrap().get_mut(&e.host) {
                         h.owned += 1;
                     }

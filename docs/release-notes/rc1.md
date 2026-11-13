@@ -1,8 +1,9 @@
-# CHANGES-RC1: what Drums RC1 is made of
+# Release notes: RC1 (2026-10-31)
 
-RC1 is one build: drumsd `rc1`, drums-lab `rc1`, drums-criu `rc1` and drums-verifiers tag `rc1`, all private under
-sahiljagtap08. drumsd's `install/lock.json` pins the exact drums-lab and drums-criu commits. Every pass in RC1-VALIDATION.md
-was measured on the release tarball built from these heads, and from no other branch.
+What Drums RC1 was made of, kept for the record (this file was `CHANGES-RC1.md` at the repository root until v0.2.2).
+RC1 is one build: drumsd `rc1`, drums-lab `rc1`, drums-criu `rc1` and drums-verifiers tag `rc1`, all private
+repositories at the time. drumsd's `install/lock.json` pins the exact drums-lab and drums-criu commits. Every pass in
+the internal validation record was measured on the release tarball built from these heads, and from no other branch.
 
 | repo | rc1 head | base |
 |---|---|---|

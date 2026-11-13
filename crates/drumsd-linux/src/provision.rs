@@ -191,8 +191,7 @@ pub fn needs_root(command: &serde_json::Value) -> bool {
         serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" "),
         _ => return false,
     };
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.'))
-        .any(|w| w == "sudo" || w.ends_with("/sudo"))
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.')).any(|w| w == "sudo" || w.ends_with("/sudo"))
 }
 
 #[cfg(test)]
@@ -222,8 +221,17 @@ mod tests {
 
     #[test]
     fn the_command_enters_the_slot_and_the_script_scopes_the_rule_to_the_step() {
-        let s = ProvisionSpec { init_pid: 42, cgroup: "/sys/fs/cgroup/x".into(), user: "user".into(), uid: 1000, gid: 1000, home: "/home/user".into(),
-                                argv: vec!["/bin/sh".into(), "-c".into(), "mkdir /x".into()], timeout: Duration::from_secs(1), userns: false };
+        let s = ProvisionSpec {
+            init_pid: 42,
+            cgroup: "/sys/fs/cgroup/x".into(),
+            user: "user".into(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/user".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "mkdir /x".into()],
+            timeout: Duration::from_secs(1),
+            userns: false,
+        };
         let c = command(&s);
         let a: Vec<String> = c.get_args().map(|x| x.to_string_lossy().to_string()).collect();
         assert_eq!(&a[..12], &["-t", "42", "-m", "-u", "-i", "-n", "-p", "-r", "-w", "--", "/bin/sh", "-c"]);

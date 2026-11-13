@@ -96,7 +96,9 @@ pub fn pool(subuid: &str, subgid: &str) -> Vec<u32> {
 pub fn host_pool() -> io::Result<Vec<u32>> {
     let p = pool(&fs::read_to_string("/etc/subuid").unwrap_or_default(), &fs::read_to_string("/etc/subgid").unwrap_or_default());
     if p.is_empty() {
-        return Err(io::Error::other(format!("/etc/subuid and /etc/subgid delegate no range at {SUBID_BASE} to root (install.sh writes root:{SUBID_BASE}:<n*{SUBID_COUNT}>)")));
+        return Err(io::Error::other(format!(
+            "/etc/subuid and /etc/subgid delegate no range at {SUBID_BASE} to root (install.sh writes root:{SUBID_BASE}:<n*{SUBID_COUNT}>)"
+        )));
     }
     Ok(p)
 }
@@ -208,7 +210,7 @@ pub fn shift_cap(v: &[u8], r: &Remap) -> Option<Vec<u8>> {
 /// A POSIX ACL xattr value (`posix_acl_xattr_header` + entries of tag, perm, id) with the ids of its named user and
 /// group entries moved, or None if none moved. A value of another layout is an error: it is not shifted blindly.
 pub fn shift_acl(v: &[u8], r: &Remap) -> io::Result<Option<Vec<u8>>> {
-    if v.len() < 4 || (v.len() - 4) % 8 != 0 || u32::from_le_bytes(v[0..4].try_into().unwrap()) != 2 {
+    if v.len() < 4 || !(v.len() - 4).is_multiple_of(8) || u32::from_le_bytes(v[0..4].try_into().unwrap()) != 2 {
         return Err(io::Error::other(format!("not a version 2 POSIX ACL ({} bytes)", v.len())));
     }
     let mut o = v.to_vec();
@@ -337,10 +339,13 @@ pub fn view_path(lower: &Path, base: u32) -> io::Result<PathBuf> {
 
 /// The mount options of the top mount at `path` in mountinfo text, if one is mounted there.
 pub fn mount_options<'a>(mountinfo: &'a str, path: &str) -> Option<&'a str> {
-    mountinfo.lines().filter_map(|l| {
-        let f: Vec<&str> = l.split(" - ").next()?.split_whitespace().collect();
-        (f.len() >= 6 && f[4] == path).then_some(f[5])
-    }).last()
+    mountinfo
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(" - ").next()?.split_whitespace().collect();
+            (f.len() >= 6 && f[4] == path).then_some(f[5])
+        })
+        .next_back()
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -668,8 +673,17 @@ mod tests {
     #[test]
     fn acl_named_entries_move_and_others_stay() {
         let ent = |tag: u16, perm: u16, id: u32| [tag.to_le_bytes().to_vec(), perm.to_le_bytes().to_vec(), id.to_le_bytes().to_vec()].concat();
-        let v = [2u32.to_le_bytes().to_vec(), ent(0x01, 6, u32::MAX), ent(ACL_USER, 6, 101000), ent(0x04, 4, u32::MAX), ent(ACL_GROUP, 4, 101001),
-                 ent(ACL_GROUP, 4, 50), ent(0x10, 6, u32::MAX), ent(0x20, 4, u32::MAX)].concat();
+        let v = [
+            2u32.to_le_bytes().to_vec(),
+            ent(0x01, 6, u32::MAX),
+            ent(ACL_USER, 6, 101000),
+            ent(0x04, 4, u32::MAX),
+            ent(ACL_GROUP, 4, 101001),
+            ent(ACL_GROUP, 4, 50),
+            ent(0x10, 6, u32::MAX),
+            ent(0x20, 4, u32::MAX),
+        ]
+        .concat();
         let n = shift_acl(&v, &R).unwrap().unwrap();
         let id = |b: &[u8], i: usize| u32::from_le_bytes(b[4 + i * 8 + 4..4 + i * 8 + 8].try_into().unwrap());
         assert_eq!((id(&n, 1), id(&n, 3), id(&n, 4)), (166536, 166537, 50));
@@ -697,7 +711,7 @@ mod tests {
             eprintln!("skipped: needs root");
             return;
         }
-        use std::os::unix::fs::{symlink, chown, lchown};
+        use std::os::unix::fs::{chown, lchown, symlink};
         let t = tempfile::tempdir().unwrap();
         let s = t.path().join("upper.snap");
         fs::create_dir_all(s.join("home/user")).unwrap();
@@ -724,12 +738,23 @@ mod tests {
         let d = cpath(&s.join("home/user")).unwrap();
         lsetxattr(&d, "user.overlay.opaque", b"y").unwrap();
         let ent = |tag: u16, perm: u16, id: u32| [tag.to_le_bytes().to_vec(), perm.to_le_bytes().to_vec(), id.to_le_bytes().to_vec()].concat();
-        let acl = [2u32.to_le_bytes().to_vec(), ent(0x01, 7, u32::MAX), ent(ACL_USER, 7, 101002), ent(0x04, 5, u32::MAX), ent(0x10, 7, u32::MAX), ent(0x20, 5, u32::MAX)].concat();
+        let acl = [
+            2u32.to_le_bytes().to_vec(),
+            ent(0x01, 7, u32::MAX),
+            ent(ACL_USER, 7, 101002),
+            ent(0x04, 5, u32::MAX),
+            ent(0x10, 7, u32::MAX),
+            ent(0x20, 5, u32::MAX),
+        ]
+        .concat();
         let acl_ok = lsetxattr(&d, "system.posix_acl_access", &acl).is_ok();
 
         assert!(cap_ok && acl_ok, "the test filesystem takes file capabilities and ACLs");
         let rep = shift_tree(&s, &R).unwrap();
-        let o = |p: &str| { let m = fs::symlink_metadata(s.join(p)).unwrap(); (m.uid(), m.gid()) };
+        let o = |p: &str| {
+            let m = fs::symlink_metadata(s.join(p)).unwrap();
+            (m.uid(), m.gid())
+        };
         assert_eq!(o(""), (165536, 165536));
         assert_eq!(o("home/user"), (166536, 166536));
         assert_eq!(o("home/user/a.txt"), (166536, 166541));

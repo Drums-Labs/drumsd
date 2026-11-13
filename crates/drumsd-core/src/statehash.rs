@@ -3,11 +3,7 @@
 
 use sha2::{Digest, Sha256};
 
-pub const STATE_SECTIONS: [&str; 3] = [
-    "find ~/Desktop -printf '%P %y %u %g %m %s %l\\n'",
-    "find ~/Desktop -type f -exec sha256sum {} +",
-    "ls -A ~",
-];
+pub const STATE_SECTIONS: [&str; 3] = ["find ~/Desktop -printf '%P %y %u %g %m %s %l\\n'", "find ~/Desktop -type f -exec sha256sum {} +", "ls -A ~"];
 
 /// Python's str.splitlines() line boundaries.
 pub fn splitlines(s: &str) -> Vec<&str> {

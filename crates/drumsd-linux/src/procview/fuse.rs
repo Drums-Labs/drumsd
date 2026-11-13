@@ -41,6 +41,9 @@ const IN_HDR: usize = 40;
 const ROOT: u64 = 1;
 const BUF: usize = 1 << 17;
 
+/// Last rendering per (slot cgroup, file): when it was made and its bytes.
+pub type RenderCache = HashMap<(String, &'static str), (std::time::Instant, Vec<u8>)>;
+
 /// What the server needs to render: the cgroup root and /proc (injectable for tests).
 #[derive(Clone)]
 pub struct Ctx {
@@ -50,7 +53,7 @@ pub struct Ctx {
     /// Last rendering per (slot cgroup, file), reused for [`RENDER_TTL`]: a slot that floods its view costs the daemon
     /// one cgroup read per request instead of a full rendering (measured before: 16 readers in one env took ~8 host
     /// CPUs of the daemon's time, outside the env's cpu.max).
-    pub cache: Arc<Mutex<HashMap<(String, &'static str), (std::time::Instant, Vec<u8>)>>>,
+    pub cache: Arc<Mutex<RenderCache>>,
 }
 
 /// How long a rendering is reused for the same slot and file. Values change continuously anyway; 100 ms is far below
@@ -60,7 +63,12 @@ pub const RENDER_TTL: std::time::Duration = std::time::Duration::from_millis(100
 impl Ctx {
     pub fn system() -> io::Result<Ctx> {
         let h = view::HostFacts::read(Path::new("/proc"))?;
-        Ok(Ctx { cg_root: "/sys/fs/cgroup".into(), proc: "/proc".into(), host: Arc::new(Mutex::new((std::time::Instant::now(), h))), cache: Default::default() })
+        Ok(Ctx {
+            cg_root: "/sys/fs/cgroup".into(),
+            proc: "/proc".into(),
+            host: Arc::new(Mutex::new((std::time::Instant::now(), h))),
+            cache: Default::default(),
+        })
     }
     /// Host facts, refreshed at most once a second (uptime moves; swap devices can change).
     fn host(&self) -> view::HostFacts {
@@ -85,7 +93,13 @@ impl Ctx {
                 return Ok(d.clone());
             }
         }
-        let d = view::render(name, &self.cg_root, &rel, &self.host()).map(String::into_bytes).map_err(|e| if e.kind() == io::ErrorKind::PermissionDenied { libc::EACCES } else { libc::EIO })?;
+        let d = view::render(name, &self.cg_root, &rel, &self.host()).map(String::into_bytes).map_err(|e| {
+            if e.kind() == io::ErrorKind::PermissionDenied {
+                libc::EACCES
+            } else {
+                libc::EIO
+            }
+        })?;
         let mut c = self.cache.lock().unwrap();
         if c.len() > 8192 {
             c.retain(|_, v| v.0.elapsed() < RENDER_TTL);
@@ -450,11 +464,27 @@ mod tests {
         let cg = root.join("cg");
         let s = cg.join("system.slice/drumsbench-rootfs-ab-3.scope");
         fs::create_dir_all(&s).unwrap();
-        for (f, v) in [("memory.max", "4294967296"), ("memory.swap.max", "0"), ("cpu.max", "400000 100000"), ("memory.current", "1073741824"),
-                       ("memory.swap.current", "0"), ("memory.stat", "anon 1\n"), ("cpu.stat", "usage_usec 1\n"), ("pids.current", "3")] {
+        for (f, v) in [
+            ("memory.max", "4294967296"),
+            ("memory.swap.max", "0"),
+            ("cpu.max", "400000 100000"),
+            ("memory.current", "1073741824"),
+            ("memory.swap.current", "0"),
+            ("memory.stat", "anon 1\n"),
+            ("cpu.stat", "usage_usec 1\n"),
+            ("pids.current", "3"),
+        ] {
             fs::write(s.join(f), v).unwrap();
         }
-        let host = view::HostFacts { mem_total: 64 << 30, swap_total: 0, cpus: 16, cpuinfo: "processor\t: 0\n\n".into(), uptime_s: 10.0, btime: 1, overcommit_ratio: 50 };
+        let host = view::HostFacts {
+            mem_total: 64 << 30,
+            swap_total: 0,
+            cpus: 16,
+            cpuinfo: "processor\t: 0\n\n".into(),
+            uptime_s: 10.0,
+            btime: 1,
+            overcommit_ratio: 50,
+        };
         Ctx { cg_root: cg, proc, host: Arc::new(Mutex::new((std::time::Instant::now(), host))), cache: Default::default() }
     }
 
@@ -489,7 +519,12 @@ mod tests {
         let ino = u64_at(&p, 0);
         assert_eq!(handle(&c, &hs, &req(FUSE_LOOKUP, ROOT, 100, b"passwd\0")).unwrap().0, -libc::ENOENT);
         // open for write refused; host reader refused
-        assert_eq!(handle(&c, &hs, &req(FUSE_OPEN, ino, 100, &(libc::O_WRONLY as u32).to_ne_bytes().iter().chain([0u8; 4].iter()).copied().collect::<Vec<_>>())).unwrap().0, -libc::EACCES);
+        assert_eq!(
+            handle(&c, &hs, &req(FUSE_OPEN, ino, 100, &(libc::O_WRONLY as u32).to_ne_bytes().iter().chain([0u8; 4].iter()).copied().collect::<Vec<_>>()))
+                .unwrap()
+                .0,
+            -libc::EACCES
+        );
         assert_eq!(handle(&c, &hs, &req(FUSE_OPEN, ino, 200, &[0u8; 8])).unwrap().0, -libc::EACCES);
         let (e, o) = handle(&c, &hs, &req(FUSE_OPEN, ino, 100, &[0u8; 8])).unwrap();
         assert_eq!(e, 0);
@@ -543,8 +578,16 @@ mod tests {
         // a second slot with another limit reads its own value even right after the first
         let s2 = c.cg_root.join("system.slice/drumsbench-rootfs-cd-4.scope");
         fs::create_dir_all(&s2).unwrap();
-        for (f, v) in [("memory.max", "2147483648"), ("memory.swap.max", "0"), ("cpu.max", "100000 100000"), ("memory.current", "1"),
-                       ("memory.swap.current", "0"), ("memory.stat", "anon 1\n"), ("cpu.stat", "usage_usec 1\n"), ("pids.current", "1")] {
+        for (f, v) in [
+            ("memory.max", "2147483648"),
+            ("memory.swap.max", "0"),
+            ("cpu.max", "100000 100000"),
+            ("memory.current", "1"),
+            ("memory.swap.current", "0"),
+            ("memory.stat", "anon 1\n"),
+            ("cpu.stat", "usage_usec 1\n"),
+            ("pids.current", "1"),
+        ] {
             fs::write(s2.join(f), v).unwrap();
         }
         fs::create_dir_all(c.proc.join("300")).unwrap();

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct HostSpec {
     /// Unique short name (also the label in metrics), e.g. "use2-a".
     pub name: String,
-    /// Base URL of the host's drumsd, e.g. "http://172.31.4.26:7070".
+    /// Base URL of the host's drumsd, e.g. "http://10.0.0.5:7070".
     pub url: String,
     /// The host's drumsd bearer token, inline or in a file (one of the two).
     #[serde(default)]
