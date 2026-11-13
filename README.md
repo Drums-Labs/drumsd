@@ -185,7 +185,7 @@ fields, from [`crates/drumsd/src/config.rs`](crates/drumsd/src/config.rs). "Requ
 | `image_sha256` | required | sha256 of that image, checked against checkpoints |
 | `py_src` | required | checkout of the runtime's Python side (`sharedos_rootfs`, used for the capture verb) |
 | `py_config` | required | `SHAREDOS_ROOTFS_CONFIG` for those verbs |
-| `python` | `null` | Python interpreter for them (default: `python3` on `PATH`) |
+| `python` | `null` | Python interpreter for them (default: `/usr/bin/python3`) |
 | `criu` | required | the drums-criu binary (template servers, restores, dumps) |
 | `vcpus` | required | `cpu.max` of each slot, in vCPUs |
 | `memory_mib` | required | `memory.max` of each slot |
@@ -195,7 +195,7 @@ fields, from [`crates/drumsd/src/config.rs`](crates/drumsd/src/config.rs). "Requ
 | `guest_port` | `5000` | the guest server's port inside the desktop |
 | `extra_ports` | `[]` | more forwarders, as `[host_base, guest_port]` pairs; slot N listens on `host_base + N` |
 | `slot_range` | `[100, 2000]` | slot numbers drumsd allocates from (inclusive start, exclusive end) |
-| `max_concurrent_restores` | `4` | restores in flight at once (the installer sets about one per 2.7 vCPUs) |
+| `max_concurrent_restores` | `4` | restores in flight at once (the installer sets 3/8 of the vCPUs, at least 4) |
 | `natural_exits` | `[]` | process names that exit by themselves after a restore (not counted by the alive gate) |
 | `alive_after_s` | `5.0` | seconds after ready before the `alive_after_resume` gate is judged |
 | `max_attempts` | `3` | restore attempts per create/reset (only failures before any restored task ran are retried) |
