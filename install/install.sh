@@ -16,7 +16,7 @@
 # interface: prefer the ssh tunnel the banner shows). Takes 7-15 min on a 16-vCPU host; a progress line every 30 s.
 # The API token is written to /etc/drums/token (root only, 0600) and never printed; the banner prints its path.
 # Log: /var/log/drums-install.log. Receipt (versions, hashes, phase times): /var/lib/drums/install-receipt.json.
-# Docs: README.md, QUICKSTART.md and docs/ next to this script.
+# Docs: README.md and docs/ (start with docs/install.md) next to this script.
 set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
@@ -442,6 +442,6 @@ cat <<EOF
    import drums; c = drums.connect(); env = c.create(image="$(lk runtime.image_id)")
  Leases: an env or saved state unused for 30 min is reaped (create/fork/save take idle_timeout=, ttl=).
  Metrics: the cost counts idle time since drumsd started; call c.reset_metrics() at the start of a run.
- Docs: $REL/README.md, QUICKSTART.md, docs/
+ Docs: $REL/README.md, docs/install.md, docs/
 ================================================================================================
 EOF
