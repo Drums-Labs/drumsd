@@ -50,7 +50,7 @@ pub fn hook_main(dir: &str) -> i32 {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("drumsd hook: lo up: {e}");
-                let _ = fs::write(Path::new(dir).join("netns-lo-up.error"), e.to_string());
+                let _ = fs::write(Path::new(dir).join("netns-lo-up.error"), &e);
                 1
             }
         };

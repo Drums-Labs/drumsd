@@ -464,7 +464,7 @@ pub fn start(census_roots: Vec<PathBuf>) -> io::Result<CrashWatch> {
         return Err(io::Error::new(e.kind(), format!("bind(CN_IDX_PROC): {e}")));
     }
     // nlmsghdr + cn_msg + proc_input {mcast_op, event_type}
-    let mut msg = vec![0u8; 16 + 20 + 8];
+    let mut msg = [0u8; 16 + 20 + 8];
     let total = msg.len() as u32;
     msg[0..4].copy_from_slice(&total.to_ne_bytes());
     msg[4..6].copy_from_slice(&(libc::NLMSG_DONE as u16).to_ne_bytes());
@@ -736,7 +736,7 @@ mod tests {
         std::fs::write(pool.join("cgroup.procs"), "").unwrap();
         std::fs::write(pool.join("drumsbench-m-1-pool.scope/cgroup.procs"), "").unwrap();
         std::fs::write(pool.join("drumsbench-m-1-pool.scope/drumsbench-m-1-r1.scope/cgroup.procs"), "40\n41\n").unwrap();
-        let mut got = census_scan(&[pool.clone()], &d);
+        let mut got = census_scan(std::slice::from_ref(&pool), &d);
         got.retain(|(_, p)| !p.is_empty());
         assert_eq!(got, vec![(A.to_string(), vec![40, 41])]);
         assert!(census_scan(&[d.join("missing")], &d).is_empty());

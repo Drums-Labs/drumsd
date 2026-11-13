@@ -210,7 +210,7 @@ pub fn shift_cap(v: &[u8], r: &Remap) -> Option<Vec<u8>> {
 /// A POSIX ACL xattr value (`posix_acl_xattr_header` + entries of tag, perm, id) with the ids of its named user and
 /// group entries moved, or None if none moved. A value of another layout is an error: it is not shifted blindly.
 pub fn shift_acl(v: &[u8], r: &Remap) -> io::Result<Option<Vec<u8>>> {
-    if v.len() < 4 || (v.len() - 4) % 8 != 0 || u32::from_le_bytes(v[0..4].try_into().unwrap()) != 2 {
+    if v.len() < 4 || !(v.len() - 4).is_multiple_of(8) || u32::from_le_bytes(v[0..4].try_into().unwrap()) != 2 {
         return Err(io::Error::other(format!("not a version 2 POSIX ACL ({} bytes)", v.len())));
     }
     let mut o = v.to_vec();
@@ -345,7 +345,7 @@ pub fn mount_options<'a>(mountinfo: &'a str, path: &str) -> Option<&'a str> {
             let f: Vec<&str> = l.split(" - ").next()?.split_whitespace().collect();
             (f.len() >= 6 && f[4] == path).then_some(f[5])
         })
-        .last()
+        .next_back()
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

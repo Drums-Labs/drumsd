@@ -259,7 +259,7 @@ pub fn start() -> io::Result<ActivityWatch> {
         return Err(io::Error::new(e.kind(), format!("bind(CN_IDX_PROC): {e}")));
     }
     // nlmsghdr + cn_msg + proc_input {mcast_op, event_type}: the kernel passes only fork and exit events
-    let mut msg = vec![0u8; 16 + 20 + 8];
+    let mut msg = [0u8; 16 + 20 + 8];
     let total = msg.len() as u32;
     msg[0..4].copy_from_slice(&total.to_ne_bytes());
     msg[4..6].copy_from_slice(&(libc::NLMSG_DONE as u16).to_ne_bytes());

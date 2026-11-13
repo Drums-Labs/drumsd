@@ -49,7 +49,6 @@ pub struct Snap {
     pub psi_mem: f64,
     pub load1: f64,
     pub live_slots: u32,
-    pub health_ok: bool,
     pub rtt_s: f64,
     pub admission_refusals: f64,
     /// The host's last /v1/health reply (fingerprint fields are aggregated from it).
@@ -112,7 +111,6 @@ pub struct PoolEnv {
     pub setup: Option<bool>,
     pub idle_timeout_s: f64,
     pub ttl_s: f64,
-    pub created_epoch: f64,
     pub created: Instant,
     pub last_used: Instant,
     pub status: EnvStatus,
@@ -478,7 +476,16 @@ impl Pool {
         };
         tokio::select! {
             r = fut => r,
-            _ = async { loop { if dead.changed().await.is_err() { std::future::pending::<()>().await; } if *dead.borrow() != gen { break; } } } => Err("host_dead".into()),
+            _ = async {
+                loop {
+                    if dead.changed().await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                    if *dead.borrow() != gen {
+                        break;
+                    }
+                }
+            } => Err("host_dead".into()),
         }
     }
 
@@ -542,7 +549,6 @@ impl Pool {
                         psi_mem: ad["memory_psi_some_avg10"].as_f64().unwrap_or(0.0),
                         load1,
                         live_slots: live,
-                        health_ok: v["ok"].as_bool().unwrap_or(false),
                         rtt_s: rtt,
                         admission_refusals: refusals,
                         raw: v.clone(),

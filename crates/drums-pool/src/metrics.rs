@@ -77,12 +77,6 @@ impl Metrics {
         e.sum += v;
         e.n += 1;
     }
-    pub fn counter(&self, name: &str, labels: &[(&str, &str)]) -> f64 {
-        self.counters.lock().unwrap().get(&key(name, labels)).copied().unwrap_or(0.0)
-    }
-    pub fn gauge(&self, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
-        self.gauges.lock().unwrap().get(&key(name, labels)).copied()
-    }
 
     pub fn render(&self) -> String {
         let help = self.help.lock().unwrap().clone();

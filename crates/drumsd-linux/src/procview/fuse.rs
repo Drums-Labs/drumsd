@@ -41,6 +41,9 @@ const IN_HDR: usize = 40;
 const ROOT: u64 = 1;
 const BUF: usize = 1 << 17;
 
+/// Last rendering per (slot cgroup, file): when it was made and its bytes.
+pub type RenderCache = HashMap<(String, &'static str), (std::time::Instant, Vec<u8>)>;
+
 /// What the server needs to render: the cgroup root and /proc (injectable for tests).
 #[derive(Clone)]
 pub struct Ctx {
@@ -50,7 +53,7 @@ pub struct Ctx {
     /// Last rendering per (slot cgroup, file), reused for [`RENDER_TTL`]: a slot that floods its view costs the daemon
     /// one cgroup read per request instead of a full rendering (measured before: 16 readers in one env took ~8 host
     /// CPUs of the daemon's time, outside the env's cpu.max).
-    pub cache: Arc<Mutex<HashMap<(String, &'static str), (std::time::Instant, Vec<u8>)>>>,
+    pub cache: Arc<Mutex<RenderCache>>,
 }
 
 /// How long a rendering is reused for the same slot and file. Values change continuously anyway; 100 ms is far below

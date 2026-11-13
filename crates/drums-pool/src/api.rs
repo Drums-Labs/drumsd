@@ -6,7 +6,7 @@
 //! `episode_lost` (reset continues on a new host) or 410 `host_lost`.
 
 use crate::config::HostSpec;
-use crate::pool::{now_epoch, EnvStatus, HostState, MakeErr, PoolEnv, SavedState, P};
+use crate::pool::{EnvStatus, HostState, MakeErr, PoolEnv, SavedState, P};
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
@@ -77,7 +77,7 @@ async fn handle(State(p): State<P>, req: Request) -> Response {
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let headers = req.headers().clone();
-    let segs: Vec<String> = path.trim_matches('/').split('/').map(|s| percent_decode(s)).collect();
+    let segs: Vec<String> = path.trim_matches('/').split('/').map(percent_decode).collect();
     let segs_ref: Vec<&str> = segs.iter().map(|s| s.as_str()).collect();
     let op = op_of(&method, &segs_ref);
     if path == "/healthz" {
@@ -366,16 +366,8 @@ fn rewrite_ckpt(v: &mut Value, pool_id: &str, host: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------- envs
-fn region_of(p: &P, host: &str) -> String {
-    p.hosts.lock().unwrap().get(host).map(|h| h.spec.region.clone()).unwrap_or_default()
-}
-
 fn rewrite_slot(p: &P, v: &mut Value, pool_id: &str, host: &str, slot: &str) {
     p.pool_view(v, pool_id, host, slot)
-}
-
-fn state_pool_id(p: &P, host: &str, host_id: &str) -> Option<String> {
-    p.states.lock().unwrap().values().find(|s| s.host == host && s.host_id == host_id).map(|s| s.id.clone())
 }
 
 fn list(p: &P, query: &str) -> Response {
@@ -446,7 +438,6 @@ async fn create(p: &P, headers: &HeaderMap, body: Option<Value>, up: &mut f64) -
                     setup,
                     idle_timeout_s: idle,
                     ttl_s: ttl,
-                    created_epoch: now_epoch(),
                     created: now,
                     last_used: now,
                     status: EnvStatus::Live,
@@ -640,7 +631,6 @@ async fn env_op(p: &P, m: &Method, id: &str, op: &str, query: &str, body: Option
                             setup: e.setup,
                             idle_timeout_s: cidle,
                             ttl_s: cttl,
-                            created_epoch: now_epoch(),
                             created: now,
                             last_used: now,
                             status: EnvStatus::Live,

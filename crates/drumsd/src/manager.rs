@@ -223,12 +223,8 @@ pub fn state_lost(c: &CheckpointRecord, state_dir: &Path, lower: &Path, lower_mo
     })
 }
 
-/// What the API returns for a checkpoint: its record plus `stale` (and why).
-pub fn ckpt_view(c: &CheckpointRecord, current: &Value) -> Value {
-    ckpt_view_on(c, current, None)
-}
-
-/// As `ckpt_view`, with the reason its state is lost (`state_lost`), which comes before a provenance mismatch.
+/// What the API returns for a checkpoint: its record plus `stale` (and why). `lost` is the reason its state is
+/// lost (`state_lost`), which comes before a provenance mismatch.
 pub fn ckpt_view_on(c: &CheckpointRecord, current: &Value, lost: Option<String>) -> Value {
     let mut v = serde_json::to_value(c).unwrap();
     let why = lost.or_else(|| stale_reason(c, current));
@@ -3315,7 +3311,7 @@ impl Manager {
             let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
             (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
         };
-        let ok = ck.iter().all(|c| !c["template_server"].is_null() && c["stale_reason"].as_str().map_or(true, |w| !w.starts_with("state_lost")));
+        let ok = ck.iter().all(|c| !c["template_server"].is_null() && c["stale_reason"].as_str().is_none_or(|w| !w.starts_with("state_lost")));
         let mut warnings: Vec<String> = vec![];
         for c in &ck {
             if let Some(w) = c["stale_reason"].as_str() {
@@ -3697,7 +3693,7 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
     if mode == forget::Mode::KeepAll {
         return Full;
     }
-    if slot_json.map_or(false, |j| j.get(FAILURE_SEEN).is_some()) {
+    if slot_json.is_some_and(|j| j.get(FAILURE_SEEN).is_some()) {
         return Full;
     }
     match basis {
@@ -3713,7 +3709,7 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
             }
         }
         ForgetBasis::Checkpoint(c) => {
-            let rejected = c.quiescence.as_ref().and_then(|q| q["attempts"].as_array()).map_or(false, |a| a.iter().any(|x| !x["rejected"].is_null()));
+            let rejected = c.quiescence.as_ref().and_then(|q| q["attempts"].as_array()).is_some_and(|a| a.iter().any(|x| !x["rejected"].is_null()));
             if c.captured_from.is_none() || rejected {
                 return Full; // installed images and saved states that needed a rejected dump keep their logs
             }
@@ -3726,7 +3722,7 @@ pub fn forget_disposition(mode: forget::Mode, basis: &ForgetBasis, slot_json: Op
 /// restart), an env that is down or quarantined holds nothing of it: no tree runs (drums-scale, 2026-10-30: 115 down
 /// and quarantined envs from before a reboot blocked the boot unit's re-provisioning with 409 "used by envs").
 pub fn blocks_checkpoint_delete(state: &SlotState, lost: bool) -> bool {
-    !state.is_terminal() && !(lost && matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
+    !state.is_terminal() && (!lost || !matches!(state, SlotState::Down { .. } | SlotState::Quarantined { .. }))
 }
 
 /// The host device binds of a hardened slot's checkpoint (its `mounts-pre-dump.json`), as CRIU restore arguments
@@ -4259,7 +4255,7 @@ mod tests {
         assert!(r.contains("source_sha256 and inspection_sha256"), "{r}");
         // a saved state is the user's data: never stale, whatever made it
         assert_eq!(stale_reason(&ck(Some("s101"), None), &cur), None);
-        let v = ckpt_view(&ck(None, None), &cur);
+        let v = ckpt_view_on(&ck(None, None), &cur, None);
         assert_eq!(v["stale"], json!(true));
         assert!(v["stale_reason"].is_string());
         // a v0.3 journal record (no provenance field) still loads
