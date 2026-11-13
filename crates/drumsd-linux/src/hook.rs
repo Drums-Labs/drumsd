@@ -2,7 +2,7 @@
 //!
 //! CRIU runs the script at EVERY action (pre-restore, setup-namespaces, post-setup-namespaces, post-restore,
 //! network-unlock, pre-resume, post-resume) and waits for it each time. A Python start costs 70-165 ms per action on
-//! the drums-linux host (measured from a restore log), so the hook alone was ~0.77 s of a 1.69 s restore. This hook
+//! a 16-vCPU test host (measured from a restore log), so the hook alone was ~0.77 s of a 1.69 s restore. This hook
 //! returns at once for actions it ignores and does the pre-resume work in a few milliseconds:
 //!
 //! * `locks-pre-resume.json`: the lock census of the restored tree while every task is still stopped
