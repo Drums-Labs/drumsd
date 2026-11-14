@@ -140,7 +140,13 @@ async fn auth(State(a): S, req: Request, next: Next) -> Response {
     if req.uri().path() == "/healthz" {
         return next.run(req).await;
     }
-    let ok = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|t| token_eq(t.trim().as_bytes(), a.token.as_bytes())).unwrap_or(false);
+    let ok = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| token_eq(t.trim().as_bytes(), a.token.as_bytes()))
+        .unwrap_or(false);
     if !ok {
         return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], Json(json!({"error": "missing or wrong bearer token"}))).into_response();
     }

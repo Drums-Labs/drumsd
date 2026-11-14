@@ -1,0 +1,52 @@
+name: Bug report
+description: Something drumsd, the installer or a gate did wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through private vulnerability reporting (see SECURITY.md), not an issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag, or `RELEASE_COMMIT` of the tarball, or the commit of your build.
+      placeholder: v0.2.1
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS, kernel (`uname -r`), instance type or CPU and RAM, install flags.
+      placeholder: Ubuntu 24.04, 7.0.0-1014-aws, c8i.4xlarge, `install.sh` with no flags
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what drumsd did instead. Paste the error body (a 4xx/5xx JSON body, an `invalid_reasons` list, a quarantine reason) as text.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The shortest SDK or curl sequence that shows it. Say how often it happens.
+      render: python
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Whatever applies, as text or attached files: the slot record (`GET /v1/slots/{id}`), its gate report (`/gates`), `GET /v1/health`, `journalctl -u drumsd` around the time, the record of the destroyed env from `/var/lib/drums/forgotten`, `/var/log/drums-install.log` for installer problems. Remove tokens and anything private before posting.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed the API token, hostnames and account identifiers from what I pasted.
+          required: true
+        - label: This is not a security report (those go through SECURITY.md).
+          required: true

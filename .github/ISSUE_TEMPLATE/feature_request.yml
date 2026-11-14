@@ -1,0 +1,35 @@
+name: Feature request
+description: Something drumsd should do, or do differently
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do with drumsd and where it stops you. A concrete workload (tasks, how many envs, which apps) helps more than a general wish.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour, API or option you have in mind. If it changes what `valid` means, say why that is safe (gates fail closed; see docs/validity.md).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - restore, fork, reset, capture
+        - gates and validity
+        - reward audit and tasks
+        - installer and host
+        - API
+        - pool (many hosts)
+        - docs
+        - other

@@ -84,15 +84,7 @@ pub const PYAUTOGUI_PREFIX: &str = "import pyautogui; import time; pyautogui.FAI
 
 impl WinDesk {
     pub fn new(cfg: WindowsCfg, name: String, port: u16, image: WinImage) -> WinDesk {
-        WinDesk {
-            cfg,
-            name,
-            port,
-            image,
-            child: None,
-            gen: 0,
-            frozen: vec![],
-        }
+        WinDesk { cfg, name, port, image, child: None, gen: 0, frozen: vec![] }
     }
     fn dir(&self) -> PathBuf {
         self.cfg.work_dir.join(&self.name)
@@ -107,11 +99,7 @@ impl WinDesk {
         self.dir().join(format!("vars-{}.fd", self.gen))
     }
     pub fn clean_image(cfg: &WindowsCfg) -> WinImage {
-        WinImage {
-            disk: cfg.clean_disk.clone(),
-            state: cfg.clean_state.clone(),
-            vars: cfg.clean_vars.clone(),
-        }
+        WinImage { disk: cfg.clean_disk.clone(), state: cfg.clean_state.clone(), vars: cfg.clean_vars.clone() }
     }
 
     pub async fn start(&mut self) -> Result<Value, String> {
@@ -121,17 +109,7 @@ impl WinDesk {
         let disk = self.disk_path();
         let o = run(
             &self.cfg.qemu_img,
-            &[
-                "create",
-                "-q",
-                "-f",
-                "qcow2",
-                "-F",
-                "qcow2",
-                "-b",
-                &self.image.disk.to_string_lossy(),
-                &disk.to_string_lossy(),
-            ],
+            &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &self.image.disk.to_string_lossy(), &disk.to_string_lossy()],
             None,
             secs(30.0),
         )
@@ -142,15 +120,8 @@ impl WinDesk {
         std::fs::copy(&self.image.vars, self.vars_path()).map_err(|e| format!("vars copy: {e}"))?;
         let t_disk = t0.elapsed().as_secs_f64();
         let _ = std::fs::remove_file(self.qmp_path());
-        let mut args: Vec<String> = self
-            .cfg
-            .vm_args
-            .iter()
-            .map(|a| {
-                a.replace("{DISK}", &disk.to_string_lossy())
-                    .replace("{VARS}", &self.vars_path().to_string_lossy())
-            })
-            .collect();
+        let mut args: Vec<String> =
+            self.cfg.vm_args.iter().map(|a| a.replace("{DISK}", &disk.to_string_lossy()).replace("{VARS}", &self.vars_path().to_string_lossy())).collect();
         args.extend([
             "-name".into(),
             self.name.clone(),
@@ -159,11 +130,7 @@ impl WinDesk {
                 "user,id=n0,hostfwd=tcp:127.0.0.1:{}-:{}{}{}",
                 self.port,
                 self.cfg.guest_port,
-                if self.cfg.user_net.is_empty() {
-                    ""
-                } else {
-                    ","
-                },
+                if self.cfg.user_net.is_empty() { "" } else { "," },
                 self.cfg.user_net
             ),
             "-device".into(),
@@ -175,8 +142,7 @@ impl WinDesk {
             "-incoming".into(),
             "defer".into(),
         ]);
-        let log = std::fs::File::create(self.dir().join(format!("qemu-{}.log", self.gen)))
-            .map_err(|e| e.to_string())?;
+        let log = std::fs::File::create(self.dir().join(format!("qemu-{}.log", self.gen))).map_err(|e| e.to_string())?;
         let child = tokio::process::Command::new(&self.cfg.qemu)
             .args(&args)
             .stdout(log.try_clone().unwrap())
@@ -189,11 +155,7 @@ impl WinDesk {
         self.child = Some(child);
         let mut q = Qmp::connect(&self.qmp_path(), 30.0).await?;
         let t_spawn = t0.elapsed().as_secs_f64();
-        q.cmd(
-            "migrate-incoming",
-            json!({"uri": format!("exec:cat {}", self.image.state.display())}),
-        )
-        .await?;
+        q.cmd("migrate-incoming", json!({"uri": format!("exec:cat {}", self.image.state.display())})).await?;
         let st = q.wait_not_inmigrate(300.0).await?;
         if st != "running" {
             // -incoming leaves the VM paused only with -S; be explicit
@@ -202,9 +164,7 @@ impl WinDesk {
         let t_load = t0.elapsed().as_secs_f64();
         self.wait_guest(self.cfg.ready_timeout_s).await?;
         let t_ready = t0.elapsed().as_secs_f64();
-        Ok(
-            json!({"disk_s": t_disk, "spawn_s": t_spawn - t_disk, "load_s": t_load - t_spawn, "guest_s": t_ready - t_load, "total_s": t_ready}),
-        )
+        Ok(json!({"disk_s": t_disk, "spawn_s": t_spawn - t_disk, "load_s": t_load - t_spawn, "guest_s": t_ready - t_load, "total_s": t_ready}))
     }
 
     pub async fn wait_guest(&self, timeout_s: f64) -> Result<f64, String> {
@@ -216,10 +176,7 @@ impl WinDesk {
                 }
             }
             if t0.elapsed().as_secs_f64() > timeout_s {
-                return Err(format!(
-                    "guest server not answering on :{} after {timeout_s:.0} s",
-                    self.port
-                ));
+                return Err(format!("guest server not answering on :{} after {timeout_s:.0} s", self.port));
             }
             tokio::time::sleep(secs(0.02)).await;
         }
@@ -267,57 +224,22 @@ impl WinDesk {
     pub async fn screenshot(&self) -> Result<Vec<u8>, String> {
         let p = self.dir().join("shot.png");
         let mut q = Qmp::connect(&self.qmp_path(), 5.0).await?;
-        q.cmd(
-            "screendump",
-            json!({"filename": p.to_string_lossy(), "format": "png"}),
-        )
-        .await?;
+        q.cmd("screendump", json!({"filename": p.to_string_lossy(), "format": "png"})).await?;
         std::fs::read(&p).map_err(|e| format!("screendump read: {e}"))
     }
 
     /// Run a command through the guest server's /execute.
-    pub async fn execute(
-        &self,
-        command: Value,
-        shell: bool,
-        timeout_s: f64,
-    ) -> Result<Value, String> {
-        let r = http::request(
-            self.port,
-            "POST",
-            "/execute",
-            Some(&json!({"command": command, "shell": shell})),
-            timeout_s,
-        )
-        .await?;
-        let v: Value = serde_json::from_slice(&r.body)
-            .map_err(|e| format!("guest /execute status {} not json: {e}", r.status))?;
+    pub async fn execute(&self, command: Value, shell: bool, timeout_s: f64) -> Result<Value, String> {
+        let r = http::request(self.port, "POST", "/execute", Some(&json!({"command": command, "shell": shell})), timeout_s).await?;
+        let v: Value = serde_json::from_slice(&r.body).map_err(|e| format!("guest /execute status {} not json: {e}", r.status))?;
         if r.status != 200 {
             return Err(format!("guest /execute status {}: {}", r.status, v));
         }
         Ok(v)
     }
     /// PowerShell command (checkers, setup, probes). Returns (returncode, stdout, stderr).
-    pub async fn powershell(
-        &self,
-        cmd: &str,
-        timeout_s: f64,
-    ) -> Result<(i32, String, String), String> {
-        let v = self
-            .execute(
-                json!([
-                    "powershell",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    cmd
-                ]),
-                false,
-                timeout_s,
-            )
-            .await?;
+    pub async fn powershell(&self, cmd: &str, timeout_s: f64) -> Result<(i32, String, String), String> {
+        let v = self.execute(json!(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd]), false, timeout_s).await?;
         Ok((
             v["returncode"].as_i64().unwrap_or(-1) as i32,
             v["output"].as_str().unwrap_or("").replace("\r\n", "\n"),
@@ -329,57 +251,26 @@ impl WinDesk {
     pub async fn act(&self, a: &Value) -> Result<Value, String> {
         let (kind, code) = match a {
             Value::String(s) => ("pyautogui", s.clone()),
-            _ => (
-                a.get("type")
-                    .and_then(|v| v.as_str())
-                    .ok_or("action needs type")?,
-                a.get("code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
+            _ => (a.get("type").and_then(|v| v.as_str()).ok_or("action needs type")?, a.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string()),
         };
         match kind {
-            "pyautogui" => {
-                self.execute(
-                    json!([self.cfg.python, "-c", format!("{PYAUTOGUI_PREFIX}{code}")]),
-                    false,
-                    130.0,
-                )
-                .await
-            }
+            "pyautogui" => self.execute(json!([self.cfg.python, "-c", format!("{PYAUTOGUI_PREFIX}{code}")]), false, 130.0).await,
             "execute" | "launch" => {
                 let cmd = a.get("command").cloned().ok_or("command missing")?;
                 let shell = a.get("shell").and_then(|v| v.as_bool()).unwrap_or(false);
                 if kind == "launch" {
-                    let r = http::request(
-                        self.port,
-                        "POST",
-                        "/setup/launch",
-                        Some(&json!({"command": cmd, "shell": shell})),
-                        30.0,
-                    )
-                    .await?;
-                    return Ok(
-                        json!({"status": if r.status == 200 {"ok"} else {"error"}, "http": r.status, "output": String::from_utf8_lossy(&r.body)}),
-                    );
+                    let r = http::request(self.port, "POST", "/setup/launch", Some(&json!({"command": cmd, "shell": shell})), 30.0).await?;
+                    return Ok(json!({"status": if r.status == 200 {"ok"} else {"error"}, "http": r.status, "output": String::from_utf8_lossy(&r.body)}));
                 }
                 self.execute(cmd, shell, 130.0).await
             }
             "powershell" => {
-                let c = a
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .ok_or("command missing")?;
+                let c = a.get("command").and_then(|v| v.as_str()).ok_or("command missing")?;
                 let (rc, out, err) = self.powershell(c, 130.0).await?;
                 Ok(json!({"status": "ok", "returncode": rc, "output": out, "error": err}))
             }
             "sleep" | "wait" => {
-                let s = a
-                    .get("seconds")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 60.0);
+                let s = a.get("seconds").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.0, 60.0);
                 tokio::time::sleep(secs(s)).await;
                 Ok(json!({"status": "ok", "slept_s": s}))
             }
@@ -396,11 +287,7 @@ impl WinDesk {
         let mut q = Qmp::connect(&self.qmp_path(), 5.0).await?;
         q.cmd("stop", json!({})).await?;
         let r = async {
-            q.cmd(
-                "migrate",
-                json!({"uri": format!("exec:cat > {}", state.display())}),
-            )
-            .await?;
+            q.cmd("migrate", json!({"uri": format!("exec:cat > {}", state.display())})).await?;
             let m = q.wait_migrated(600.0).await?;
             let t_state = t0.elapsed().as_secs_f64();
             std::fs::copy(self.vars_path(), &vars).map_err(|e| format!("vars copy: {e}"))?;
@@ -409,18 +296,10 @@ impl WinDesk {
             let next = self.disk_path();
             // the old vars file of this generation stays with the desktop; the new generation needs its own name
             std::fs::copy(dst_dir.join("vars.fd"), self.vars_path()).map_err(|e| e.to_string())?;
-            q.cmd(
-                "blockdev-snapshot-sync",
-                json!({"device": "d0", "snapshot-file": next.to_string_lossy(), "format": "qcow2"}),
-            )
-            .await?;
+            q.cmd("blockdev-snapshot-sync", json!({"device": "d0", "snapshot-file": next.to_string_lossy(), "format": "qcow2"})).await?;
             self.frozen.push(frozen.clone());
             Ok::<_, String>((
-                WinImage {
-                    disk: frozen,
-                    state: state.clone(),
-                    vars: vars.clone(),
-                },
+                WinImage { disk: frozen, state: state.clone(), vars: vars.clone() },
                 json!({"state_s": t_state, "state_bytes": m["ram"]["total"], "migrate": m}),
             ))
         }

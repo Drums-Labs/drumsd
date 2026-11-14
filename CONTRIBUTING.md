@@ -10,7 +10,7 @@ build it, which tests gate a change, how a release is cut, and what a pull reque
 Rust (the toolchain `install/lock.json` names under `rust_toolchain`), Linux. macOS builds the crates but cannot run
 the daemon or most tests: slots need cgroups v2, user namespaces, overlayfs and CRIU.
 
-```
+```bash
 cargo build --release
 ```
 
@@ -22,17 +22,17 @@ Windows pools). Config fields are in `crates/drumsd/src/config.rs`; the HTTP sur
 
 ### Unit tests (every change)
 
-```
+```bash
 sudo cargo test --release
 ```
 
 Run them as root: the netns forwarder and nested-pidns tests create namespaces and fail with EPERM otherwise.
-`cargo test` without root is fine for a quick loop on crates that do not touch the kernel, but the PR runs the full
-set as root.
+`cargo test` without root runs everything else (the four tests that need root skip themselves and say so; CI runs it
+this way, with `zstd` installed for the `forget` tests), but the PR runs the full set as root.
 
 Also, when you touch them:
 
-```
+```bash
 python3 -m unittest install/tests/test_build_wheel.py      # the SDK wheel builder (install/build_wheel.py)
 python3 -m unittest discover -s osw/tests                  # the OSWorld task bridge and its verifier
 for t in install/tests/test_*.sh; do bash "$t"; done       # install.sh output, boot, retry
@@ -42,7 +42,7 @@ for t in install/tests/test_*.sh; do bash "$t"; done       # install.sh output, 
 
 These run on an installed Linux host, as root, against the real daemon, with the SDK from the release's wheel:
 
-```
+```bash
 sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/integration_host.py OUT
 sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/recovery_host.py OUT
 ```
@@ -95,7 +95,7 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
 
    It writes `OUT_DIR/drums-release-<commit12>/` and `drums-release-<commit12>.tar.gz`: `install.sh`, `install/`,
    git bundles of drumsd and drums-criu at the pinned commits, `python/`, the SDK wheel built from the pinned SDK commit
-   (`install/build_wheel.py`, standard library only), the user docs (`README.md`, `QUICKSTART.md`, `CHANGELOG.md`,
+   (`install/build_wheel.py`, standard library only), the user docs (`README.md`, `docs/install.md`, `CHANGELOG.md`,
    `docs/`, `examples/`, `api/openapi.json`), `RELEASE_COMMIT` and `SHA256SUMS`. It prints the tarball's sha256.
 5. Install it on a fresh host of the type `docs/host-requirements.md` names (`sudo ./install.sh`), then run the host
    tests above against it. The release is good when `integration_host.py` and `recovery_host.py` exit 0.
@@ -113,5 +113,7 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
 - Sign off every commit (`git commit -s`, the Developer Certificate of Origin, https://developercertificate.org): by
   signing off you certify you have the right to submit the change under the Apache License 2.0 (LICENSE).
 - No secrets, tokens, private hostnames, instance ids or customer names in code, tests, fixtures, docs or logs.
-- `cargo fmt` and `cargo clippy --release` clean. There is no CI on this repository yet; the PR author runs the tests
-  and says which ones in the PR.
+- `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean (`rustfmt.toml` sets
+  the width). CI (`.github/workflows/ci.yml`) runs both, the non-root `cargo test --workspace`, shellcheck over
+  `install/*.sh` and the Python tests on every push and pull request; the root-only and host tests are the PR
+  author's, who says which ones ran in the PR.

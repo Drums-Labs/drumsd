@@ -408,10 +408,7 @@ mod tests {
     }
     #[test]
     fn limits_match_launch_py() {
-        assert_eq!(
-            expected_limits(4, 4096, 0),
-            Limits { cpu_max: "400000 100000".into(), memory_max: "4294967296".into(), swap_max: "0".into() }
-        );
+        assert_eq!(expected_limits(4, 4096, 0), Limits { cpu_max: "400000 100000".into(), memory_max: "4294967296".into(), swap_max: "0".into() });
         assert!(slot_cg("rootfs-0734af49-2").ends_with("drumsbench-pool.scope/drumsbench-rootfs-0734af49-2-pool.scope"));
     }
 

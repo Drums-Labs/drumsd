@@ -3,7 +3,7 @@
  "ami_region": "us-east-1",
  "ami": "ami-05d4c50387f38e3cf",
  "key_name": "drums-sota-t3",
- "ssh_cidr": "192.5.215.208/32",
+ "ssh_cidr": "YOUR_IP/32",
  "coordinator": {
   "region": "us-east-1",
   "types": [

@@ -2,7 +2,7 @@
 //!
 //! CRIU runs the script at EVERY action (pre-restore, setup-namespaces, post-setup-namespaces, post-restore,
 //! network-unlock, pre-resume, post-resume) and waits for it each time. A Python start costs 70-165 ms per action on
-//! the drums-linux host (measured from a restore log), so the hook alone was ~0.77 s of a 1.69 s restore. This hook
+//! a 16-vCPU test host (measured from a restore log), so the hook alone was ~0.77 s of a 1.69 s restore. This hook
 //! returns at once for actions it ignores and does the pre-resume work in a few milliseconds:
 //!
 //! * `locks-pre-resume.json`: the lock census of the restored tree while every task is still stopped
@@ -50,7 +50,7 @@ pub fn hook_main(dir: &str) -> i32 {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("drumsd hook: lo up: {e}");
-                let _ = fs::write(Path::new(dir).join("netns-lo-up.error"), e.to_string());
+                let _ = fs::write(Path::new(dir).join("netns-lo-up.error"), &e);
                 1
             }
         };
@@ -92,7 +92,8 @@ fn clear_soft_dirty(dir: &str, tree: Option<Vec<i64>>) {
     let t0 = crate::now_epoch();
     // the base's time for CRIU's pid-reuse check (--prev-images-uptime): read before the first clear, so every task
     // restored here started before it and any task started after the restore is dumped in full
-    let uptime_us: Option<u64> = fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())).map(|s| (s * 1e6) as u64);
+    let uptime_us: Option<u64> =
+        fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split_whitespace().next().and_then(|x| x.parse::<f64>().ok())).map(|s| (s * 1e6) as u64);
     let root = std::env::var("CRTOOLS_INIT_PID").unwrap_or_default();
     let mut errs: Vec<String> = vec![];
     let mut done: Vec<i64> = vec![];

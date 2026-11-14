@@ -1,4 +1,5 @@
 # retry.sh: bounded retry with backoff for network steps of install.sh (sourced; bash).
+# shellcheck shell=bash
 #   retry LABEL CMD [ARGS...]    runs CMD up to DRUMS_RETRY_ATTEMPTS (5) times. Waits between attempts grow
 #   15, 30, 45, 60, 60 s (DRUMS_RETRY_BASE_S x attempt, capped at DRUMS_RETRY_MAX_S). Each failure is logged with
 #   its exit code and the last lines of its output; the output of every attempt is kept in $RETRY_LOG_DIR.

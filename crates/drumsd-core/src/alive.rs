@@ -21,11 +21,7 @@ pub struct AliveVerdict {
 
 /// `reference` and `now` map namespace pid -> comm.
 pub fn judge(reference: &BTreeMap<String, String>, now: &BTreeMap<String, String>, natural: &BTreeSet<String>, after_s: f64) -> AliveVerdict {
-    let missing: Vec<(String, String)> = reference
-        .iter()
-        .filter(|(pid, comm)| now.get(*pid) != Some(*comm))
-        .map(|(p, c)| (p.clone(), c.clone()))
-        .collect();
+    let missing: Vec<(String, String)> = reference.iter().filter(|(pid, comm)| now.get(*pid) != Some(*comm)).map(|(p, c)| (p.clone(), c.clone())).collect();
     let counted: Vec<_> = missing.iter().filter(|(_, c)| !natural.contains(c)).cloned().collect();
     let natural_excluded: Vec<_> = missing.iter().filter(|(_, c)| natural.contains(c)).cloned().collect();
     AliveVerdict { ok: counted.is_empty(), reference_n: reference.len(), missing, counted, natural_excluded, after_s }

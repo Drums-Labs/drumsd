@@ -22,7 +22,9 @@ bash pool/infra/build-image.sh drums-release-bd4348387400.tar.gz t3-coord.pub   
 ```
 Then CreateImage **with NoReboot=true** (a reboot is a shutdown; with shutdown behavior "terminate" the instance is lost).
 Put the AMI id in your plan file (`pool/infra/plan-m1.json` / `plan-m2.json` are ours: ami-04da8ed660348fe4f us-east-2,
-copies ami-079ffb7ca4772534d us-west-2 and ami-05d4c50387f38e3cf us-east-1).
+copies ami-079ffb7ca4772534d us-west-2 and ami-05d4c50387f38e3cf us-east-1). Set `ssh_cidr` in the plan to your own
+address (`YOUR_IP/32` is a placeholder; the security group allows ssh from that CIDR and the coordinator only) and
+`key_name` to a key pair that exists in every region of the plan.
 
 ## 2. Launch the fleet (laptop)
 ```

@@ -26,25 +26,11 @@ impl Out {
 pub async fn run(prog: &str, args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Out {
     let t0 = Instant::now();
     let mut c = Command::new(prog);
-    c.args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    c.stdin(if stdin.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
+    c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    c.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
     let mut child = match c.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            return Out {
-                code: -1,
-                stdout: vec![],
-                stderr: format!("spawn {prog}: {e}"),
-                seconds: 0.0,
-            }
-        }
+        Err(e) => return Out { code: -1, stdout: vec![], stderr: format!("spawn {prog}: {e}"), seconds: 0.0 },
     };
     if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
         let _ = si.write_all(data).await;
@@ -57,18 +43,10 @@ pub async fn run(prog: &str, args: &[&str], stdin: Option<&[u8]>, timeout: Durat
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
             seconds: t0.elapsed().as_secs_f64(),
         },
-        Ok(Err(e)) => Out {
-            code: -1,
-            stdout: vec![],
-            stderr: e.to_string(),
-            seconds: t0.elapsed().as_secs_f64(),
-        },
-        Err(_) => Out {
-            code: -2,
-            stdout: vec![],
-            stderr: format!("{prog} timed out after {:.0} s", timeout.as_secs_f64()),
-            seconds: t0.elapsed().as_secs_f64(),
-        },
+        Ok(Err(e)) => Out { code: -1, stdout: vec![], stderr: e.to_string(), seconds: t0.elapsed().as_secs_f64() },
+        Err(_) => {
+            Out { code: -2, stdout: vec![], stderr: format!("{prog} timed out after {:.0} s", timeout.as_secs_f64()), seconds: t0.elapsed().as_secs_f64() }
+        }
     }
 }
 

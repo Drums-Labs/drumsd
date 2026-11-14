@@ -112,19 +112,8 @@ impl AndroidDesk {
             AndroidMode::Redroid => (format!("127.0.0.1:{port}"), true),
             AndroidMode::Emulator => (format!("127.0.0.1:{}", port + 1), true),
         };
-        let adb = Adb {
-            bin: cfg.adb.clone(),
-            serial,
-            tcp,
-            su: cfg.su,
-        };
-        AndroidDesk {
-            cfg,
-            name,
-            port,
-            adb,
-            child: None,
-        }
+        let adb = Adb { bin: cfg.adb.clone(), serial, tcp, su: cfg.su };
+        AndroidDesk { cfg, name, port, adb, child: None }
     }
     fn dir(&self) -> PathBuf {
         self.cfg.work_dir.join(&self.name)
@@ -148,26 +137,8 @@ impl AndroidDesk {
         for p in [&upper, &work, &merged] {
             std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
         }
-        let opts = format!(
-            "lowerdir={},upperdir={},workdir={}",
-            self.cfg.golden_data.display(),
-            upper.display(),
-            work.display()
-        );
-        let o = run(
-            "mount",
-            &[
-                "-t",
-                "overlay",
-                "overlay",
-                "-o",
-                &opts,
-                &merged.to_string_lossy(),
-            ],
-            None,
-            secs(30.0),
-        )
-        .await;
+        let opts = format!("lowerdir={},upperdir={},workdir={}", self.cfg.golden_data.display(), upper.display(), work.display());
+        let o = run("mount", &["-t", "overlay", "overlay", "-o", &opts, &merged.to_string_lossy()], None, secs(30.0)).await;
         if !o.ok() {
             return Err(format!("overlay mount: {}", o.stderr.trim()));
         }
@@ -176,21 +147,9 @@ impl AndroidDesk {
     async fn redroid_unmount(&self) -> Result<(), String> {
         let d = self.dir();
         let merged = d.join("data");
-        let _ = run(
-            "umount",
-            &["-l", &merged.to_string_lossy()],
-            None,
-            secs(30.0),
-        )
-        .await;
+        let _ = run("umount", &["-l", &merged.to_string_lossy()], None, secs(30.0)).await;
         // drop the upper layer: rename now (O(1)), delete in the background
-        let trash = d.join(format!(
-            "trash-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let trash = d.join(format!("trash-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
         for n in ["upper", "work"] {
             let _ = std::fs::rename(d.join(n), trash.join(n));
@@ -206,20 +165,7 @@ impl AndroidDesk {
         let t_mount = t0.elapsed().as_secs_f64();
         let vol = format!("{}:/data", self.dir().join("data").display());
         let pubp = format!("127.0.0.1:{}:5555", self.port);
-        let mut a: Vec<String> = vec![
-            "run",
-            "-d",
-            "--privileged",
-            "--name",
-            &self.name,
-            "-v",
-            &vol,
-            "-p",
-            &pubp,
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let mut a: Vec<String> = vec!["run", "-d", "--privileged", "--name", &self.name, "-v", &vol, "-p", &pubp].into_iter().map(String::from).collect();
         if self.cfg.cpus > 0.0 {
             a.push(format!("--cpus={}", self.cfg.cpus));
         }
@@ -237,9 +183,7 @@ impl AndroidDesk {
         self.adb.wait_boot(self.cfg.boot_timeout_s, 0.1).await?;
         let t_boot = t0.elapsed().as_secs_f64();
         let restored = self.restore_host_sysctl();
-        Ok(
-            json!({"mount_s": t_mount, "container_s": t_run - t_mount, "boot_s": t_boot - t_run, "total_s": t_boot, "host_sysctl_restored": restored}),
-        )
+        Ok(json!({"mount_s": t_mount, "container_s": t_run - t_mount, "boot_s": t_boot - t_run, "total_s": t_boot, "host_sysctl_restored": restored}))
     }
 
     /// Put pinned host sysctls back; returns what was changed ("path: found -> pinned").
@@ -257,13 +201,7 @@ impl AndroidDesk {
     }
     async fn redroid_down(&mut self) -> Result<(), String> {
         let _ = self.restore_host_sysctl();
-        let o = run(
-            &self.cfg.docker,
-            &["rm", "-f", &self.name],
-            None,
-            secs(60.0),
-        )
-        .await;
+        let o = run(&self.cfg.docker, &["rm", "-f", &self.name], None, secs(60.0)).await;
         self.adb.disconnect().await;
         self.redroid_unmount().await?;
         if !o.ok() && !o.stderr.contains("No such container") {
@@ -280,28 +218,11 @@ impl AndroidDesk {
         let t0 = std::time::Instant::now();
         let dst = root.join(format!("{}.avd", self.name));
         let _ = run("rm", &["-rf", &dst.to_string_lossy()], None, secs(120.0)).await;
-        let o = run(
-            "cp",
-            &[
-                "-a",
-                "--reflink=always",
-                &tpl.to_string_lossy(),
-                &dst.to_string_lossy(),
-            ],
-            None,
-            secs(300.0),
-        )
-        .await;
+        let o = run("cp", &["-a", "--reflink=always", &tpl.to_string_lossy(), &dst.to_string_lossy()], None, secs(300.0)).await;
         if !o.ok() {
             return Err(format!("reflink clone: {}", o.stderr.trim()));
         }
-        let _ = run(
-            "sh",
-            &["-c", &format!("rm -f {}/*.lock", dst.display())],
-            None,
-            secs(10.0),
-        )
-        .await;
+        let _ = run("sh", &["-c", &format!("rm -f {}/*.lock", dst.display())], None, secs(10.0)).await;
         Ok(t0.elapsed().as_secs_f64())
     }
     fn cloned(&self) -> bool {
@@ -311,46 +232,18 @@ impl AndroidDesk {
     async fn emulator_up(&mut self) -> Result<Value, String> {
         let t0 = std::time::Instant::now();
         std::fs::create_dir_all(self.dir()).map_err(|e| e.to_string())?;
-        let clone_s = if self.cloned()
-            && !self
-                .cfg
-                .clone_root
-                .as_ref()
-                .unwrap()
-                .join(format!("{}.avd", self.name))
-                .exists()
-        {
-            self.clone_avd().await?
-        } else {
-            0.0
-        };
-        let log =
-            std::fs::File::create(self.dir().join("emulator.log")).map_err(|e| e.to_string())?;
+        let clone_s =
+            if self.cloned() && !self.cfg.clone_root.as_ref().unwrap().join(format!("{}.avd", self.name)).exists() { self.clone_avd().await? } else { 0.0 };
+        let log = std::fs::File::create(self.dir().join("emulator.log")).map_err(|e| e.to_string())?;
         // Clone mode: the snapshot records the AVD's name and paths, so each emulator runs in its own mount namespace
         // with its clone bind-mounted over the template's path (same name, same paths, private blocks).
         let mut c = if self.cloned() {
             let mut c = tokio::process::Command::new("unshare");
-            let clone = self
-                .cfg
-                .clone_root
-                .as_ref()
-                .unwrap()
-                .join(format!("{}.avd", self.name));
-            c.args([
-                "-m",
-                "--propagation",
-                "private",
-                "sh",
-                "-c",
-                "mount --bind \"$DRUMS_CLONE\" \"$DRUMS_TPL\" && exec \"$0\" \"$@\"",
-                &self.cfg.emulator,
-            ])
-            .env("DRUMS_CLONE", clone)
-            // the path the snapshot was saved at: <avd_home>/<avd>.avd
-            .env(
-                "DRUMS_TPL",
-                std::path::Path::new(&self.cfg.avd_home).join(format!("{}.avd", self.cfg.avd)),
-            );
+            let clone = self.cfg.clone_root.as_ref().unwrap().join(format!("{}.avd", self.name));
+            c.args(["-m", "--propagation", "private", "sh", "-c", "mount --bind \"$DRUMS_CLONE\" \"$DRUMS_TPL\" && exec \"$0\" \"$@\"", &self.cfg.emulator])
+                .env("DRUMS_CLONE", clone)
+                // the path the snapshot was saved at: <avd_home>/<avd>.avd
+                .env("DRUMS_TPL", std::path::Path::new(&self.cfg.avd_home).join(format!("{}.avd", self.cfg.avd)));
             c
         } else {
             tokio::process::Command::new(&self.cfg.emulator)
@@ -358,16 +251,7 @@ impl AndroidDesk {
         let ro: &[&str] = if self.cloned() { &[] } else { &["-read-only"] };
         c.arg(format!("@{}", self.cfg.avd))
             .args(ro)
-            .args([
-                "-no-window",
-                "-no-audio",
-                "-no-boot-anim",
-                "-no-snapshot-save",
-                "-snapshot",
-                &self.cfg.snapshot,
-                "-port",
-                &self.port.to_string(),
-            ])
+            .args(["-no-window", "-no-audio", "-no-boot-anim", "-no-snapshot-save", "-snapshot", &self.cfg.snapshot, "-port", &self.port.to_string()])
             .args(&self.cfg.emulator_args)
             .env("ANDROID_SDK_ROOT", &self.cfg.sdk_root)
             .env("ANDROID_HOME", &self.cfg.sdk_root)
@@ -386,9 +270,7 @@ impl AndroidDesk {
         if !self.adb.steady(3, 0.15, 15.0).await {
             return Err(format!("{}: adb not steady after boot", self.adb.serial));
         }
-        Ok(
-            json!({"clone_s": clone_s, "boot_s": t0.elapsed().as_secs_f64() - clone_s, "total_s": t0.elapsed().as_secs_f64()}),
-        )
+        Ok(json!({"clone_s": clone_s, "boot_s": t0.elapsed().as_secs_f64() - clone_s, "total_s": t0.elapsed().as_secs_f64()}))
     }
     async fn emulator_down(&mut self) {
         let _ = self.console("kill", 10.0).await;
@@ -416,9 +298,7 @@ impl AndroidDesk {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let port = self.port;
         let fut = async move {
-            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .map_err(|e| format!("console :{port}: {e}"))?;
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| format!("console :{port}: {e}"))?;
             let mut buf = vec![0u8; 65536];
             let mut acc = String::new();
             // banner ends with "OK"
@@ -429,9 +309,7 @@ impl AndroidDesk {
                 }
                 acc.push_str(&String::from_utf8_lossy(&buf[..n]));
             }
-            s.write_all(format!("{cmd}\r\n").as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
+            s.write_all(format!("{cmd}\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
             let mut out = String::new();
             loop {
                 let n = s.read(&mut buf).await.map_err(|e| e.to_string())?;
@@ -447,9 +325,7 @@ impl AndroidDesk {
             let _ = s.write_all(b"quit\r\n").await;
             Ok(out)
         };
-        tokio::time::timeout(secs(timeout_s), fut)
-            .await
-            .map_err(|_| format!("console {cmd:?}: no answer in {timeout_s:.0} s"))?
+        tokio::time::timeout(secs(timeout_s), fut).await.map_err(|_| format!("console {cmd:?}: no answer in {timeout_s:.0} s"))?
     }
 
     /// Back to the clean image.
@@ -468,9 +344,7 @@ impl AndroidDesk {
             AndroidMode::Emulator => {
                 let t0 = std::time::Instant::now();
                 let why = if self.cloned() {
-                    let o = self
-                        .console(&format!("avd snapshot load {}", self.cfg.snapshot), 120.0)
-                        .await;
+                    let o = self.console(&format!("avd snapshot load {}", self.cfg.snapshot), 120.0).await;
                     let load_s = t0.elapsed().as_secs_f64();
                     match o {
                         Ok(text) if !text.contains("KO") => {
@@ -478,9 +352,7 @@ impl AndroidDesk {
                             // TCP transport and open a new one (an old transport stayed offline in 11 of 304 loads)
                             self.adb.disconnect().await;
                             if self.adb.wait_boot(15.0, 0.02).await.is_ok() && self.adb.steady(3, 0.15, 10.0).await {
-                                return Ok(
-                                    json!({"kind": "snapshot_load", "load_s": load_s, "total_s": t0.elapsed().as_secs_f64()}),
-                                );
+                                return Ok(json!({"kind": "snapshot_load", "load_s": load_s, "total_s": t0.elapsed().as_secs_f64()}));
                             }
                             "not booted after snapshot load".to_string()
                         }
@@ -509,16 +381,7 @@ impl AndroidDesk {
             AndroidMode::Emulator => {
                 self.emulator_down().await;
                 if let (true, Some(root)) = (self.cloned(), &self.cfg.clone_root) {
-                    let _ = run(
-                        "rm",
-                        &[
-                            "-rf",
-                            &root.join(format!("{}.avd", self.name)).to_string_lossy(),
-                        ],
-                        None,
-                        secs(120.0),
-                    )
-                    .await;
+                    let _ = run("rm", &["-rf", &root.join(format!("{}.avd", self.name)).to_string_lossy()], None, secs(120.0)).await;
                 }
                 Ok(())
             }
@@ -528,13 +391,7 @@ impl AndroidDesk {
     pub async fn alive(&mut self) -> bool {
         match self.cfg.mode {
             AndroidMode::Redroid => {
-                let o = run(
-                    &self.cfg.docker,
-                    &["inspect", "-f", "{{.State.Running}}", &self.name],
-                    None,
-                    secs(10.0),
-                )
-                .await;
+                let o = run(&self.cfg.docker, &["inspect", "-f", "{{.State.Running}}", &self.name], None, secs(10.0)).await;
                 o.ok() && o.text().trim() == "true"
             }
             AndroidMode::Emulator => {
@@ -553,15 +410,9 @@ impl AndroidDesk {
 
     /// One action. Accepts AndroidWorld's JSONAction shape (`action_type`) or `type`, plus `shell` for harness use.
     pub async fn act(&self, a: &Value) -> Result<Value, String> {
-        let kind = a
-            .get("action_type")
-            .or_else(|| a.get("type"))
-            .and_then(|v| v.as_str())
-            .ok_or("action needs action_type (or type)")?;
+        let kind = a.get("action_type").or_else(|| a.get("type")).and_then(|v| v.as_str()).ok_or("action needs action_type (or type)")?;
         let num = |k: &str| a.get(k).and_then(|v| v.as_f64()).map(|f| f.round() as i64);
-        let xy = || -> Result<(i64, i64), String> {
-            Ok((num("x").ok_or("x missing")?, num("y").ok_or("y missing")?))
-        };
+        let xy = || -> Result<(i64, i64), String> { Ok((num("x").ok_or("x missing")?, num("y").ok_or("y missing")?)) };
         let cmd: String = match kind {
             "click" | "tap" => {
                 let (x, y) = xy()?;
@@ -577,24 +428,13 @@ impl AndroidDesk {
             }
             "swipe" => {
                 let g = |k: &str| num(k).ok_or(format!("{k} missing"));
-                format!(
-                    "input swipe {} {} {} {} {}",
-                    g("x1")?,
-                    g("y1")?,
-                    g("x2")?,
-                    g("y2")?,
-                    num("duration_ms").unwrap_or(300)
-                )
+                format!("input swipe {} {} {} {} {}", g("x1")?, g("y1")?, g("x2")?, g("y2")?, num("duration_ms").unwrap_or(300))
             }
             "scroll" => {
                 // AndroidWorld: direction is where the content moves into view; swipe the opposite way
                 let (w, h) = (1080i64, 2400i64);
                 let (cx, cy) = (w / 2, h / 2);
-                match a
-                    .get("direction")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("down")
-                {
+                match a.get("direction").and_then(|v| v.as_str()).unwrap_or("down") {
                     "down" => format!("input swipe {cx} {} {cx} {} 300", cy + h / 4, cy - h / 4),
                     "up" => format!("input swipe {cx} {} {cx} {} 300", cy - h / 4, cy + h / 4),
                     "right" => format!("input swipe {} {cy} {} {cy} 300", cx + w / 4, cx - w / 4),
@@ -603,10 +443,7 @@ impl AndroidDesk {
                 }
             }
             "input_text" | "type" => {
-                let t = a
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .ok_or("text missing")?;
+                let t = a.get("text").and_then(|v| v.as_str()).ok_or("text missing")?;
                 let pre = match (num("x"), num("y")) {
                     (Some(x), Some(y)) => format!("input tap {x} {y}; "),
                     _ => String::new(),
@@ -618,46 +455,30 @@ impl AndroidDesk {
             "navigate_back" => "input keyevent 4".into(),
             "key" => format!(
                 "input keyevent {}",
-                a.get("key")
-                    .and_then(|v| v
-                        .as_str()
-                        .map(String::from)
-                        .or(v.as_i64().map(|i| i.to_string())))
-                    .ok_or("key missing")?
+                a.get("key").and_then(|v| v.as_str().map(String::from).or(v.as_i64().map(|i| i.to_string()))).ok_or("key missing")?
             ),
             "open_app" => {
-                let p = a
-                    .get("app_name")
-                    .or_else(|| a.get("package"))
-                    .and_then(|v| v.as_str())
-                    .ok_or("app_name missing")?;
+                let p = a.get("app_name").or_else(|| a.get("package")).and_then(|v| v.as_str()).ok_or("app_name missing")?;
                 // the package's launcher activity, started like a tap on its icon (monkey does not launch on these images)
-                format!("am start -n \"$(cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {} | tail -1)\"", sh_quote(p))
+                format!(
+                    "am start -n \"$(cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {} | tail -1)\"",
+                    sh_quote(p)
+                )
             }
             "wait" | "sleep" => {
-                let s = a
-                    .get("seconds")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 60.0);
+                let s = a.get("seconds").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.0, 60.0);
                 tokio::time::sleep(secs(s)).await;
                 return Ok(json!({"status": "ok", "slept_s": s}));
             }
             "status" | "answer" => return Ok(json!({"status": "ok", "noop": true})),
-            "shell" => a
-                .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or("command missing")?
-                .to_string(),
+            "shell" => a.get("command").and_then(|v| v.as_str()).ok_or("command missing")?.to_string(),
             k => return Err(format!("unknown android action {k}")),
         };
         let o = self.adb.shell(&cmd, 60.0).await;
         if o.code == -2 || o.code == -1 {
             return Err(format!("adb: {}", o.stderr.trim()));
         }
-        Ok(
-            json!({"status": if o.ok() {"ok"} else {"error"}, "returncode": o.code, "output": o.text(), "error": o.stderr, "seconds": o.seconds}),
-        )
+        Ok(json!({"status": if o.ok() {"ok"} else {"error"}, "returncode": o.code, "output": o.text(), "error": o.stderr, "seconds": o.seconds}))
     }
 
     /// Default probe for the state-hash gate: user-visible state a task can change. `{EXCLUDE}` is replaced with the

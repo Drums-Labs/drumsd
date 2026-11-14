@@ -65,7 +65,9 @@ pub fn orphans(state_dir: &Path, owned: &std::collections::BTreeSet<i32>) -> Vec
         let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
         let Some(cl) = crate::procfs::cmdline(pid) else { continue };
         // a restore child forked by an owned server has the server's argv: not an orphan
-        let ppid = fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|st| st.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|x| x.parse::<i32>().ok()));
+        let ppid = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|st| st.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|x| x.parse::<i32>().ok()));
         if ppid.map(|pp| owned.contains(&pp)).unwrap_or(false) {
             continue;
         }
@@ -92,7 +94,16 @@ pub fn exe_replaced(exe: &Path) -> bool {
 pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path, log_level: u8) -> io::Result<Server> {
     cgroup::pool_init()?;
     if let Some(pid) = adopt(sock, images) {
-        return Ok(Server { socket: sock.into(), pidfile: pidfile_for(sock), pid, images: images.into(), log: PathBuf::new(), ready_s: 0.0, cgroup: PathBuf::new(), memory_current: 0 });
+        return Ok(Server {
+            socket: sock.into(),
+            pidfile: pidfile_for(sock),
+            pid,
+            images: images.into(),
+            log: PathBuf::new(),
+            ready_s: 0.0,
+            cgroup: PathBuf::new(),
+            memory_current: 0,
+        });
     }
     if let Some(stale) = server_pid(sock, images) {
         // still running on the replaced binary: stop it before its socket is taken over
@@ -115,7 +126,15 @@ pub fn start(criu: &Path, sock: &Path, images: &Path, log_dir: &Path, log_level:
     }
     let t0 = Instant::now();
     let mut cmd = Command::new(criu);
-    cmd.args(["restore", "--template-server"]).arg(sock).arg("-D").arg(images).arg("-o").arg(&log).arg(format!("-v{}", log_level.clamp(1, 4))).arg("--pidfile").arg(&pidf);
+    cmd.args(["restore", "--template-server"])
+        .arg(sock)
+        .arg("-D")
+        .arg(images)
+        .arg("-o")
+        .arg(&log)
+        .arg(format!("-v{}", log_level.clamp(1, 4)))
+        .arg("--pidfile")
+        .arg(&pidf);
     cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
     let procs = tcg.join("cgroup.procs");
     unsafe {

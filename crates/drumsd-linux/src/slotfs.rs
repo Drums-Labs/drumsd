@@ -56,14 +56,21 @@ pub fn dev_restore_externals(rows: &[[String; 3]]) -> Vec<String> {
 /// idmapped read-only view of the image the provisioning made (`/run/drums-idmap/...`): it must still be mounted, or the
 /// restore is refused (a host restart removes it; the origin is then re-provisioned). No plan userns: `default_lower`.
 pub fn restore_lower(slot_dir: &Path, default_lower: &Path, is_mounted: impl Fn(&Path) -> bool) -> io::Result<(PathBuf, bool)> {
-    let plan = read_json(&slot_dir.join("service-plan.json"))
-        .map_err(|e| io::Error::other(format!("{}/service-plan.json is missing or unreadable ({e}): the restore cannot tell which lower layer the checkpoint ran on", slot_dir.display())))?;
+    let plan = read_json(&slot_dir.join("service-plan.json")).map_err(|e| {
+        io::Error::other(format!(
+            "{}/service-plan.json is missing or unreadable ({e}): the restore cannot tell which lower layer the checkpoint ran on",
+            slot_dir.display()
+        ))
+    })?;
     if plan.get("userns").map(|u| u.is_null()).unwrap_or(true) {
         return Ok((default_lower.to_path_buf(), false));
     }
     let lower = plan["lower"].as_str().map(PathBuf::from).ok_or_else(|| io::Error::other("the plan of a user-namespace slot names no lower layer"))?;
     if !is_mounted(&lower) {
-        return Err(io::Error::other(format!("the idmapped lower layer {} of this checkpoint is not mounted (host restarted?): re-provision the origin", lower.display())));
+        return Err(io::Error::other(format!(
+            "the idmapped lower layer {} of this checkpoint is not mounted (host restarted?): re-provision the origin",
+            lower.display()
+        )));
     }
     Ok((lower, true))
 }
@@ -166,10 +173,7 @@ pub fn record(sp: &SlotPaths, fields: Value) -> io::Result<Value> {
 /// The tree marker inside the checkpoint's argv: the origin's for a branched slot, else the slot's own.
 pub fn argv_marker(state_dir: &Path, slot: u32) -> String {
     let sp = paths(state_dir, slot);
-    read_json(&sp.slot_json)
-        .ok()
-        .and_then(|v| v["branched_from"]["tree_marker"].as_str().map(String::from))
-        .unwrap_or_else(|| marker_for(state_dir, slot))
+    read_json(&sp.slot_json).ok().and_then(|v| v["branched_from"]["tree_marker"].as_str().map(String::from)).unwrap_or_else(|| marker_for(state_dir, slot))
 }
 
 /// Give `dst` the owner, group and mode bits of `src` (directories of a branch mirror its origin's).
@@ -452,8 +456,14 @@ mod tests {
     #[test]
     fn device_binds_of_a_hardened_checkpoint_are_restored_from_the_host_nodes() {
         let r = |a: &str, b: &str, c: &str| [a.to_string(), b.to_string(), c.to_string()];
-        let rows = vec![r("/", "overlay", "/"), r("/dev", "tmpfs", "/"), r("/dev/null", "devtmpfs", "/null"), r("/dev/tty", "devtmpfs", "/tty"),
-                        r("/dev/zero", "tmpfs", "/zero"), r("/dev/sda", "devtmpfs", "/sda")];
+        let rows = vec![
+            r("/", "overlay", "/"),
+            r("/dev", "tmpfs", "/"),
+            r("/dev/null", "devtmpfs", "/null"),
+            r("/dev/tty", "devtmpfs", "/tty"),
+            r("/dev/zero", "tmpfs", "/zero"),
+            r("/dev/sda", "devtmpfs", "/sda"),
+        ];
         assert_eq!(dev_restore_externals(&rows), vec!["--external", "mnt[drums-dev-null]:/dev/null", "--external", "mnt[drums-dev-tty]:/dev/tty"]);
         assert!(dev_restore_externals(&[r("/", "overlay", "/")]).is_empty());
     }
@@ -522,12 +532,12 @@ mod tests {
     fn restore_lower_follows_the_checkpoint_plan() {
         let d = tempfile::tempdir().unwrap();
         let img = Path::new("/mnt/osworld");
-        assert!(restore_lower(d.path(), img, |_| true).is_err());                      // no plan: refuse, never guess
+        assert!(restore_lower(d.path(), img, |_| true).is_err()); // no plan: refuse, never guess
         fs::write(d.path().join("service-plan.json"), br#"{"lower": "/mnt/osworld"}"#).unwrap();
         assert_eq!(restore_lower(d.path(), img, |_| true).unwrap(), (img.to_path_buf(), false));
         fs::write(d.path().join("service-plan.json"), br#"{"lower": "/run/drums-idmap/ab-100000", "userns": {"base": 100000, "count": 65536}}"#).unwrap();
         assert_eq!(restore_lower(d.path(), img, |_| true).unwrap(), (PathBuf::from("/run/drums-idmap/ab-100000"), true));
-        assert!(restore_lower(d.path(), img, |_| false).is_err());                     // the idmapped view is gone
+        assert!(restore_lower(d.path(), img, |_| false).is_err()); // the idmapped view is gone
     }
 
     fn origin(state: &Path) -> SlotPaths {
@@ -560,7 +570,14 @@ mod tests {
         let po = origin(state);
         let sock = state.join("ps-0.sock");
         let p = create_branch_dir(&BranchSpec {
-            state_dir: state, origin: 0, slot: 5, lower: &lower, image_sha256: "6bf6", source_sha256: "abc", socket: &sock, port: 25005,
+            state_dir: state,
+            origin: 0,
+            slot: 5,
+            lower: &lower,
+            image_sha256: "6bf6",
+            source_sha256: "abc",
+            socket: &sock,
+            port: 25005,
         })
         .unwrap();
         assert_eq!(fs::metadata(p.images.join("pages-1.img")).unwrap().ino(), fs::metadata(po.images.join("pages-1.img")).unwrap().ino());
@@ -576,7 +593,14 @@ mod tests {
         assert_eq!(m["tree_marker"], marker_for(state, 5));
         // a second branch into the same slot is refused
         assert!(create_branch_dir(&BranchSpec {
-            state_dir: state, origin: 0, slot: 5, lower: &lower, image_sha256: "6bf6", source_sha256: "abc", socket: &sock, port: 25005,
+            state_dir: state,
+            origin: 0,
+            slot: 5,
+            lower: &lower,
+            image_sha256: "6bf6",
+            source_sha256: "abc",
+            socket: &sock,
+            port: 25005,
         })
         .is_err());
     }
@@ -589,7 +613,14 @@ mod tests {
         fs::create_dir(&lower).unwrap();
         origin(state);
         let p = create_branch_dir(&BranchSpec {
-            state_dir: state, origin: 0, slot: 3, lower: &lower, image_sha256: "x", source_sha256: "y", socket: Path::new("/s"), port: 1,
+            state_dir: state,
+            origin: 0,
+            slot: 3,
+            lower: &lower,
+            image_sha256: "x",
+            source_sha256: "y",
+            socket: Path::new("/s"),
+            port: 1,
         })
         .unwrap();
         fs::write(p.upper.join("dirty"), b"agent wrote this").unwrap();

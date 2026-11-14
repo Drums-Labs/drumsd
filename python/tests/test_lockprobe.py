@@ -70,6 +70,7 @@ class CriuPhaseTests(unittest.TestCase):
             return rc[1], "", "boom"
         p = lp.Probe(ev, run=run, popen=FakeChild, sleep=lambda s: None, start_ticks=lambda pid: "77")
         p._census = lambda pid, files: {"fdinfo": [], "host_proc_locks": {}}
+        p._criu_identity = lambda: {"path": "criu", "error": "fake runner: no binary"}   # a real criu on PATH must not reach the fake run()
         p._stop = lambda pid: owned_kills.append(pid)
         return p, ev, owned_kills
 
@@ -171,6 +172,7 @@ class ReapTests(unittest.TestCase):
             return 1, "", "stop here"
         p = lp.Probe(ev, run=run, popen=Child, sleep=lambda s: None, start_ticks=lambda pid: "77", cmdline=lambda pid: None)
         p._census = lambda pid, files: {"fdinfo": [], "host_proc_locks": {}}
+        p._criu_identity = lambda: {"path": "criu", "error": "fake runner: no binary"}   # a real criu on PATH must not reach the fake run()
         with self.assertRaises(RuntimeError):
             p.criu_phase()
         self.assertEqual(order, ["dump", "reap", "restore"])
@@ -194,6 +196,7 @@ class CleanupGapTests(unittest.TestCase):
         p = lp.Probe(ev, run=run, popen=popen or FakeChild, sleep=lambda s: None, start_ticks=lambda pid: ticks.get(pid), cmdline=lambda pid: cmds.get(pid),
                      kill=lambda pid, sig: kills.append((pid, sig)), wait_s=wait_s)
         p._census = lambda pid, files: {"fdinfo": [], "host_proc_locks": {}}
+        p._criu_identity = lambda: {"path": "criu", "error": "fake runner: no binary"}   # a real criu on PATH must not reach the fake run()
         return p, ev, kills, ticks, cmds, child_argv
 
     def test_the_child_is_owned_before_the_readiness_wait_and_stopped_when_it_times_out(self):

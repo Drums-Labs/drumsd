@@ -4,7 +4,7 @@
 # The release holds install.sh, install/ (lock, hashed Python lock, bring-up), python/ (the runtime's Python side),
 # git bundles of drumsd (this commit) and drums-criu (the commit pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl, built from the
 # Drums-Labs/drums-python-sdk commit pinned in install/lock.json), the user docs
-# (README.md, QUICKSTART.md, CHANGELOG.md, docs/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
+# (README.md, CHANGELOG.md, docs/ incl. docs/install.md and docs/release-notes/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$(mkdir -p "${1:?out dir}" && cd "$1" && pwd)"
@@ -20,9 +20,9 @@ rm -rf "$R"; mkdir -p "$R/sources"
 # only the committed files of install/ (an untracked file such as a __pycache__ of a test run must not ship)
 git -C "$HERE" archive --format=tar HEAD install python | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
 # the user docs, from the same commit: a customer reads these, not the wheel's source
-git -C "$HERE" archive --format=tar HEAD QUICKSTART.md CHANGELOG.md CHANGES-RC1.md docs examples api/openapi.json | tar -x -C "$R"
+git -C "$HERE" archive --format=tar HEAD CHANGELOG.md docs examples api/openapi.json | tar -x -C "$R"
 mv "$R/docs/README.md" "$R/README.md"
-for f in README.md QUICKSTART.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md CHANGES-RC1.md api/openapi.json; do
+for f in README.md docs/install.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md docs/architecture.md docs/reward-audit.md docs/release-notes/rc1.md api/openapi.json; do
   [ -s "$R/$f" ] || { echo "release is missing $f" >&2; exit 1; }
 done
 echo "$C" > "$R/RELEASE_COMMIT"

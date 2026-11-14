@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (the version install/lock.json pins)
+        run: |
+          TOOLCHAIN=$(python3 -c "import json; print(json.load(open('install/lock.json'))['rust_toolchain'])")
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$TOOLCHAIN"
+          rustc --version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'install/lock.json') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: zstd (the forget tests call tar --zstd)
+        run: sudo apt-get install -y --no-install-recommends zstd
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test (non-root; tests that need root skip themselves)
+        run: cargo test --workspace
+
+  scripts:
+    name: shellcheck and Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck install/*.sh
+        run: shellcheck -S warning install/*.sh
+      - name: install tests
+        run: |
+          python3 -m unittest install/tests/test_build_wheel.py
+          for t in install/tests/test_*.sh; do bash "$t"; done
+      - name: osw tests
+        run: python3 -m unittest discover -s osw/tests
+      - name: python/tests
+        run: |
+          python3 -m pip install --quiet pytest
+          PYTHONPATH=python python3 -m pytest -q python/tests

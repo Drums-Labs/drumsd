@@ -16,17 +16,12 @@ impl Qmp {
         let s = loop {
             match UnixStream::connect(sock).await {
                 Ok(s) => break s,
-                Err(e) if t0.elapsed().as_secs_f64() > timeout_s => {
-                    return Err(format!("qmp {}: {e}", sock.display()))
-                }
+                Err(e) if t0.elapsed().as_secs_f64() > timeout_s => return Err(format!("qmp {}: {e}", sock.display())),
                 Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             }
         };
         let (r, w) = s.into_split();
-        let mut q = Qmp {
-            rd: BufReader::new(r),
-            wr: w,
-        };
+        let mut q = Qmp { rd: BufReader::new(r), wr: w };
         let greet = q.line().await?;
         if greet.get("QMP").is_none() {
             return Err(format!("qmp: unexpected greeting {greet}"));
@@ -36,13 +31,10 @@ impl Qmp {
     }
     async fn line(&mut self) -> Result<Value, String> {
         let mut s = String::new();
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(600),
-            self.rd.read_line(&mut s),
-        )
-        .await
-        .map_err(|_| "qmp: no reply in 600 s".to_string())?
-        .map_err(|e| format!("qmp read: {e}"))?;
+        let n = tokio::time::timeout(std::time::Duration::from_secs(600), self.rd.read_line(&mut s))
+            .await
+            .map_err(|_| "qmp: no reply in 600 s".to_string())?
+            .map_err(|e| format!("qmp read: {e}"))?;
         if n == 0 {
             return Err("qmp: socket closed".into());
         }
@@ -56,10 +48,7 @@ impl Qmp {
         }
         let mut b = serde_json::to_vec(&req).unwrap();
         b.push(b'\n');
-        self.wr
-            .write_all(&b)
-            .await
-            .map_err(|e| format!("qmp write: {e}"))?;
+        self.wr.write_all(&b).await.map_err(|e| format!("qmp write: {e}"))?;
         loop {
             let v = self.line().await?;
             if v.get("event").is_some() {
@@ -69,18 +58,12 @@ impl Qmp {
                 return Ok(r.clone());
             }
             if let Some(e) = v.get("error") {
-                return Err(format!(
-                    "qmp {execute}: {}",
-                    e["desc"].as_str().unwrap_or(&e.to_string())
-                ));
+                return Err(format!("qmp {execute}: {}", e["desc"].as_str().unwrap_or(&e.to_string())));
             }
         }
     }
     pub async fn status(&mut self) -> Result<String, String> {
-        Ok(self.cmd("query-status", json!({})).await?["status"]
-            .as_str()
-            .unwrap_or("")
-            .to_string())
+        Ok(self.cmd("query-status", json!({})).await?["status"].as_str().unwrap_or("").to_string())
     }
     /// Wait for an incoming migration to finish (status leaves "inmigrate").
     pub async fn wait_not_inmigrate(&mut self, timeout_s: f64) -> Result<String, String> {
@@ -91,9 +74,7 @@ impl Qmp {
                 return Ok(s);
             }
             if t0.elapsed().as_secs_f64() > timeout_s {
-                return Err(format!(
-                    "incoming migration not finished after {timeout_s:.0} s"
-                ));
+                return Err(format!("incoming migration not finished after {timeout_s:.0} s"));
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
@@ -105,9 +86,7 @@ impl Qmp {
             let m = self.cmd("query-migrate", json!({})).await?;
             match m["status"].as_str().unwrap_or("") {
                 "completed" => return Ok(m),
-                "failed" | "cancelled" => {
-                    return Err(format!("migration {}: {}", m["status"], m["error-desc"]))
-                }
+                "failed" | "cancelled" => return Err(format!("migration {}: {}", m["status"], m["error-desc"])),
                 _ => {}
             }
             if t0.elapsed().as_secs_f64() > timeout_s {

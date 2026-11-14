@@ -116,9 +116,7 @@ impl SlotState {
     /// Start `op`. Returns the state to journal before the work begins.
     pub fn begin(&self, op: Op) -> Result<SlotState, TransitionError> {
         use SlotState::*;
-        let refuse = |allowed: &'static str| {
-            Err(TransitionError::NotAllowed { state: self.name().to_string(), op: op.as_str(), allowed })
-        };
+        let refuse = |allowed: &'static str| Err(TransitionError::NotAllowed { state: self.name().to_string(), op: op.as_str(), allowed });
         match op {
             // `create` is the first transition of a slot record; it is begun from Down("new") by the manager.
             Op::Create => match self {
