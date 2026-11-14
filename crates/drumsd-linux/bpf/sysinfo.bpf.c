@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 // drumsd procview: sysinfo(2) for tasks of a Drums slot reports the slot's memory, swap and task count.
 //
 // glibc's sysconf(_SC_PHYS_PAGES) / sysconf(_SC_AVPHYS_PAGES) are sysinfo(2), so without this an app in a slot sizes
@@ -16,7 +16,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
 #define PAGE 4096ULL
 #define MAX_DEPTH 10
