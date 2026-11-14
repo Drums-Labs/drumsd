@@ -104,6 +104,12 @@ with DRUMS_CRIU and DRUMS_LAB; the steps are in [CONTRIBUTING.md](CONTRIBUTING.m
 release tarball are QUICKSTART.md, CHANGELOG.md, docs/ (docs/README.md becomes the release's README.md), examples/ and
 api/openapi.json.
 
+## Licence
+
+Apache License 2.0 (`LICENSE`, `NOTICE`); third-party crate licences are in `THIRD_PARTY_LICENSES` (generated with
+cargo-about from `about.toml` and `about.hbs`). drums-criu stays GPL-2.0 and runs as a separate process; the BPF program is
+dual-licensed GPL-2.0-only OR MIT.
+
 ## Build and test
 
 ```
