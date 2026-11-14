@@ -2,7 +2,7 @@
 
 A control plane for Drums desktop slots. It owns each slot's lifecycle (create, reset, capture, branch, destroy,
 quarantine) and replaces the Python/bash glue that drove CRIU around the existing Drums desktop runtime
-(`sharedos_rootfs` in drums-lab). CRIU itself (the drums-criu fork, with its template server) and the desktop setup
+(`python/sharedos_rootfs`, imported from drums-lab f17644b). CRIU itself (the drums-criu fork, with its template server) and the desktop setup
 (`candidate provision/snapshot`, `capture`) are reused, not reimplemented.
 
 ```
@@ -100,7 +100,7 @@ quarantine|release`, `GET /v1/slots/{id}/gates|screenshot|metrics`, `DELETE /v1/
 The Python SDK (`pip install drums-sdk`, import name `drums`) lives in
 [Drums-Labs/drums-python-sdk](https://github.com/Drums-Labs/drums-python-sdk); a release pins its commit in
 install/lock.json and ships it as `sdk/drums*.whl` (`DRUMS_SDK=path/to/drums-python-sdk install/make-release.sh OUT`,
-with DRUMS_CRIU and DRUMS_LAB; the steps are in [CONTRIBUTING.md](CONTRIBUTING.md#releases)). Using it and the one-command install are in QUICKSTART.md. The user docs that ship in the
+with DRUMS_CRIU; the steps are in [CONTRIBUTING.md](CONTRIBUTING.md#releases)). Using it and the one-command install are in QUICKSTART.md. The user docs that ship in the
 release tarball are QUICKSTART.md, CHANGELOG.md, docs/ (docs/README.md becomes the release's README.md), examples/ and
 api/openapi.json.
 

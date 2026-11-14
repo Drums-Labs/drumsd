@@ -80,7 +80,7 @@ summary line.
 
 A release is a self-contained tarball that `install.sh` installs on a fresh host. It is cut from a clean checkout:
 
-1. Update `install/lock.json`: the `drums-criu`, `drums-lab` and `drums-sdk` commits (branch, commit, a `note` that says
+1. Update `install/lock.json`: the `drums-criu` and `drums-sdk` commits (branch, commit, a `note` that says
    what the commit is), the apt snapshot and package versions, the OSWorld image and its sha256, the Rust toolchain.
    The installer verifies every one of these; a wrong hash fails the install, it does not warn.
 2. Add the release to `CHANGELOG.md` (what changed, correctness first, then security, then performance, then pins).
@@ -89,12 +89,12 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
 4. On a machine with the four repositories checked out at (or containing) the pinned commits:
 
    ```
-   DRUMS_CRIU=path/to/drums-criu DRUMS_LAB=path/to/drums-lab DRUMS_SDK=path/to/drums-python-sdk \
+   DRUMS_CRIU=path/to/drums-criu DRUMS_SDK=path/to/drums-python-sdk \
        install/make-release.sh OUT_DIR
    ```
 
    It writes `OUT_DIR/drums-release-<commit12>/` and `drums-release-<commit12>.tar.gz`: `install.sh`, `install/`,
-   git bundles of drumsd, drums-criu and drums-lab at the pinned commits, the SDK wheel built from the pinned SDK commit
+   git bundles of drumsd and drums-criu at the pinned commits, `python/`, the SDK wheel built from the pinned SDK commit
    (`install/build_wheel.py`, standard library only), the user docs (`README.md`, `QUICKSTART.md`, `CHANGELOG.md`,
    `docs/`, `examples/`, `api/openapi.json`), `RELEASE_COMMIT` and `SHA256SUMS`. It prints the tarball's sha256.
 5. Install it on a fresh host of the type `docs/host-requirements.md` names (`sudo ./install.sh`), then run the host

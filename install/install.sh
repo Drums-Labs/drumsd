@@ -130,7 +130,7 @@ fs.pipe-user-pages-soft = 0
 EOF
 sysctl -q --system
 # the hardened slot profile: root (the launcher) may map the slots' host uid/gid ranges (newuidmap enforces this even for
-# root). 1000 ranges of 65536 from 100000: the origin's (drums-lab harden.subid_base) and one of its own for every env and
+# root). 1000 ranges of 65536 from 100000: the origin's (python/sharedos_rootfs harden.subid_base) and one of its own for every env and
 # saved state (drumsd idrange.rs picks only ranges inside this delegation). The older 100-range line is kept if present.
 for f in /etc/subuid /etc/subgid; do
   grep -qx 'root:100000:65536000' "$f" 2>/dev/null || echo 'root:100000:65536000' >> "$f"
@@ -152,7 +152,6 @@ src() { # src NAME COMMIT
   say "$n at $c"
 }
 src drums-criu "$(lk sources.drums-criu.commit)"
-src drums-lab "$(lk sources.drums-lab.commit)"
 src drumsd "$(cat "$REL/RELEASE_COMMIT")"
 OSW_C=$(lk sources.osworld.commit)
 if [ ! -d "$O/src/OSWorld/.git" ]; then git init -q "$O/src/OSWorld"; fi
@@ -246,7 +245,7 @@ wait $IMG_PID || { cat "$D/image.log"; die "image download/verify"; }
 BG=""
 phase image_download_verify $t_img
 t=$(date +%s)
-LAB="$O/src/drums-lab/benchmark"
+LAB="$O/src/drumsd/python"     # the runtime's Python side (python/README.md), from the drumsd checkout made in step 3
 export PYTHONPATH="$LAB" PYTHONDONTWRITEBYTECODE=1
 . "$REL/install/boot.sh"      # drums_attach_image: also cleans a mount record and nbd attachment left by a reboot
 drums_attach_image "$IMG/Ubuntu.qcow2" "$(lk files.osworld_image_qcow2.sha256)" /mnt/osworld "$D/image-mount.json" "$LAB"
@@ -416,7 +415,7 @@ phase config $t
 t=$(date +%s)
 systemctl stop drumsd 2>/dev/null || true
 say "bring-up: booting the image's desktop once and checkpointing it as $(lk runtime.image_id) (about 1 min)"
-with_progress "bring-up" python3 "$O/src/drumsd/install/bringup.py" --criu-dir "$O/criu/bin" --lab "$LAB" --rootfs-config "$E/rootfs-config.json" \
+with_progress "bring-up" python3 "$O/src/drumsd/install/bringup.py" --criu-dir "$O/criu/bin" --py-src "$LAB" --rootfs-config "$E/rootfs-config.json" \
   --drumsd-config "$E/drumsd.json" --image-id "$(lk runtime.image_id)" --record "$D/bringup.json" || die "bring-up of the clean checkpoint"
 phase bringup $t
 

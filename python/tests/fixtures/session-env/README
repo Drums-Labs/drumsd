@@ -1,0 +1,6 @@
+Environments measured on drums-linux (c8i.2xlarge, 2026-10-30, pinned OSWorld image sha256 6bf667a8...d313), one variable per
+line, from /proc/PID/environ:
+  vm-*.env            a KVM guest of the image (qemu q35/kvm, cold boot, gdm3 autologin): gnome-shell and the guest server
+  drums-g1-*.env      a Drums env of the G1 build (drums-lab 0f6b2b6 desktop profile): LANG=C.UTF-8, no login, quoted names
+  drums-fixed-*.env   a Drums env of this branch (fix/session-fidelity): the image's login reproduced
+The values are data for sharedos_rootfs.fidelity's comparison; no test starts a slot or a VM.

@@ -1,5 +1,19 @@
 # Changelog
 
+## oss/dissolve-drums-lab (unreleased; needs a v0.2.2 release and a production install under their own GO)
+
+**drums-lab is dissolved into this repo.** The runtime's Python side (`sharedos_rootfs` and the three packages it
+imports: `sharedos_spike`, `drumsbench`, `osworld_smoke`) now lives in `python/`, copied byte-for-byte from drums-lab
+`f17644b` (the commit `install/lock.json` pinned); the package names are unchanged so every `python3 -m sharedos_rootfs.*`
+invocation and `py_src` import keeps working. `install.sh` no longer fetches a drums-lab bundle: `PYTHONPATH` (and
+`drumsd.json` `py_src`) is `$O/src/drumsd/python`, `install/boot.sh` follows, `install/bringup.py` takes `--py-src`
+(default: its checkout's `python/`; `--lab` still accepted), `install/make-release.sh` ships `python/` instead of
+`sources/drums-lab.bundle` and no longer takes `DRUMS_LAB`, and `install/lock.json` has no `sources.drums-lab` entry.
+Not carried over: `sharedos_rootfs/criu_patch/` (already drums-criu `7b46284`), the lock-restore briefs, `host/install_criu.sh`
+(upstream CRIU; drumsd builds drums-criu) and `oci_reference` (the benchmark's control arm). The drums-lab history is kept
+on `archive/drums-lab-f17644b` of Drums-Labs/drums-research-history. Tests: `python/tests` (285 passed, 2 skipped on
+Ubuntu 24.04; see `python/README.md`).
+
 ## fix/reliability-r2 (unreleased)
 
 **Reliability** (R2-3 Firecracker study 2026-11-12 and T1-fixed 2026-11-09; both at drumsd 12d1cff = v0.2.0)
