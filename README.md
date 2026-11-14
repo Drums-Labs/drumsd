@@ -15,14 +15,14 @@
 <p align="center">
   <a href="https://github.com/Drums-Labs/drumsd/actions/workflows/ci.yml"><img src="https://github.com/Drums-Labs/drumsd/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
-  <a href="https://console.drums.run/docs"><img src="https://img.shields.io/badge/docs-console.drums.run-black.svg" alt="Docs"></a>
+  <a href="https://docs.drums.run"><img src="https://img.shields.io/badge/docs-docs.drums.run-black.svg" alt="Docs"></a>
   <a href="https://pypi.org/project/drums-sdk/"><img src="https://img.shields.io/pypi/v/drums-sdk.svg?label=drums-sdk" alt="drums-sdk on PyPI"></a>
   <img src="https://img.shields.io/badge/rust-1.96-orange.svg" alt="Rust 1.96">
 </p>
 
 <p align="center">
   <a href="https://drums.run">Website</a> ·
-  <a href="https://console.drums.run/docs">Docs</a> ·
+  <a href="https://docs.drums.run">Docs</a> ·
   <a href="https://bench.drums.run">Benchmarks</a> ·
   <a href="https://console.drums.run">Console</a>
 </p>
@@ -127,7 +127,7 @@ with drums.connect() as client:                          # DRUMS_URL, DRUMS_TOKE
 Train only on rewards whose `valid` is `True`: with the default `strict=True`, `verify()` raises `InvalidEpisode`
 instead of returning a reward from an invalid episode. A longer loop that cannot leak environments is
 [examples/rl_loop.py](examples/rl_loop.py); the SDK itself is documented at
-[console.drums.run/docs](https://console.drums.run/docs).
+[docs.drums.run](https://docs.drums.run).
 
 ## How it works
 
