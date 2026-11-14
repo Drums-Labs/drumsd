@@ -55,11 +55,7 @@ jobs:
           for t in install/tests/test_*.sh; do bash "$t"; done
       - name: osw tests
         run: python3 -m unittest discover -s osw/tests
-      - name: python/tests (present once the runtime's Python side is in this repo)
+      - name: python/tests
         run: |
-          if [ -d python/tests ]; then
-            python3 -m pip install --quiet pytest
-            python3 -m pytest -q python/tests
-          else
-            echo "python/tests not in this tree; skipped"
-          fi
+          python3 -m pip install --quiet pytest
+          PYTHONPATH=python python3 -m pytest -q python/tests
