@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 # make-release.sh OUT_DIR  -- on a machine with the four repos: a self-contained release for install.sh.
-#   DRUMS_CRIU=path/to/drums-criu  DRUMS_LAB=path/to/drums-lab  DRUMS_SDK=path/to/drums-python-sdk (Drums-Labs/drums-python-sdk)
-# The release holds install.sh, install/ (lock, hashed Python lock, bring-up), git bundles of drumsd (this commit),
-# drums-criu and drums-lab (the commits pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl, built from the
+#   DRUMS_CRIU=path/to/drums-criu  DRUMS_SDK=path/to/drums-python-sdk (Drums-Labs/drums-python-sdk)
+# The release holds install.sh, install/ (lock, hashed Python lock, bring-up), python/ (the runtime's Python side),
+# git bundles of drumsd (this commit) and drums-criu (the commit pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl, built from the
 # Drums-Labs/drums-python-sdk commit pinned in install/lock.json), the user docs
-# (README.md, QUICKSTART.md, CHANGELOG.md, docs/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
+# (README.md, CHANGELOG.md, docs/ incl. docs/install.md and docs/release-notes/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$(mkdir -p "${1:?out dir}" && cd "$1" && pwd)"
-CRIU="${DRUMS_CRIU:?set DRUMS_CRIU}"; LAB="${DRUMS_LAB:?set DRUMS_LAB}"; SDK="${DRUMS_SDK:?set DRUMS_SDK}"
+CRIU="${DRUMS_CRIU:?set DRUMS_CRIU}"; SDK="${DRUMS_SDK:?set DRUMS_SDK}"
 [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ] || { echo "drumsd tree has uncommitted changes" >&2; exit 1; }
 C=$(git -C "$HERE" rev-parse HEAD)
 lk() { python3 -c "import json; print(json.load(open('$HERE/install/lock.json'))['sources']['$1']['commit'])"; }
-for pair in "$CRIU:$(lk drums-criu)" "$LAB:$(lk drums-lab)" "$SDK:$(lk drums-sdk)"; do
+for pair in "$CRIU:$(lk drums-criu)" "$SDK:$(lk drums-sdk)"; do
   git -C "${pair%%:*}" cat-file -e "${pair#*:}^{commit}" || { echo "${pair%%:*} lacks ${pair#*:}" >&2; exit 1; }
 done
 R="$OUT/drums-release-${C:0:12}"
 rm -rf "$R"; mkdir -p "$R/sources"
 # only the committed files of install/ (an untracked file such as a __pycache__ of a test run must not ship)
-git -C "$HERE" archive --format=tar HEAD install | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
+git -C "$HERE" archive --format=tar HEAD install python | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
 # the user docs, from the same commit: a customer reads these, not the wheel's source
-git -C "$HERE" archive --format=tar HEAD QUICKSTART.md CHANGELOG.md CHANGES-RC1.md docs examples api/openapi.json | tar -x -C "$R"
+git -C "$HERE" archive --format=tar HEAD CHANGELOG.md docs examples api/openapi.json | tar -x -C "$R"
 mv "$R/docs/README.md" "$R/README.md"
-for f in README.md QUICKSTART.md CHANGELOG.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md CHANGES-RC1.md api/openapi.json; do
+for f in README.md docs/install.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md docs/architecture.md docs/reward-audit.md docs/release-notes/rc1.md api/openapi.json; do
   [ -s "$R/$f" ] || { echo "release is missing $f" >&2; exit 1; }
 done
 echo "$C" > "$R/RELEASE_COMMIT"
@@ -33,7 +33,6 @@ bundle() { # bundle REPO NAME COMMIT
 }
 bundle "$HERE" drumsd "$C"
 bundle "$CRIU" drums-criu "$(lk drums-criu)"
-bundle "$LAB" drums-lab "$(lk drums-lab)"
 # the wheel from the pinned SDK commit, not the clone's working tree
 S=$(mktemp -d); trap 'rm -rf "$S"' EXIT
 git -C "$SDK" archive --format=tar "$(lk drums-sdk)" | tar -x -C "$S"
