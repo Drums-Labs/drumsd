@@ -95,7 +95,7 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
 
    It writes `OUT_DIR/drums-release-<commit12>/` and `drums-release-<commit12>.tar.gz`: `install.sh`, `install/`,
    git bundles of drumsd and drums-criu at the pinned commits, `python/`, the SDK wheel built from the pinned SDK commit
-   (`install/build_wheel.py`, standard library only), the user docs (`README.md`, `QUICKSTART.md`, `CHANGELOG.md`,
+   (`install/build_wheel.py`, standard library only), the user docs (`README.md`, `docs/install.md`, `CHANGELOG.md`,
    `docs/`, `examples/`, `api/openapi.json`), `RELEASE_COMMIT` and `SHA256SUMS`. It prints the tarball's sha256.
 5. Install it on a fresh host of the type `docs/host-requirements.md` names (`sudo ./install.sh`), then run the host
    tests above against it. The release is good when `integration_host.py` and `recovery_host.py` exit 0.

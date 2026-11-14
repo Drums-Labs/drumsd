@@ -5,7 +5,7 @@ restore of that checkpoint by forking.  If it dies, every later restore of every
 last thing the OOM killer takes, and its death must be seen and repaired, never hidden.
 
 What this module does (reset-failures 20261030T0218Z, cause F of the capture stress: the OOM killer took the template
-servers first, at 02:27Z on drums-linux, because each was the largest single process on the host):
+servers first, at 02:27Z on the c8i.2xlarge test host, because each was the largest single process on the host):
 
   * Own cgroup per server, outside the slots' pool: `drums.slice/drums-template.scope/<name>` (a delegated scope with a keeper,
     like the pool).  The cgroup's memory.min and memory.low are set to the server's memory after it is built (plus headroom),
