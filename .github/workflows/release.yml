@@ -1,0 +1,139 @@
+# Release: build the self-contained tarball with install/make-release.sh, write its .sha256, sign it with Sigstore
+# keyless (cosign sign-blob, GitHub OIDC; no long-lived key) and attach tarball, .sha256, .sigstore.json and
+# install/verify-release.sh to a DRAFT GitHub release for the tag. A person publishes the draft after the host tests in
+# CONTRIBUTING.md#releases pass on it.
+#
+#   push of a tag v*   build -> sign + verify -> draft release
+#   pull_request       build only (touching this file or install/): proves the release still builds; nothing is
+#                      signed or published and no OIDC token is issued
+#
+# The signature is a public Rekor transparency-log entry naming this repository, the workflow file and the tag.
+# Users verify with install/verify-release.sh (docs/install.md), which pins that identity.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "install/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build release tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      name: ${{ steps.make.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: drumsd
+      - name: pinned commits from install/lock.json
+        id: pins
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          s = json.load(open("drumsd/install/lock.json"))["sources"]
+          print(f"criu={s['drums-criu']['commit']}")
+          print(f"sdk={s['drums-sdk']['commit']}")
+          PY
+      # full history: make-release.sh bundles the pinned drums-criu commit and checks both pins exist
+      - uses: actions/checkout@v4
+        with:
+          repository: Drums-Labs/drums-criu
+          ref: ${{ steps.pins.outputs.criu }}
+          fetch-depth: 0
+          path: drums-criu
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Drums-Labs/drums-python-sdk
+          ref: ${{ steps.pins.outputs.sdk }}
+          fetch-depth: 0
+          path: drums-python-sdk
+          persist-credentials: false
+      - name: the tag names this commit
+        if: github.event_name == 'push'
+        run: |
+          test "$(git -C drumsd rev-parse "${GITHUB_REF}^{commit}")" = "$(git -C drumsd rev-parse HEAD)"
+      - name: make-release.sh
+        id: make
+        env:
+          DRUMS_CRIU: ${{ github.workspace }}/drums-criu
+          DRUMS_SDK: ${{ github.workspace }}/drums-python-sdk
+        run: |
+          set -euo pipefail
+          drumsd/install/make-release.sh "$RUNNER_TEMP/out"
+          cd "$RUNNER_TEMP/out"
+          tb=$(ls drums-release-*.tar.gz)
+          sha256sum "$tb" > "$tb.sha256"
+          cat "$tb.sha256"
+          cp "$GITHUB_WORKSPACE/drumsd/install/verify-release.sh" .
+          bash verify-release.sh "$tb"
+          echo "name=$tb" >> "$GITHUB_OUTPUT"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            ${{ runner.temp }}/out/drums-release-*.tar.gz
+            ${{ runner.temp }}/out/drums-release-*.tar.gz.sha256
+            ${{ runner.temp }}/out/verify-release.sh
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'push' && 30 || 3 }}
+
+  sign-and-publish:
+    name: sign (Sigstore keyless) and draft the GitHub release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # gh release create
+      id-token: write   # the OIDC token cosign exchanges for a short-lived Fulcio certificate
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - uses: sigstore/cosign-installer@v3.7.0
+      - name: sign and verify with the same identity users pin
+        working-directory: out
+        env:
+          TB: ${{ needs.build.outputs.name }}
+        run: |
+          set -euo pipefail
+          sha256sum -c "$TB.sha256"
+          cosign sign-blob --yes --bundle "$TB.sigstore.json" "$TB"
+          bash verify-release.sh --require-signature "$TB"
+      - name: draft release
+        working-directory: out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TB: ${{ needs.build.outputs.name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Release $TAG ($TB)."
+            echo
+            echo "Verify before you unpack (docs/install.md):"
+            echo
+            echo '```'
+            echo "bash verify-release.sh --require-signature $TB"
+            echo '```'
+            echo
+            echo "sha256: $(cut -d' ' -f1 "$TB.sha256")"
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --notes-file notes.md \
+            "$TB" "$TB.sha256" "$TB.sigstore.json" verify-release.sh
