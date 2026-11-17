@@ -24,7 +24,7 @@ built by this repository's `.github/workflows/release.yml` on a `v*` tag, with n
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x.
 
 ```bash
-V=v0.2.1   # the release you want
+V=vX.Y.Z   # the release you want (signed releases start after v0.2.1)
 gh release download "$V" -R Drums-Labs/drumsd   # or download the four files from the releases page
 bash verify-release.sh --require-signature drums-release-*.tar.gz
 ```
