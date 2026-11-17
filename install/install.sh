@@ -3,13 +3,15 @@
 # image as a clean checkpoint, OSWorld's checkers, and an API token.
 #
 #   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N] [--procview]
-#                     [--trusted-unhardened]
+#                     [--trusted-unhardened] [--require-signature]
 #
 # Envs run in the HARDENED slot profile by default (docs/security.md): each desktop in its own user namespace (root in it
 # is an unprivileged host uid), no_new_privs, a capability bounding set, a seccomp blocklist and a metadata firewall.
 # --trusted-unhardened turns that off, for hosts that run only trusted code: root in an env is then root on the host.
 # --procview (opt-in) gives each env its own memory/CPU view (/proc files and sysinfo(2)).
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
+# When the release tarball (with its .sha256 and .sigstore.json) sits next to this directory, it is checked first with
+# install/verify-release.sh; --require-signature refuses unless that tarball's Sigstore signature verifies.
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
 # hashed Python lock) and checked before use; the first mismatch stops the install.
 # The API is bound to 127.0.0.1 unless --remote is given (--remote serves plain HTTP with a bearer token on every
@@ -21,7 +23,7 @@ set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$REL/install/lock.json"
-REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=0; HARDEN=1
+REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=0; HARDEN=1; REQSIG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=1; shift;;
@@ -32,7 +34,8 @@ while [ $# -gt 0 ]; do
     --procview) PROCVIEW=1; shift;;          # opt-in: the per-env memory/CPU view (FUSE + BPF on sysinfo(2)); see docs/procview.md
     --no-procview) PROCVIEW=0; shift;;       # the default since rc1: envs read the host's memory and CPU files
     --trusted-unhardened) HARDEN=0; shift;;  # trusted-only hosts: no user namespace, seccomp, cap drop or metadata firewall
-    -h|--help) sed -n 2,21p "$0"; exit 0;;
+    --require-signature) REQSIG=1; shift;;   # refuse unless the tarball next to this dir has a verifying Sigstore signature
+    -h|--help) sed -n 2,23p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
@@ -83,6 +86,14 @@ FREE_GIB=$(( $(df --output=avail -B1 / | tail -1) / 1073741824 ))
 MEM_GIB=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1048576 ))
 [ "$MEM_GIB" -ge "$(lk host.min_mem_gib)" ] || die "need $(lk host.min_mem_gib) GiB RAM, have $MEM_GIB"
 (cd "$REL" && sha256sum -c --quiet SHA256SUMS) || die "release files do not match SHA256SUMS"
+# the tarball this directory came from, when it is still next to it: checksum (and signature) before anything runs
+TARBALL="$(dirname "$REL")/$(basename "$REL").tar.gz"
+if [ -f "$TARBALL" ]; then
+  VR=(bash "$REL/install/verify-release.sh"); [ "$REQSIG" = 0 ] || VR+=(--require-signature)
+  "${VR[@]}" "$TARBALL" || die "release tarball $(basename "$TARBALL") did not verify (install/verify-release.sh)"
+elif [ "$REQSIG" = 1 ]; then
+  die "--require-signature: put $(basename "$TARBALL") with its .sha256 and .sigstore.json next to $(basename "$REL")/"
+fi
 say "host $(hostname) kernel $(uname -r) (tested: $(lk host.tested_kernel)), ${MEM_GIB} GiB RAM, ${FREE_GIB} GiB free"
 say "installing Drums $(cut -c1-12 "$REL/RELEASE_COMMIT"): 7-15 min. Phases: apt, kernel, sources, image (in the background), criu, drumsd, osworld, image attach, config, bring-up"
 phase preflight $t
