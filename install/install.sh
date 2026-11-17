@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
     --no-procview) PROCVIEW=0; shift;;       # the default since rc1: envs read the host's memory and CPU files
     --trusted-unhardened) HARDEN=0; shift;;  # trusted-only hosts: no user namespace, seccomp, cap drop or metadata firewall
     --require-signature) REQSIG=1; shift;;   # refuse unless the tarball next to this dir has a verifying Sigstore signature
-    -h|--help) sed -n 2,23p "$0"; exit 0;;
+    -h|--help) sed -n 2,21p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
