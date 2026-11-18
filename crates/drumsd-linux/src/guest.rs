@@ -12,6 +12,7 @@ pub struct Guest {
     pub timeout: Duration,
 }
 
+#[derive(Debug)]
 pub struct Response {
     pub status: u16,
     pub body: Vec<u8>,
@@ -44,6 +45,19 @@ pub fn parse_response(raw: &[u8]) -> io::Result<Response> {
         body.truncate(cl);
     }
     Ok(Response { status, body })
+}
+
+/// Percent-encoding for a form field: unreserved characters stay, everything else is %XX (space too, never `+`).
+pub fn form_escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            o.push(b as char);
+        } else {
+            o.push_str(&format!("%{b:02X}"));
+        }
+    }
+    o
 }
 
 impl Guest {
@@ -80,6 +94,42 @@ impl Guest {
         let mut raw = vec![];
         s.read_to_end(&mut raw)?;
         parse_response(&raw)
+    }
+
+    /// One request with a raw body and a cap on the reply: a reply larger than `max_reply` bytes (head and body) is an
+    /// error, read no further (the verifier broker reads files of any size the agent made).
+    pub fn request_raw(&self, method: &str, path: &str, content_type: &str, payload: &[u8], max_reply: u64) -> io::Result<Response> {
+        let r = (|| {
+            let mut s = TcpStream::connect_timeout(&self.addr, self.timeout)?;
+            s.set_read_timeout(Some(self.timeout))?;
+            s.set_write_timeout(Some(self.timeout))?;
+            s.set_nodelay(true)?;
+            let head = format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nAccept: */*\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+                payload.len()
+            );
+            let mut buf = head.into_bytes();
+            buf.extend_from_slice(payload);
+            s.write_all(&buf)?;
+            let mut raw = vec![];
+            (&mut s).take(max_reply.saturating_add(1)).read_to_end(&mut raw)?;
+            if raw.len() as u64 > max_reply {
+                return Err(io::Error::other(format!("guest reply to {method} {path} is larger than {max_reply} bytes")));
+            }
+            parse_response(&raw)
+        })();
+        r.map_err(|e| match e.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                io::Error::new(io::ErrorKind::TimedOut, format!("guest did not answer {method} {path} within {:.1} s ({e})", self.timeout.as_secs_f64()))
+            }
+            _ => e,
+        })
+    }
+
+    /// POST an `application/x-www-form-urlencoded` body (the guest's `/file` route reads `file_path` from a form).
+    pub fn post_form(&self, path: &str, fields: &[(&str, &str)], max_reply: u64) -> io::Result<Response> {
+        let body = fields.iter().map(|(k, v)| format!("{}={}", form_escape(k), form_escape(v))).collect::<Vec<_>>().join("&");
+        self.request_raw("POST", path, "application/x-www-form-urlencoded", body.as_bytes(), max_reply)
     }
 
     pub fn platform(&self) -> io::Result<String> {
@@ -171,6 +221,17 @@ mod tests {
         assert!(e.to_string().contains("did not answer POST /execute within 0.3 s"), "{e}");
         assert!(t0.elapsed() < Duration::from_secs(2));
         held.join().unwrap();
+    }
+
+    #[test]
+    fn form_bodies_are_percent_encoded_and_replies_are_capped() {
+        assert_eq!(form_escape("/home/user/a b&c=d+é.txt"), "/home/user/a%20b%26c%3Dd%2B%C3%A9.txt");
+        let p = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nbytes");
+        let r = Guest::new(p, Duration::from_secs(2)).post_form("/file", &[("file_path", "/x y")], 1 << 20).unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"bytes"[..]));
+        let p = serve_once(b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nbytes");
+        let e = Guest::new(p, Duration::from_secs(2)).post_form("/file", &[("file_path", "/x")], 10).unwrap_err();
+        assert!(e.to_string().contains("larger than 10 bytes"), "{e}");
     }
 
     #[test]
