@@ -25,7 +25,7 @@ jobs:
           rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt,clippy
           rustup default "$TOOLCHAIN"
           rustc --version
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -52,7 +52,7 @@ jobs:
           TOOLCHAIN=$(python3 -c "import json; print(json.load(open('install/lock.json'))['rust_toolchain'])")
           rustup toolchain install "$TOOLCHAIN" --profile minimal
           rustup default "$TOOLCHAIN"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
