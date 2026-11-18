@@ -520,6 +520,7 @@ impl Manager {
             None
         };
         metrics.counter("drumsd_app_crashes_total", "Processes of envs that died of a crash signal, by signal");
+        metrics.counter("drumsd_step_arg_over_limit_total", "Actions and tasks with a command string over the step-argument limit, by whether it was enforced");
         let image_user = match read_image_user(&cfg.py_config) {
             Ok(u) => Some(u),
             Err(e) => {
@@ -1038,6 +1039,7 @@ impl Manager {
                 return Err(ApiError::new(422, format!("task {id} is unsupported in this execution profile: {why}"))
                     .with(json!({"code": "task_unsupported", "task_id": id, "reason": why})));
             }
+            self.step_arg_limit(drumsd_core::limits::check_task_steps(t), t["id"].as_str().unwrap_or("-"))?;
         }
         let (task, setup_on_restore) = match task {
             Some(t) => {
@@ -1886,6 +1888,7 @@ impl Manager {
     }
 
     pub async fn step(self: &Arc<Self>, id: &str, action: Value, screenshot: bool) -> R<Value> {
+        self.step_arg_limit(drumsd_core::limits::check_action(&action, "action"), id)?;
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         self.took_input(&slot);
@@ -3039,6 +3042,7 @@ impl Manager {
         if osworld_task_id(&task).is_none() {
             return Err(ApiError::new(400, "task: not an OSWorld task (needs an id of [A-Za-z0-9_-], a config list and an evaluator object)"));
         }
+        self.step_arg_limit(drumsd_core::limits::check_task_steps(&task), id)?;
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         begin_op(&slot, Op::Step)?;
@@ -3071,6 +3075,18 @@ impl Manager {
                 Err(ApiError::new(422, format!("task setup failed on {}: {e}; slot quarantined ({})", r.id, r.state.name())))
             }
         }
+    }
+
+    /// The step-argument limit (drumsd_core::limits): a 400 naming the field, the limit and the length when
+    /// `enforce_step_arg_limit` is on; otherwise the over-limit request is recorded and goes ahead (today's behaviour).
+    fn step_arg_limit(&self, r: Result<(), drumsd_core::limits::LimitError>, subject: &str) -> R<()> {
+        let Err(e) = r else { return Ok(()) };
+        self.metrics.inc("drumsd_step_arg_over_limit_total", &[("enforced", if self.cfg.enforce_step_arg_limit { "true" } else { "false" })], 1.0);
+        self.event(json!({"step_arg_over_limit": {"subject": subject, "field": e.field, "limit": e.limit, "length": e.length, "enforced": self.cfg.enforce_step_arg_limit}}));
+        if self.cfg.enforce_step_arg_limit {
+            return Err(ApiError::new(400, e.message()).with(e.body()));
+        }
+        Ok(())
     }
 
     /// Run the task's checker on the slot's current state. The reward always carries the episode's gate verdict; a

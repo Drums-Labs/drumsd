@@ -153,6 +153,12 @@ pub struct Config {
     pub allow_remote: bool,
     /// OSWorld task setup and checkers (the pinned OSWorld checkout run by an unprivileged helper).
     pub osw: Option<OswConfig>,
+    /// Refuse (400 `step_arg_too_long`) an action, or a task whose setup or postconfig steps, carry a command string
+    /// longer than the step-argument limit (drumsd_core::limits: 8192 characters per string, 256 argv items, 16384
+    /// characters of pyautogui code; the gateway's numbers). Off (default): today's behaviour, and an over-limit task
+    /// is only recorded (event `step_arg_over_limit`), so an operator sees which clients would be refused.
+    #[serde(default)]
+    pub enforce_step_arg_limit: bool,
     /// Host price in USD per hour (on-demand or what the operator pays), for the cost metrics. 0 = cost not reported.
     #[serde(default)]
     pub host_usd_per_hour: f64,
