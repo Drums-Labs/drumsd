@@ -8,6 +8,7 @@
 //! * [`quiesce`]: capture readiness (no task leaving, a stable tree for a window, the dump matches it).
 //! * [`admission`]: refuse creates, captures and forks that would push the host into memory thrash.
 //! * [`lease`]: env and saved-state leases (idle timeout, time to live) and when one has run out.
+//! * [`limits`]: the step-argument limit, one for actions and task setup steps (A-20, A-21).
 //! * [`usage`]: per-slot and daemon ledgers (op latency, episodes by verdict, failures/retries by cause, rewards) and cost.
 //! * [`locks`], [`mounts`], [`net`], [`statehash`], [`alive`]: pure ports of the Python runtime's checks
 //!   (sharedos_rootfs/locks.py, candidate.py, iarun/checks.py, fcbench.py) so both paths judge a restore the same way.
@@ -17,6 +18,7 @@ pub mod alive;
 pub mod gates;
 pub mod journal;
 pub mod lease;
+pub mod limits;
 pub mod locks;
 pub mod metrics;
 pub mod mounts;
