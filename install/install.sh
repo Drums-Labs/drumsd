@@ -3,13 +3,17 @@
 # image as a clean checkpoint, OSWorld's checkers, and an API token.
 #
 #   sudo ./install.sh [--remote] [--port 7070] [--host-usd-per-hour X] [--state-tmpfs-gib N] [--swap-mib N] [--procview]
-#                     [--trusted-unhardened]
+#                     [--trusted-unhardened] [--require-signature]
 #
 # Envs run in the HARDENED slot profile by default (docs/security.md): each desktop in its own user namespace (root in it
 # is an unprivileged host uid), no_new_privs, a capability bounding set, a seccomp blocklist and a metadata firewall.
 # --trusted-unhardened turns that off, for hosts that run only trusted code: root in an env is then root on the host.
 # --procview (opt-in) gives each env its own memory/CPU view (/proc files and sysinfo(2)).
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
+# When the release tarball (with its .sha256 and .sigstore.json) sits next to this directory, it is checked first with
+# install/verify-release.sh; --require-signature also refuses unless its Sigstore signature verifies. Both checks run
+# code from this same tarball, so they catch corruption, not tampering: proof of origin is the separately downloaded
+# verify-release.sh, run before you unpack (docs/install.md).
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
 # hashed Python lock) and checked before use; the first mismatch stops the install.
 # The API is bound to 127.0.0.1 unless --remote is given (--remote serves plain HTTP with a bearer token on every
@@ -21,7 +25,7 @@ set -euo pipefail
 
 REL="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$REL/install/lock.json"
-REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=0; HARDEN=1
+REMOTE=0; PORT=7070; PRICE=""; TMPFS_GIB=""; SWAP_MIB=0; PROCVIEW=0; HARDEN=1; REQSIG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=1; shift;;
@@ -32,7 +36,8 @@ while [ $# -gt 0 ]; do
     --procview) PROCVIEW=1; shift;;          # opt-in: the per-env memory/CPU view (FUSE + BPF on sysinfo(2)); see docs/procview.md
     --no-procview) PROCVIEW=0; shift;;       # the default since rc1: envs read the host's memory and CPU files
     --trusted-unhardened) HARDEN=0; shift;;  # trusted-only hosts: no user namespace, seccomp, cap drop or metadata firewall
-    -h|--help) sed -n 2,21p "$0"; exit 0;;
+    --require-signature) REQSIG=1; shift;;   # also check the Sigstore bundle (corruption check: the checker comes from this tarball)
+    -h|--help) sed -n 2,23p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
@@ -83,6 +88,14 @@ FREE_GIB=$(( $(df --output=avail -B1 / | tail -1) / 1073741824 ))
 MEM_GIB=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1048576 ))
 [ "$MEM_GIB" -ge "$(lk host.min_mem_gib)" ] || die "need $(lk host.min_mem_gib) GiB RAM, have $MEM_GIB"
 (cd "$REL" && sha256sum -c --quiet SHA256SUMS) || die "release files do not match SHA256SUMS"
+# the tarball this directory came from, when it is still next to it: checksum (and signature) before anything runs
+TARBALL="$(dirname "$REL")/$(basename "$REL").tar.gz"
+if [ -f "$TARBALL" ]; then
+  VR=(bash "$REL/install/verify-release.sh"); [ "$REQSIG" = 0 ] || VR+=(--require-signature)
+  "${VR[@]}" "$TARBALL" || die "release tarball $(basename "$TARBALL") did not verify (install/verify-release.sh): do not install it"
+elif [ "$REQSIG" = 1 ]; then
+  die "--require-signature: put $(basename "$TARBALL") with its .sha256 and .sigstore.json next to $(basename "$REL")/"
+fi
 say "host $(hostname) kernel $(uname -r) (tested: $(lk host.tested_kernel)), ${MEM_GIB} GiB RAM, ${FREE_GIB} GiB free"
 say "installing Drums $(cut -c1-12 "$REL/RELEASE_COMMIT"): 7-15 min. Phases: apt, kernel, sources, image (in the background), criu, drumsd, osworld, image attach, config, bring-up"
 phase preflight $t
@@ -218,6 +231,22 @@ install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
 # lab verifiers (docs/custom-tasks.md): root-owned, so a task can name one but never supply its code
 install -d -m 0755 -o root -g root "$E/verifiers"
+# the release's lab verifiers (docs/design/verifier-sandbox.md, A-13): checked against the lock's sha256, installed by
+# name (tasks that name "drums_t6" work as before) and seeded into the verifier store by hash (tasks that name its
+# verifier_sha256 run it in the sandbox), so a fresh host scores the factory's tasks out of the box
+install -d -m 0755 -o root -g root /var/lib/drums/verifiers
+VNAMES=$(python3 -c "import json; print(' '.join(k for k, v in json.load(open('$LOCK'))['verifiers'].items() if isinstance(v, dict)))")
+for V in $VNAMES; do
+  VSRC="$O/src/drumsd/$(lk "verifiers.$V.path")"; VSHA=$(lk "verifiers.$V.sha256")
+  echo "$VSHA  $VSRC" | sha256sum -c --quiet - || die "lab verifier $V: sha256 does not match install/lock.json"
+  install -m 0644 -o root -g root "$VSRC" "$E/verifiers/$V.py"
+  install -m 0644 -o root -g root "$VSRC" "/var/lib/drums/verifiers/$VSHA.py"
+  printf '{"sha256": "%s", "bytes": %s, "name": "%s", "source": "bundled", "owner": null, "created_epoch": %s}\n' \
+    "$VSHA" "$(stat -c %s "$VSRC")" "$V" "$(date +%s)" > "/var/lib/drums/verifiers/$VSHA.json"
+  chmod 0644 "/var/lib/drums/verifiers/$VSHA.json"
+done
+# the identity sandboxed checkers run as: no home, no shell, no group of anyone else's
+id drums-verify >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin drums-verify
 # task assets (docs/custom-tasks.md): the only host directory a task's upload_file step can read
 install -d -m 0755 -o root -g root /var/lib/drums/assets
 # the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
@@ -284,6 +313,7 @@ RESTORES=$(( $(nproc) * 3 / 8 )); [ "$RESTORES" -ge 4 ] || RESTORES=4
 LISTEN="127.0.0.1:$PORT"; ALLOW=false
 [ "$REMOTE" = 1 ] && { LISTEN="0.0.0.0:$PORT"; ALLOW=true; }
 OSW_UID=$(id -u drums-osw); OSW_GID=$(id -g drums-osw)
+VER_UID=$(id -u drums-verify); VER_GID=$(id -g drums-verify)
 cat > "$E/drumsd.json" <<EOF
 {"listen": "$LISTEN", "allow_remote": $ALLOW, "token_file": "$E/token",
  "state_dir": "$D/state", "journal_dir": "$D/journal", "lower": "/mnt/osworld", "image_sha256": "$IMGSHA",
@@ -293,7 +323,8 @@ cat > "$E/drumsd.json" <<EOF
  "natural_exits": $(lk runtime.natural_exits), "alive_after_s": 5.0, "max_attempts": 3, "warm_upper": true,
  "host_usd_per_hour": $PRICE,
  "osw": {"python": "$O/osw-venv/bin/python", "helper": "$O/osw/drums_osw.py", "osworld_dir": "$O/src/OSWorld",
-         "cache_dir": "$D/osw-cache", "uid": $OSW_UID, "gid": $OSW_GID}}
+         "cache_dir": "$D/osw-cache", "uid": $OSW_UID, "gid": $OSW_GID},
+ "verifiers": {"store_dir": "/var/lib/drums/verifiers", "uid": $VER_UID, "gid": $VER_GID}}
 EOF
 # Per-env memory/CPU view: apps in an env see the env's own memory, swap and CPU count (/proc/meminfo, cpuinfo, stat,
 # swaps, /sys/devices/system/cpu/{online,possible,present} and sysinfo(2)), not the host's. Its FUSE connection is kept

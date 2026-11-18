@@ -99,7 +99,23 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
    `docs/`, `examples/`, `api/openapi.json`), `RELEASE_COMMIT` and `SHA256SUMS`. It prints the tarball's sha256.
 5. Install it on a fresh host of the type `docs/host-requirements.md` names (`sudo ./install.sh`), then run the host
    tests above against it. The release is good when `integration_host.py` and `recovery_host.py` exit 0.
-6. Tag the drumsd commit (`vX.Y.Z`) and tag the pinned drums-criu and SDK commits with the same version.
+6. Tag the drumsd commit (`vX.Y.Z`) and tag the pinned drums-criu and SDK commits with the same version. Pushing the
+   drumsd tag runs `.github/workflows/release.yml`: it builds the tarball again with `make-release.sh` on a GitHub
+   runner from the pinned commits, writes `drums-release-<commit12>.tar.gz.sha256`, signs the tarball with Sigstore
+   keyless (`cosign sign-blob --bundle`, the job's GitHub OIDC identity; no signing key exists), checks the signature
+   with `install/verify-release.sh --require-signature`, and creates a **draft** release with the tarball, the
+   `.sha256`, the `.sigstore.json` and `verify-release.sh`. The signature is a public Rekor entry naming the repository,
+   the workflow and the tag.
+7. Download the draft's four files and check them the way a user does (`docs/install.md` section 2):
+
+   ```
+   bash verify-release.sh --require-signature drums-release-<commit12>.tar.gz
+   [verify-release] sha256 ok: <64 hex characters>
+   [verify-release] signature ok: signed by Drums-Labs/drumsd .github/workflows/release.yml on a v* tag (https://token.actions.githubusercontent.com)
+   ```
+
+   Then publish the draft. A pull request that touches `install/` or the release workflow runs the build part of the
+   same workflow (no signing, no release), so a broken `make-release.sh` shows up before the tag.
 
 ## Pull requests
 

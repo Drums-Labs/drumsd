@@ -18,11 +18,49 @@ A release is one tarball, `drums-release-<commit>.tar.gz`, from the
 [releases page](https://github.com/Drums-Labs/drumsd/releases) (or built from a tagged checkout with
 `install/make-release.sh`, see [CONTRIBUTING.md](../CONTRIBUTING.md#releases)).
 
+Download four files from the same release: the tarball, its `.sha256`, its `.sigstore.json` (the signature) and
+`verify-release.sh`. Check them before you unpack anything. The signature is Sigstore keyless: it proves the tarball was
+built by this repository's `.github/workflows/release.yml` on a `v*` tag, with no key for anyone to lose. It needs
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x.
+
+```bash
+V=vX.Y.Z   # the release you want (signed releases start after v0.2.1)
+gh release download "$V" -R Drums-Labs/drumsd   # or download the four files from the releases page
+bash verify-release.sh --require-signature drums-release-*.tar.gz
+```
+
+Expected output (the hash is the release's own):
+
+```
+[verify-release] sha256 ok: <64 hex characters>
+[verify-release] signature ok: signed by Drums-Labs/drumsd .github/workflows/release.yml on a v* tag (https://token.actions.githubusercontent.com)
+```
+
+Anything else ends in `[verify-release] REFUSED: ...` and exit status 1: do not install that tarball. Without cosign,
+leave out `--require-signature`: the checksum is still checked, and a warning says the signature was not. The
+same check by hand:
+
+```bash
+sha256sum -c drums-release-*.tar.gz.sha256
+cosign verify-blob --bundle drums-release-*.tar.gz.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/Drums-Labs/drumsd/\.github/workflows/release\.yml@refs/tags/v[0-9][^/]*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com drums-release-*.tar.gz
+```
+
+Then install:
+
 ```bash
 tar xzf drums-release-*.tar.gz
 cd drums-release-*/
 sudo ./install.sh
 ```
+
+`install.sh` checks every file of the release against its `SHA256SUMS`, and runs `install/verify-release.sh` again
+on the tarball when it is still next to the unpacked directory; `sudo ./install.sh --require-signature` also refuses
+unless the signature bundle verifies. Those checks run code that came in the same tarball, so they catch a corrupted
+or incomplete download, not a tampered one: a tampered tarball can carry a tampered checker. Proof of origin is the
+`verify-release.sh` you downloaded separately, run as above before you unpack. Releases before the signed release workflow (v0.2.1 and earlier) have
+a `.sha256` but no `.sigstore.json`.
 
 It takes 7 to 15 minutes and prints a progress line every 30 s.
 
@@ -49,6 +87,7 @@ network. Every option:
 | `--procview` | the opt-in per-env memory and CPU view ([procview.md](procview.md)) |
 | `--no-procview` | the default; turns the view off again on a host that had it |
 | `--trusted-unhardened` | hardened profile off: trusted code only ([security.md](security.md)) |
+| `--require-signature` | also check the Sigstore bundle of the tarball next to the release directory (detects corruption; proof of origin is the separately downloaded `verify-release.sh`, run first) |
 
 Envs run in the **hardened profile** by default. Each desktop gets its own user namespace, so root in it is an
 unprivileged host uid. It also gets no_new_privs, a capability bounding set, seccomp and a metadata firewall. The desktop

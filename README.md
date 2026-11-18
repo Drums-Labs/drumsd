@@ -214,6 +214,7 @@ fields, from [`crates/drumsd/src/config.rs`](crates/drumsd/src/config.rs). "Requ
 | `criu_log_level` | `3` | CRIU log level for dumps, restores and template servers (3 or 4) |
 | `crash_watch` | `true` | the `no_app_crash` gate: watch kernel process events for crash-signal exits; drumsd refuses to start if it cannot open the watch |
 | `osw` | `null` | OSWorld task setup and checkers (block below); without it, tasks and `verify` are unavailable |
+| `enforce_step_arg_limit` | `false` | refuse (400 `step_arg_too_long`) an action or task over the step-argument limit (see API); off, it is recorded only |
 | `host_usd_per_hour` | `0.0` | the host's price, for the cost metrics; 0 = cost not reported |
 | `quiesce` | block below | capture readiness |
 | `admission` | block below | admission control for create, capture and fork |
@@ -281,11 +282,35 @@ fields, from [`crates/drumsd/src/config.rs`](crates/drumsd/src/config.rs). "Requ
 | `verifiers_dir` | `null` | lab verifiers (`NAME.py`, root-owned); default `/etc/drums/verifiers` ([docs/custom-tasks.md](docs/custom-tasks.md)) |
 | `assets_dir` | `null` | the only host directory a task's `upload_file` step may read; default `/var/lib/drums/assets` |
 
+`verifiers` (uploaded lab verifiers and the sandbox they run in; [docs/design/verifier-sandbox.md](docs/design/verifier-sandbox.md)), every field optional:
+
+| field | default | meaning |
+|---|---|---|
+| `store_dir` | `/var/lib/drums/verifiers` | uploaded verifiers, one `<sha256>.py` each (root-owned) |
+| `max_bytes` | `1048576` | largest upload |
+| `uid`, `gid` | `65534` | the unprivileged identity a checker runs as (the installer creates `drums-verify`); 0 is refused |
+| `python` | `osw.python` | the checker's Python (the checker venv) |
+| `ro_paths` | `/usr`, `/lib*`, `/bin`, `/sbin`, `/etc/ld.so.cache`, `/etc/localtime`, `/etc/alternatives` + the venv | what a checker sees, read-only |
+| `cgroup_parent` | `<slot pool scope>/drums-verify` | holds one cgroup per checker call |
+| `run_dir` | `/run/drums/verifiers` | where each call's (empty) root directory is made |
+| `sandbox_named` | `false` | also run verifiers named by file (`/etc/drums/verifiers`) in the sandbox |
+| `budget` | wall 90 s (task `deadline_s` up to `max_wall_s` 600), `cpu_s` 60, `cpus` 1, `memory_mib` 1024, `pids` 64, `tmp_mib` 256, `read_bytes` 256 MiB, `requests` 10000, `verdict_bytes` 1 MiB | per checker call |
+
 ## API
 
 Every route except `GET /healthz` needs `Authorization: Bearer <token>`. The full schema is
 [`api/openapi.json`](api/openapi.json), also served at `GET /openapi.json`. The SDK's env, saved state, fork and save
 are this API's slot, checkpoint, branch and capture.
+
+**Step-argument limit.** One limit for an action (`POST /v1/slots/{id}/step`) and for a task's setup and postconfig
+steps (`config`, `evaluator.postconfig`): a command string (a `command` given as a string, or one element of a
+`command` list) is at most **8,192 characters**, a `command` list at most **256** elements, and pyautogui code at most
+**16,384 characters**. These are the Drums gateway's numbers (Drums Cloud refuses an action over them today). Write a
+larger file in chunks (the task factory writes 8,000 base64 characters per step). With `enforce_step_arg_limit`,
+drumsd refuses an over-limit action or task with 400 and a body that names it:
+`{"error": "action.command.5 is 60000 characters; the step-argument limit is 8192 characters ...", "code":
+"step_arg_too_long", "field": "action.command.5", "limit": 8192, "length": 60000, "unit": "characters"}`. Without it
+(the default, today's behaviour) the request goes ahead and the event log records `step_arg_over_limit`.
 
 | route | what it does |
 |---|---|
@@ -311,7 +336,10 @@ are this API's slot, checkpoint, branch and capture.
 | `GET /v1/slots/{id}/metrics` | per-slot metrics |
 | `POST /v1/slots/{id}/quarantine` · `POST /v1/slots/{id}/release` | take an env out of service with a reason · release it (then reset) |
 | `GET /v1/tasks` · `GET /v1/tasks/{id}` | the OSWorld tasks the host knows, with their supported flag · one task |
+| `GET /v1/verifiers` · `POST /v1/verifiers` | the uploaded lab verifiers · upload one (body: the Python source, `?name=` optional): stored by sha256 |
+| `GET /v1/verifiers/{sha256}` · `DELETE /v1/verifiers/{sha256}` | one verifier's record · remove it |
 | `POST /provision/{token}/setup/execute` | internal: one task setup step that needs root, run by drumsd as trusted provisioning, never by the agent |
+| `POST /provision/{token}/verifier` | internal: one sandboxed checker call for the OSWorld helper of a running verify |
 
 ## Development
 

@@ -107,6 +107,37 @@ def expense_submitted(ctx, amount_cents):
 - **Validity is unchanged.** The reward carries the episode's gates (docs/validity.md). A quarantined env is not scored.
 - A task's evaluator may add OSWorld `postconfig` steps; they run before the function.
 
+## Your own verifier, uploaded (sandboxed)
+
+A client cannot install files as root on a Drums Cloud host, and does not need to: upload the verifier and name it by
+its hash. drumsd stores it by sha256 and runs every call in the verifier sandbox (docs/design/verifier-sandbox.md):
+a fresh process with no network, no host files besides the Python runtime, an unprivileged uid and budgets.
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" --data-binary @acme.py "http://127.0.0.1:7070/v1/verifiers?name=acme"
+# {"sha256": "9f2c...", "bytes": 912, "name": "acme", "source": "upload", "created": true, ...}
+```
+
+```json
+"evaluator": {"func": "drums_verifier", "verifier_sha256": "9f2c...", "function": "expense_submitted",
+              "options": {"amount_cents": 8450}}
+```
+
+- The code is the same as a named verifier's: `ctx.read_file`, `ctx.run`, `ctx.options`, `ctx.task`, `ctx.workdir`
+  (`/tmp/work`), and the same return values. It may import the standard library and the checker venv's packages.
+- What it cannot do: open a network connection, read or write host files, write anywhere but `/tmp`, start more than
+  64 processes, use more than 1 GiB, 60 CPU-seconds or 90 s (a task's `evaluator.deadline_s` sets the wall budget, up
+  to 600 s), or read more than 256 MiB from the desktop. Going past a budget is a checker error (`timeout`, `cpu`,
+  `oom`), never a score.
+- A task that names a hash the host does not have fails at create with 422 `verifier_missing` (with the hash): upload
+  it and retry. A redundant checker may name its own `verifier_sha256`; by default it uses the primary's.
+- The verdict names the hash that scored it: `checker.verifier_sha256`; `checker.sandbox` has the call's seconds,
+  CPU-seconds and peak memory.
+- A changed checker is a new hash. Record the hash with the task set (the factory's `index.json` does).
+
+The release ships the factory's verifier `drums_t6` both ways: as `/etc/drums/verifiers/drums_t6.py` and in the store
+under the sha256 in `install/lock.json`.
+
 ## Many episodes from one set-up state
 
 Task setup runs at every create and reset. To pay for it once, set up one env, `state = env.save(ttl=0)`, and then
