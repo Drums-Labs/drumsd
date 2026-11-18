@@ -65,10 +65,13 @@ jobs:
         run: cargo test -p drumsd --test verifier_sandbox --no-run
       - name: escape attempts against a real sandbox (namespaces, pivot_root, cgroups, seccomp need root)
         run: |
-          sudo -E env "PATH=$PATH" cargo test -p drumsd --test verifier_sandbox -- --test-threads=2 2>&1 | tee sandbox.log
+          set -o pipefail
+          # the test binary cargo built above, run as root (cargo itself is not needed under sudo)
+          BIN=$(cargo test -p drumsd --test verifier_sandbox --no-run --message-format=json | python3 -c "import json,sys; print([j['executable'] for j in map(json.loads, sys.stdin) if j.get('reason') == 'compiler-artifact' and j.get('executable') and j['target']['name'] == 'verifier_sandbox'][-1])")
+          sudo "$BIN" --test-threads=2 2>&1 | tee sandbox.log
           # every test ran, none skipped itself for want of root or cgroup v2
-          ! grep -q '^skip:' sandbox.log
-          sudo chown -R "$(id -u):$(id -g)" target
+          if grep -q '^skip:' sandbox.log; then echo "a sandbox test skipped itself"; exit 1; fi
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' sandbox.log
 
   scripts:
     name: shellcheck and Python tests
