@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
+mod verifiers_api;
+
 #[derive(Debug)]
 pub struct ApiError {
     pub status: u16,
@@ -349,6 +351,8 @@ pub struct Manager {
     provision_tokens: StdMutex<BTreeMap<String, ProvisionTarget>>,
     /// The image's desktop user (from the image inspection): provisioning steps run as this user, with sudo for the step.
     image_user: Option<ImageUser>,
+    /// Uploaded lab verifiers by sha256 (None when the store directory could not be opened).
+    pub vstore: Option<drumsd_core::verifiers::Store>,
 }
 
 #[derive(Clone, Debug)]
@@ -527,7 +531,16 @@ impl Manager {
                 None
             }
         };
+        let vstore = match drumsd_core::verifiers::Store::open(&cfg.verifiers.store_dir, cfg.verifiers.max_bytes) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!("verifier store {}: {e}; uploads and tasks that name a verifier by hash are refused", cfg.verifiers.store_dir.display());
+                None
+            }
+        };
+        metrics.counter("drumsd_verifier_runs_total", "Sandboxed checker calls by error class");
         let m = Manager {
+            vstore,
             crash,
             activity,
             provision_tokens: StdMutex::new(BTreeMap::new()),
@@ -1038,6 +1051,7 @@ impl Manager {
                 return Err(ApiError::new(422, format!("task {id} is unsupported in this execution profile: {why}"))
                     .with(json!({"code": "task_unsupported", "task_id": id, "reason": why})));
             }
+            self.check_task_verifiers(t)?;
         }
         let (task, setup_on_restore) = match task {
             Some(t) => {
@@ -2929,7 +2943,10 @@ impl Manager {
         let req = json!({"task": task, "host": "127.0.0.1", "server_port": server, "chromium_port": chromium, "vlc_port": vlc,
                          "cache_dir": o.cache_dir, "osworld_dir": o.osworld_dir, "client_password": o.client_password, "extra": extra,
                          "verifiers_dir": o.verifiers_dir, "assets_dir": o.assets_dir(),
-                         "provision_url": format!("http://127.0.0.1:{port}/provision/{token}")});
+                         "provision_url": format!("http://127.0.0.1:{port}/provision/{token}"),
+                         // lab verifiers named by hash (and by file name with verifiers.sandbox_named) run in drumsd's sandbox
+                         "sandbox_url": format!("http://127.0.0.1:{port}/provision/{token}/verifier"),
+                         "sandbox_named": self.cfg.verifiers.sandbox_named});
         let timeout = Duration::from_secs(if verb == "evaluate" { o.eval_timeout_s } else { o.setup_timeout_s });
         let mut cmd = std::process::Command::new(&o.python);
         cmd.arg("-I")
@@ -3039,6 +3056,7 @@ impl Manager {
         if osworld_task_id(&task).is_none() {
             return Err(ApiError::new(400, "task: not an OSWorld task (needs an id of [A-Za-z0-9_-], a config list and an evaluator object)"));
         }
+        self.check_task_verifiers(&task)?;
         let slot = self.slot(id)?;
         let _g = slot.op.lock().await;
         begin_op(&slot, Op::Step)?;
@@ -3144,7 +3162,8 @@ impl Manager {
             "validity": v.validity, "invalid_reasons": invalid_reasons(&v), "crash_not_counted": crash_not_counted, "checker_skipped": detail.get("skipped"),
             "state": v.state.name(), "gates": v.gates, "checker_error": err,
             "checker": {"func": task["evaluator"]["func"], "osworld_commit": detail["osworld_commit"], "seconds": detail["seconds"],
-                        "postconfig_ran": detail["postconfig_ran"], "verifier": detail.get("verifier"), "info": detail.get("info")},
+                        "postconfig_ran": detail["postconfig_ran"], "verifier": detail.get("verifier"), "info": detail.get("info"),
+                        "verifier_sha256": detail.get("verifier_sha256"), "sandbox": detail.get("sandbox")},
             "audit": audit,
             "seconds": round3(secs),
         });

@@ -392,6 +392,27 @@ async fn release(State(m): S, Path(id): Path<String>) -> J {
 async fn provision_step(State(m): S, Path(token): Path<String>, Json(body): Json<Value>) -> J {
     Ok(Json(m.provision_step(&token, body).await?))
 }
+async fn sandbox_verify(State(m): S, Path(token): Path<String>, Json(body): Json<Value>) -> J {
+    Ok(Json(m.sandbox_verify(&token, body).await?))
+}
+#[derive(Deserialize)]
+pub struct UploadQ {
+    pub name: Option<String>,
+}
+/// POST /v1/verifiers: the body is the verifier's Python source (any content type).
+async fn upload_verifier(State(m): S, Query(q): Query<UploadQ>, body: axum::body::Bytes) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let v = m.upload_verifier(&body, q.name.as_deref())?;
+    Ok((if v["created"] == true { StatusCode::CREATED } else { StatusCode::OK }, Json(v)))
+}
+async fn list_verifiers(State(m): S) -> J {
+    Ok(Json(m.list_verifiers()?))
+}
+async fn get_verifier(State(m): S, Path(sha): Path<String>) -> J {
+    Ok(Json(m.get_verifier(&sha)?))
+}
+async fn delete_verifier(State(m): S, Path(sha): Path<String>) -> J {
+    Ok(Json(m.delete_verifier(&sha)?))
+}
 async fn destroy(State(m): S, Path(id): Path<String>) -> J {
     Ok(Json(view(&m.destroy(&id).await?)))
 }
@@ -423,7 +444,13 @@ pub fn router(m: Arc<Manager>) -> Router {
         .route("/v1/slots/:id/quiescent", post(quiescent))
         .route("/v1/slots/:id/quarantine", post(quarantine))
         .route("/v1/slots/:id/release", post(release))
+        .route(
+            "/v1/verifiers",
+            get(list_verifiers).post(upload_verifier).layer(axum::extract::DefaultBodyLimit::max(m.cfg.verifiers.max_bytes.max(1 << 20) + 1)),
+        )
+        .route("/v1/verifiers/:sha256", get(get_verifier).delete(delete_verifier))
         .route("/provision/:token/setup/execute", post(provision_step))
+        .route("/provision/:token/verifier", post(sandbox_verify))
         .layer(middleware::from_fn_with_state(m.clone(), auth))
         .with_state(m)
 }

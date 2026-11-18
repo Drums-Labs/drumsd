@@ -26,6 +26,9 @@ Lab verifiers (docs/custom-tasks.md): a task whose evaluator is {"func": "drums_
 /etc/drums/verifiers, `osw.verifiers_dir` in drumsd.json). Only files the host's root owns and nobody else can write
 are loaded: the task JSON (which any API client can send) names a verifier, it never carries code. FN runs here, as
 this unprivileged helper user, outside the desktop; it reads the desktop through `Ctx` (the slot's own guest server).
+A task whose evaluator names `verifier_sha256` (an uploaded verifier, docs/design/verifier-sandbox.md) is scored in
+drumsd's verifier sandbox instead: this helper sends the call to `sandbox_url` and never loads that code itself
+(also named verifiers, with `verifiers.sandbox_named`). Every reply names the sha256 of the verifier that scored it.
 
 No privilege escalation for the agent: the desktop user has no sudo in a slot (no administrator group, no_new_privs on
 every process it drives). A setup or postconfig step whose command runs `sudo` (OSWorld writes `echo {CLIENT_PASSWORD}
@@ -254,7 +257,8 @@ class Ctx:
 
 
 def load_verifier(vdir: str, name: str):
-    """NAME.py from vdir, only if the directory and the file are owned by root and not writable by group or others."""
+    """NAME.py from vdir, only if the directory and the file are owned by root and not writable by group or others.
+    The module carries `__drums_sha256__`, the sha256 of the bytes that were loaded."""
     import importlib.util
     import re
     import stat
@@ -268,9 +272,13 @@ def load_verifier(vdir: str, name: str):
             raise FileNotFoundError(f"no lab verifier {path} (install it as root: docs/custom-tasks.md)") from None
         if st.st_uid != TRUSTED_UID or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise PermissionError(f"{p} must be owned by root and not group/world-writable (it scores rewards)")
+    with open(path, "rb") as f:
+        src = f.read()
     spec = importlib.util.spec_from_file_location(f"drums_lab_verifier_{name}", path)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    code = compile(src, path, "exec")      # exactly the bytes that were hashed
+    exec(code, mod.__dict__)
+    mod.__drums_sha256__ = hashlib.sha256(src).hexdigest()
     return mod
 
 
@@ -286,12 +294,81 @@ def lab_score(out) -> tuple:
     return float(out), info
 
 
-def lab_function(req, verifier, function):
+class SandboxError(RuntimeError):
+    """A checker error the sandbox reported (its class: exception, cpu, oom, protocol, sandbox)."""
+
+
+class SandboxedVerifier:
+    """A verifier run in drumsd's verifier sandbox: called like a verifier function, it ignores the local ctx and sends
+    {sha256, function, options, deadline_s} to the call's capability URL. The verdict's error classes map onto the
+    helper's: timeout -> CheckerTimeout, bad_return -> TypeError (as lab_score raises), anything else -> SandboxError."""
+    remote = True
+
+    def __init__(self, req, sha256, function, named=None, task=None):
+        self.url, self.sha256, self.function, self.named, self.task = req.get("sandbox_url"), sha256, function or "reward", named, task
+        self.deadline_s = None
+        self.last = None
+        if not self.url:
+            raise RuntimeError("this drumsd gave the helper no verifier sandbox (sandbox_url): cannot run an uploaded verifier")
+
+    def __call__(self, ctx, **options):
+        body = {"sha256": self.sha256, "function": self.function, "options": options, "deadline_s": self.deadline_s,
+                "task": self.task}
+        if self.named:
+            body["named"] = self.named
+        r = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"},
+                                   method="POST")
+        try:
+            with urllib.request.urlopen(r, timeout=(self.deadline_s or DEFAULT_CHECKER_DEADLINE_S) + 60) as f:
+                v = json.loads(f.read())
+        except urllib.error.HTTPError as e:
+            raise SandboxError(f"verifier sandbox HTTP {e.code}: {e.read()[:400].decode(errors='replace')}") from None
+        self.last = v
+        cls = v.get("error_class")
+        if cls == "timeout":
+            raise CheckerTimeout(v.get("error") or "checker exceeded its wall budget")
+        if cls == "bad_return":
+            raise TypeError(f"a verifier must return a finite number or {{'score': number}}: {v.get('error')}")
+        if cls != "none":
+            raise SandboxError(f"{cls}: {v.get('error')}")
+        return {"score": v.get("score"), "info": v.get("info")}
+
+    def report(self):
+        """What the sandbox measured on the last call (no score, no info)."""
+        v = self.last or {}
+        return {k: v.get(k) for k in ("sha256", "function", "seconds", "cpu_s", "memory_peak_mib", "pids_peak", "requests",
+                                      "read_bytes", "budget", "error_class")}
+
+
+def lab_function(req, verifier, function, sha256=None, task=None):
+    """The callable for a lab verifier: a sandboxed one when the task names it by hash (or the host sandboxes named
+    verifiers), else FN from the named file. Either way `fn.sha256` is the hash of the code that runs."""
+    if sha256:
+        return SandboxedVerifier(req, sha256, function, task=task)
     mod = load_verifier(req.get("verifiers_dir") or DEFAULT_VERIFIERS_DIR, verifier)
+    if req.get("sandbox_named"):
+        if not callable(getattr(mod, function or "reward", None)):
+            raise AttributeError(f"verifier {verifier!r} has no function {function or 'reward'!r}")
+        return SandboxedVerifier(req, mod.__drums_sha256__, function, named=verifier, task=task)
     fn = getattr(mod, function or "reward", None)
     if not callable(fn):
         raise AttributeError(f"verifier {verifier!r} has no function {function or 'reward'!r}")
-    return fn
+
+    def local(ctx, **options):
+        return fn(ctx, **options)
+    local.sha256 = mod.__drums_sha256__
+    local.remote = False
+    return local
+
+
+def call_checker(fn, ev, ctx, options):
+    """fn(ctx, **options) -> (score, info) under the task's deadline. A sandboxed call carries the deadline to drumsd
+    (its wall budget) and the local alarm waits a little longer, so the sandbox reports the timeout itself."""
+    d = checker_deadline(ev)
+    if getattr(fn, "remote", False):
+        fn.deadline_s = d
+        d += 15.0
+    return with_deadline(d, lambda: lab_score(fn(ctx, **options)))
 
 
 def run_lab_verifier(env, task, req) -> dict:
@@ -299,9 +376,10 @@ def run_lab_verifier(env, task, req) -> dict:
     if ev.get("postconfig"):
         if env.setup_controller.setup(ev["postconfig"], False) is False:
             raise RuntimeError("Postconfig setup failed")
-    fn = lab_function(req, ev.get("verifier"), ev.get("function"))
+    fn = lab_function(req, ev.get("verifier"), ev.get("function"), ev.get("verifier_sha256"), task)
+    env.lab_fn = fn
     ctx = Ctx(req["host"], req["server_port"], task, ev.get("options") or {}, env.cache_dir)
-    return with_deadline(checker_deadline(ev), lambda: lab_score(fn(ctx, **(ev.get("options") or {}))))
+    return call_checker(fn, ev, ctx, ev.get("options") or {})
 
 
 # ------------------------------------------------------------------------------------------------ reward audit
@@ -422,8 +500,8 @@ def audit_evaluate(env, task, req, score, err, t_first) -> dict:
             t0 = time.monotonic()
             try:
                 if lab:
-                    fn = lab_function(req, ev.get("verifier"), ev.get("function"))
-                    s2, _ = with_deadline(checker_deadline(ev), lambda: lab_score(fn(ctx, **(ev.get("options") or {}))))
+                    fn = lab_function(req, ev.get("verifier"), ev.get("function"), ev.get("verifier_sha256"), task)
+                    s2, _ = call_checker(fn, ev, ctx, ev.get("options") or {})
                 else:
                     s2 = float(with_deadline(checker_deadline(ev), env._evaluate))
                 a["recheck"] = {"ran": True, "score": s2, "agree": s2 == score, "seconds": round(time.monotonic() - t0, 3)}
@@ -440,12 +518,15 @@ def audit_evaluate(env, task, req, score, err, t_first) -> dict:
     if err is None and isinstance(red, dict) and lab:
         t0 = time.monotonic()
         try:
-            fn = lab_function(req, red.get("verifier") or ev.get("verifier"), red.get("function"))
+            # the redundant checker names its own file or hash, else the primary's
+            rsha = red.get("verifier_sha256") or (None if red.get("verifier") else ev.get("verifier_sha256"))
+            fn = lab_function(req, red.get("verifier") or ev.get("verifier"), red.get("function"), rsha, task)
             opts = red.get("options") if red.get("options") is not None else (ev.get("options") or {})
             rctx = Ctx(req["host"], req["server_port"], task, opts, env.cache_dir)
-            s3, info3 = with_deadline(checker_deadline(ev), lambda: lab_score(fn(rctx, **opts)))
-            a["redundant"] = {"ran": True, "checker": f"{red.get('verifier') or ev.get('verifier')}.{red.get('function')}",
-                              "score": s3, "agree": s3 == score, "seconds": round(time.monotonic() - t0, 3)}
+            s3, info3 = call_checker(fn, ev, rctx, opts)
+            a["redundant"] = {"ran": True, "checker": f"{red.get('verifier') or ev.get('verifier') or rsha[:12]}.{red.get('function')}",
+                              "verifier_sha256": fn.sha256, "score": s3, "agree": s3 == score,
+                              "seconds": round(time.monotonic() - t0, 3)}
             if s3 != score:
                 flags.append("redundant_disagree")
         except Exception as e:  # noqa: BLE001
@@ -529,7 +610,11 @@ def run_verb(verb, env, task, staged, t0, req=None) -> dict:
            "seconds": round(time.monotonic() - t0, 3), "osworld_commit": OSWORLD_COMMIT,
            "postconfig_ran": bool(ev.get("postconfig")), "audit": audit}
     if is_lab_task(task):
-        out["verifier"] = f"{ev.get('verifier')}.{ev.get('function') or 'reward'}"
+        fn = getattr(env, "lab_fn", None)
+        out["verifier"] = f"{ev.get('verifier') or (ev.get('verifier_sha256') or '')[:12]}.{ev.get('function') or 'reward'}"
+        out["verifier_sha256"] = getattr(fn, "sha256", None) or ev.get("verifier_sha256")
+        if getattr(fn, "remote", False):
+            out["sandbox"] = fn.report()
         out["info"] = info
     return out
 

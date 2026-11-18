@@ -60,6 +60,16 @@ are not a boundary between customers: **one drumsd host serves one tenant**, and
 machines (the Drums gateway binds each workspace to its own host). Do not put two parties who must not read each
 other's data on one drumsd host.
 
+## Client checkers (uploaded verifiers)
+
+A verifier uploaded through `POST /v1/verifiers` is client code and runs in the verifier sandbox, never as a host
+process: its own mount, network, pid, ipc, uts and cgroup namespaces, a read-only root of the Python runtime only (no
+`/etc/drums`, no `/var/lib/drums`, no `/home`), no network interface, uid `drums-verify` with `no_new_privs` and no
+capabilities, a seccomp filter (no mounts, namespaces, ptrace, bpf, io_uring, keyrings; sockets only AF_UNIX), and a
+cgroup with wall, CPU, memory and pid budgets. It reaches the desktop only through drumsd. The design and its limits
+(it is not a VM boundary) are in [design/verifier-sandbox.md](design/verifier-sandbox.md);
+`crates/drumsd/tests/verifier_sandbox.rs` tries each escape and runs as root in CI.
+
 ## Known limits
 
 - **A user namespace is not a microVM.** Kernel bugs reachable from inside a user namespace remain a risk, as for any

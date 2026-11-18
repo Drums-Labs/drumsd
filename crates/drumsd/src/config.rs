@@ -153,6 +153,9 @@ pub struct Config {
     pub allow_remote: bool,
     /// OSWorld task setup and checkers (the pinned OSWorld checkout run by an unprivileged helper).
     pub osw: Option<OswConfig>,
+    /// Uploaded lab verifiers: the store and the sandbox they run in (docs/design/verifier-sandbox.md).
+    #[serde(default)]
+    pub verifiers: VerifiersConfig,
     /// Host price in USD per hour (on-demand or what the operator pays), for the cost metrics. 0 = cost not reported.
     #[serde(default)]
     pub host_usd_per_hour: f64,
@@ -379,6 +382,62 @@ pub struct OswConfig {
 }
 
 pub const DEFAULT_ASSETS_DIR: &str = "/var/lib/drums/assets";
+
+/// The verifier store and sandbox (docs/design/verifier-sandbox.md). Every field has a default.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerifiersConfig {
+    /// Uploaded verifiers, by sha256 (root-owned).
+    pub store_dir: PathBuf,
+    /// Largest upload, in bytes.
+    pub max_bytes: usize,
+    /// The unprivileged identity a checker runs as (never 0; the installer creates `drums-verify`). Default nobody.
+    pub uid: u32,
+    pub gid: u32,
+    /// The checker's Python. None = `osw.python` (the checker venv).
+    pub python: Option<PathBuf>,
+    /// What a checker sees, read-only. None = /usr, /lib*, /bin, /sbin, /etc/ld.so.cache, /etc/localtime and the venv.
+    pub ro_paths: Option<Vec<PathBuf>>,
+    /// The cgroup that holds one cgroup per checker call. None = `<slot pool scope>/drums-verify`.
+    pub cgroup_parent: Option<PathBuf>,
+    /// Where each call's (empty, host-side) root directory is made.
+    pub run_dir: PathBuf,
+    /// Also run verifiers named by file (`/etc/drums/verifiers`) in the sandbox. Off = today's host-side path for them.
+    pub sandbox_named: bool,
+    pub budget: drumsd_linux::vsandbox::Budget,
+}
+
+impl Default for VerifiersConfig {
+    fn default() -> Self {
+        VerifiersConfig {
+            store_dir: PathBuf::from(drumsd_core::verifiers::DEFAULT_STORE_DIR),
+            max_bytes: drumsd_core::verifiers::DEFAULT_MAX_BYTES,
+            uid: 65534,
+            gid: 65534,
+            python: None,
+            ro_paths: None,
+            cgroup_parent: None,
+            run_dir: PathBuf::from("/run/drums/verifiers"),
+            sandbox_named: false,
+            budget: Default::default(),
+        }
+    }
+}
+
+impl VerifiersConfig {
+    /// The checker's python and what it sees (the venv directory of `python` is added to the allow list).
+    pub fn python_and_paths(&self, osw: Option<&OswConfig>) -> Option<(PathBuf, Vec<PathBuf>)> {
+        let py = self.python.clone().or_else(|| osw.map(|o| o.python.clone()))?;
+        let mut ro = self.ro_paths.clone().unwrap_or_else(|| drumsd_linux::vsandbox::DEFAULT_RO_PATHS.iter().map(PathBuf::from).collect());
+        // <venv>/bin/python -> <venv>; a system python is already under /usr
+        if let Some(venv) = py.parent().and_then(|b| b.parent()).filter(|v| v.join("pyvenv.cfg").exists()) {
+            ro.push(venv.to_path_buf());
+        } else {
+            ro.push(py.clone());
+        }
+        Some((py, ro))
+    }
+}
 
 impl OswConfig {
     pub fn assets_dir(&self) -> PathBuf {
