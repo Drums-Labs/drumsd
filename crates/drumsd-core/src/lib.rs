@@ -8,6 +8,7 @@
 //! * [`quiesce`]: capture readiness (no task leaving, a stable tree for a window, the dump matches it).
 //! * [`admission`]: refuse creates, captures and forks that would push the host into memory thrash.
 //! * [`lease`]: env and saved-state leases (idle timeout, time to live) and when one has run out.
+//! * [`verifiers`]: the content-addressed store of uploaded lab verifiers (docs/design/verifier-sandbox.md).
 //! * [`usage`]: per-slot and daemon ledgers (op latency, episodes by verdict, failures/retries by cause, rewards) and cost.
 //! * [`locks`], [`mounts`], [`net`], [`statehash`], [`alive`]: pure ports of the Python runtime's checks
 //!   (sharedos_rootfs/locks.py, candidate.py, iarun/checks.py, fcbench.py) so both paths judge a restore the same way.
@@ -26,3 +27,4 @@ pub mod recovery;
 pub mod state;
 pub mod statehash;
 pub mod usage;
+pub mod verifiers;
