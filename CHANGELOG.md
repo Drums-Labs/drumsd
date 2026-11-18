@@ -6,6 +6,13 @@ then performance, then pins.
 
 ## v0.2.2 (unreleased)
 
+- **Signed releases, verified before install** (A-01). `.github/workflows/release.yml` builds the tarball with
+  `install/make-release.sh`, writes its `.sha256`, signs it with Sigstore keyless (GitHub OIDC, no long-lived key) and
+  attaches tarball, `.sha256`, `.sigstore.json` and `install/verify-release.sh` to a draft release on a `v*` tag; a pull
+  request that touches `install/` only builds it. `install/verify-release.sh [--require-signature]` checks the checksum
+  and the signing identity (this repository's release.yml on a `v*` tag); `install.sh` runs it on the tarball next to the
+  unpacked directory and takes `--require-signature`. In the same pass it installs the hash-pinned lab verifier and the
+  `drums-verify` user (below); `install/tests/test_install_one_pass.sh` checks that order.
 - **Clients can upload their own checker, and it runs confined** (A-13; design: `docs/design/verifier-sandbox.md`).
   `POST /v1/verifiers` stores a lab verifier by the sha256 of its bytes (1 MiB cap, UTF-8; `GET`/`DELETE
   /v1/verifiers/{sha256}`). A task names it with `evaluator.verifier_sha256`; create and task load answer 422
