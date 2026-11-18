@@ -26,6 +26,10 @@ The reply (`StepResult`) has `result` (`status`, `returncode`, `output`, `error`
   `step(..., check=False)` returns it instead (for commands whose exit status is the answer, e.g. `test -f`).
 - A guest that does not answer within 130 s raises `GuestError`.
 - A step on a quarantined env is `Conflict`; on a destroyed env `EnvGone`.
+- **Size limit**, the same for actions and for a task's setup steps: one command string (or one element of a command
+  list) at most 8,192 characters, at most 256 list elements, pyautogui code at most 16,384 characters. Over it, Drums
+  Cloud (and drumsd with `enforce_step_arg_limit`) answers 400 `step_arg_too_long` naming the field, the limit and the
+  length. Write larger files in chunks.
 
 ### Who runs the action
 

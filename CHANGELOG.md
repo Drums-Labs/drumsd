@@ -21,6 +21,11 @@ then performance, then pins.
 - **The release ships the factory's lab verifier.** `verifiers/drums_t6.py` (drums-verifiers `abd9755`), pinned by
   sha256 in `install/lock.json`; the installer checks it, installs it as `/etc/drums/verifiers/drums_t6.py` and seeds
   the verifier store, so a fresh host scores the factory's tasks without an operator step.
+- **The step-argument limit, stated once** (A-20, A-21): 8,192 characters per command string, 256 argv items, 16,384
+  characters of pyautogui code, the same for actions and for task setup and postconfig steps
+  (`drumsd_core::limits`, README "Step-argument limit"). `enforce_step_arg_limit` (default off, today's behaviour)
+  refuses an over-limit action or task with 400 `step_arg_too_long` and `field`, `limit`, `length`, `unit` in the
+  body; off, drumsd records `step_arg_over_limit` events and the `drumsd_step_arg_over_limit_total` counter.
 - **drums-lab is dissolved into this repo.** The runtime's Python side (`sharedos_rootfs` and the three packages it
 imports: `sharedos_spike`, `drumsbench`, `osworld_smoke`) now lives in `python/`, copied byte-for-byte from drums-lab
 `f17644b` (the commit `install/lock.json` pinned); the package names are unchanged so every `python3 -m sharedos_rootfs.*`

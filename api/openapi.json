@@ -493,7 +493,7 @@
   "/v1/slots/{id}/step": {
    "post": {
     "summary": "Step",
-    "description": "Run one action in the slot's desktop through its guest server. Returns the action result, optionally a screenshot, and the current episode's validity.",
+    "description": "Run one action in the slot's desktop through its guest server. Returns the action result, optionally a screenshot, and the current episode's validity. Step-argument limit (the same for task setup steps): one command string or command-list element at most 8192 characters, at most 256 list elements, pyautogui code at most 16384 characters. With enforce_step_arg_limit an over-limit action is a 400 with code step_arg_too_long, field, limit, length and unit.",
     "responses": {
      "200": {
       "description": "OK",
@@ -537,6 +537,16 @@
      },
      "410": {
       "description": "env_gone: the slot was destroyed",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "invalid action, or step_arg_too_long (with enforce_step_arg_limit): the body names field, limit, length, unit",
       "content": {
        "application/json": {
         "schema": {
@@ -1236,7 +1246,7 @@
   "/v1/slots/{id}/task": {
    "post": {
     "summary": "Load a task",
-    "description": "Run an OSWorld task's setup in this ready slot now and after every reset. On setup failure the slot is quarantined (422). A task whose evaluator names verifier_sha256 the host does not have is refused with 422 code verifier_missing (upload it with POST /v1/verifiers).",
+    "description": "Run an OSWorld task's setup in this ready slot now and after every reset. On setup failure the slot is quarantined (422). A task whose evaluator names verifier_sha256 the host does not have is refused with 422 code verifier_missing (upload it with POST /v1/verifiers). Its setup and postconfig steps are held to the step-argument limit (see POST /v1/slots/{id}/step).",
     "responses": {
      "200": {
       "description": "OK",
