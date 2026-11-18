@@ -41,6 +41,35 @@ jobs:
       - name: cargo test (non-root; tests that need root skip themselves)
         run: cargo test --workspace
 
+  sandbox:
+    name: verifier sandbox (root)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (the version install/lock.json pins)
+        run: |
+          TOOLCHAIN=$(python3 -c "import json; print(json.load(open('install/lock.json'))['rust_toolchain'])")
+          rustup toolchain install "$TOOLCHAIN" --profile minimal
+          rustup default "$TOOLCHAIN"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-sandbox-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'install/lock.json') }}
+          restore-keys: cargo-sandbox-${{ runner.os }}-
+      - name: build the sandbox tests
+        run: cargo test -p drumsd --test verifier_sandbox --no-run
+      - name: escape attempts against a real sandbox (namespaces, pivot_root, cgroups, seccomp need root)
+        run: |
+          sudo -E env "PATH=$PATH" cargo test -p drumsd --test verifier_sandbox -- --test-threads=2 2>&1 | tee sandbox.log
+          # every test ran, none skipped itself for want of root or cgroup v2
+          ! grep -q '^skip:' sandbox.log
+          sudo chown -R "$(id -u):$(id -g)" target
+
   scripts:
     name: shellcheck and Python tests
     runs-on: ubuntu-latest
