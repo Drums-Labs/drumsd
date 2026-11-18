@@ -281,6 +281,20 @@ fields, from [`crates/drumsd/src/config.rs`](crates/drumsd/src/config.rs). "Requ
 | `verifiers_dir` | `null` | lab verifiers (`NAME.py`, root-owned); default `/etc/drums/verifiers` ([docs/custom-tasks.md](docs/custom-tasks.md)) |
 | `assets_dir` | `null` | the only host directory a task's `upload_file` step may read; default `/var/lib/drums/assets` |
 
+`verifiers` (uploaded lab verifiers and the sandbox they run in; [docs/design/verifier-sandbox.md](docs/design/verifier-sandbox.md)), every field optional:
+
+| field | default | meaning |
+|---|---|---|
+| `store_dir` | `/var/lib/drums/verifiers` | uploaded verifiers, one `<sha256>.py` each (root-owned) |
+| `max_bytes` | `1048576` | largest upload |
+| `uid`, `gid` | `65534` | the unprivileged identity a checker runs as (the installer creates `drums-verify`); 0 is refused |
+| `python` | `osw.python` | the checker's Python (the checker venv) |
+| `ro_paths` | `/usr`, `/lib*`, `/bin`, `/sbin`, `/etc/ld.so.cache`, `/etc/localtime`, `/etc/alternatives` + the venv | what a checker sees, read-only |
+| `cgroup_parent` | `<slot pool scope>/drums-verify` | holds one cgroup per checker call |
+| `run_dir` | `/run/drums/verifiers` | where each call's (empty) root directory is made |
+| `sandbox_named` | `false` | also run verifiers named by file (`/etc/drums/verifiers`) in the sandbox |
+| `budget` | wall 90 s (task `deadline_s` up to `max_wall_s` 600), `cpu_s` 60, `cpus` 1, `memory_mib` 1024, `pids` 64, `tmp_mib` 256, `read_bytes` 256 MiB, `requests` 10000, `verdict_bytes` 1 MiB | per checker call |
+
 ## API
 
 Every route except `GET /healthz` needs `Authorization: Bearer <token>`. The full schema is
@@ -311,7 +325,10 @@ are this API's slot, checkpoint, branch and capture.
 | `GET /v1/slots/{id}/metrics` | per-slot metrics |
 | `POST /v1/slots/{id}/quarantine` · `POST /v1/slots/{id}/release` | take an env out of service with a reason · release it (then reset) |
 | `GET /v1/tasks` · `GET /v1/tasks/{id}` | the OSWorld tasks the host knows, with their supported flag · one task |
+| `GET /v1/verifiers` · `POST /v1/verifiers` | the uploaded lab verifiers · upload one (body: the Python source, `?name=` optional): stored by sha256 |
+| `GET /v1/verifiers/{sha256}` · `DELETE /v1/verifiers/{sha256}` | one verifier's record · remove it |
 | `POST /provision/{token}/setup/execute` | internal: one task setup step that needs root, run by drumsd as trusted provisioning, never by the agent |
+| `POST /provision/{token}/verifier` | internal: one sandboxed checker call for the OSWorld helper of a running verify |
 
 ## Development
 

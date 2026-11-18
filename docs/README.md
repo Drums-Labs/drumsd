@@ -27,6 +27,8 @@ valid: restored correctly, isolated, never quarantined.
 | `docs/validity.md` | the gates and what `Reward.valid` means |
 | `docs/custom-tasks.md` | your own tasks: setup steps, your app and data, reward functions in Python (lab verifiers) |
 | `docs/security.md` | the hardened env profile (default), its limits, and the trusted-only `--trusted-unhardened` opt-out |
+| `docs/design/verifier-sandbox.md` | how an uploaded checker is stored by hash and run confined |
+| `verifiers/drums_t6.py` | the task factory's lab verifier (sha256 in `install/lock.json`) |
 | `docs/procview.md` | the opt-in per-env memory/CPU view (`--procview`) |
 | `docs/lifecycle.md` | env states, leases, cleanup, fork states, records, reboots, metrics windows |
 | `examples/` | `rl_loop.py` (a minimal leak-free loop), `fork_and_verify.py`, `concurrency.py` |

@@ -6,6 +6,21 @@ then performance, then pins.
 
 ## v0.2.2 (unreleased)
 
+- **Clients can upload their own checker, and it runs confined** (A-13; design: `docs/design/verifier-sandbox.md`).
+  `POST /v1/verifiers` stores a lab verifier by the sha256 of its bytes (1 MiB cap, UTF-8; `GET`/`DELETE
+  /v1/verifiers/{sha256}`). A task names it with `evaluator.verifier_sha256`; create and task load answer 422
+  `verifier_missing` when the host lacks it. Such a checker never runs as a host process: each call (first score,
+  recheck, redundant checker) is a fresh `drumsd verifier-sandbox`: new mount, network, pid, ipc, uts and cgroup
+  namespaces, a read-only `pivot_root`ed root from an allow list, no network at all, uid `drums-verify` with
+  `no_new_privs`, a seccomp filter, and a cgroup with wall, CPU, memory, pid, disk, read and request budgets. It
+  reaches the desktop only through drumsd (`ctx.read_file`, `ctx.run`), so its code is unchanged. Every verdict now
+  carries `checker.verifier_sha256` (named verifiers report the hash of the file that ran) and, when sandboxed,
+  `checker.sandbox` (seconds, CPU-seconds, peak memory). Verifiers named by file keep today's host-side path unless
+  `verifiers.sandbox_named` is set. Tests: `crates/drumsd/tests/verifier_sandbox.rs` (network, writes outside /tmp,
+  the host token, escalation, a fork bomb, CPU, wall, memory and disk budgets), run as root in CI.
+- **The release ships the factory's lab verifier.** `verifiers/drums_t6.py` (drums-verifiers `abd9755`), pinned by
+  sha256 in `install/lock.json`; the installer checks it, installs it as `/etc/drums/verifiers/drums_t6.py` and seeds
+  the verifier store, so a fresh host scores the factory's tasks without an operator step.
 - **drums-lab is dissolved into this repo.** The runtime's Python side (`sharedos_rootfs` and the three packages it
 imports: `sharedos_spike`, `drumsbench`, `osworld_smoke`) now lives in `python/`, copied byte-for-byte from drums-lab
 `f17644b` (the commit `install/lock.json` pinned); the package names are unchanged so every `python3 -m sharedos_rootfs.*`

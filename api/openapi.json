@@ -1236,7 +1236,7 @@
   "/v1/slots/{id}/task": {
    "post": {
     "summary": "Load a task",
-    "description": "Run an OSWorld task's setup in this ready slot now and after every reset. On setup failure the slot is quarantined (422).",
+    "description": "Run an OSWorld task's setup in this ready slot now and after every reset. On setup failure the slot is quarantined (422). A task whose evaluator names verifier_sha256 the host does not have is refused with 422 code verifier_missing (upload it with POST /v1/verifiers).",
     "responses": {
      "200": {
       "description": "OK",
@@ -1339,6 +1339,224 @@
      }
     }
    }
+  },
+  "/v1/verifiers": {
+   "get": {
+    "summary": "List uploaded verifiers",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "$ref": "#/components/schemas/Verifier"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "Upload a lab verifier",
+    "description": "The body is the verifier's Python source (UTF-8, no NUL, at most verifiers.max_bytes, default 1 MiB). It is stored under the sha256 of its bytes; a task names it with evaluator.verifier_sha256 and it runs in the verifier sandbox (docs/design/verifier-sandbox.md). Uploading the same bytes again changes nothing (200).",
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+      },
+      "description": "display name"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "text/x-python": {
+       "schema": {
+        "type": "string"
+       }
+      },
+      "application/octet-stream": {
+       "schema": {
+        "type": "string",
+        "format": "binary"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "stored",
+      "content": {
+       "application/json": {
+        "schema": {
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Verifier"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "created": {
+             "type": "boolean"
+            }
+           }
+          }
+         ]
+        }
+       }
+      }
+     },
+     "200": {
+      "description": "already stored",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Verifier"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "empty, not UTF-8, a NUL byte, or a bad name",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "413": {
+      "description": "larger than verifiers.max_bytes (the message names the limit)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/verifiers/{sha256}": {
+   "parameters": [
+    {
+     "name": "sha256",
+     "in": "path",
+     "required": true,
+     "schema": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+     }
+    }
+   ],
+   "get": {
+    "summary": "One uploaded verifier",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Verifier"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "verifier_missing",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "500": {
+      "description": "verifier_corrupt: the stored bytes no longer match the hash",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "Remove an uploaded verifier",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "sha256": {
+           "type": "string"
+          },
+          "deleted": {
+           "type": "boolean"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/provision/{token}/verifier": {
+   "post": {
+    "summary": "Internal: one sandboxed checker call",
+    "description": "Used by the OSWorld helper of a running verify through its one-time capability URL (no bearer token). Body {sha256, function, options, deadline_s, task, named?}. Reply: the verdict (score, info, error, error_class: none|exception|bad_return|timeout|cpu|oom|protocol|sandbox, sha256, seconds, cpu_s, memory_peak_mib, budget).",
+    "security": [],
+    "parameters": [
+     {
+      "name": "token",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "the verdict",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "unknown or expired token"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -1366,16 +1584,16 @@
       ]
      },
      "state": {
-       "type": "string",
-       "description": "On a 409 wrong_state: the slot state that refused the operation."
+      "type": "string",
+      "description": "On a 409 wrong_state: the slot state that refused the operation."
      },
      "reason": {
-       "type": "string",
-       "description": "On a 409 wrong_state from a quarantined slot: why it was quarantined (the full gate detail, up to 4000 characters)."
+      "type": "string",
+      "description": "On a 409 wrong_state from a quarantined slot: why it was quarantined (the full gate detail, up to 4000 characters)."
      },
      "next": {
-       "type": "string",
-       "description": "On a 409 wrong_state from a quarantined slot: what a client can do (release then reset, or destroy and create a new env). A quarantined slot is never restored into again by itself; repeating the operation gets the same 409."
+      "type": "string",
+      "description": "On a 409 wrong_state from a quarantined slot: what a client can do (release then reset, or destroy and create a new env). A quarantined slot is never restored into again by itself; repeating the operation gets the same 409."
      }
     },
     "required": [
@@ -1968,6 +2186,42 @@
        "null"
       ],
       "description": "Capture readiness record: params, every attempt (wait, dump, checks, why a rejected dump was rejected)."
+     }
+    }
+   },
+   "Verifier": {
+    "type": "object",
+    "properties": {
+     "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+     },
+     "bytes": {
+      "type": "integer"
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "source": {
+      "type": "string",
+      "enum": [
+       "upload",
+       "bundled",
+       "named",
+       "unknown"
+      ]
+     },
+     "owner": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "created_epoch": {
+      "type": "number"
      }
     }
    }
