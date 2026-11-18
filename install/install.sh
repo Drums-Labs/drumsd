@@ -11,7 +11,9 @@
 # --procview (opt-in) gives each env its own memory/CPU view (/proc files and sysinfo(2)).
 # Run it from an unpacked release (make-release.sh): this directory holds install/, sources/*.bundle and SHA256SUMS.
 # When the release tarball (with its .sha256 and .sigstore.json) sits next to this directory, it is checked first with
-# install/verify-release.sh; --require-signature refuses unless that tarball's Sigstore signature verifies.
+# install/verify-release.sh; --require-signature also refuses unless its Sigstore signature verifies. Both checks run
+# code from this same tarball, so they catch corruption, not tampering: proof of origin is the separately downloaded
+# verify-release.sh, run before you unpack (docs/install.md).
 # Every input is pinned in install/lock.json (apt snapshot + versions, file URLs + sha256, source commits, Rust toolchain,
 # hashed Python lock) and checked before use; the first mismatch stops the install.
 # The API is bound to 127.0.0.1 unless --remote is given (--remote serves plain HTTP with a bearer token on every
@@ -34,8 +36,8 @@ while [ $# -gt 0 ]; do
     --procview) PROCVIEW=1; shift;;          # opt-in: the per-env memory/CPU view (FUSE + BPF on sysinfo(2)); see docs/procview.md
     --no-procview) PROCVIEW=0; shift;;       # the default since rc1: envs read the host's memory and CPU files
     --trusted-unhardened) HARDEN=0; shift;;  # trusted-only hosts: no user namespace, seccomp, cap drop or metadata firewall
-    --require-signature) REQSIG=1; shift;;   # refuse unless the tarball next to this dir has a verifying Sigstore signature
-    -h|--help) sed -n 2,21p "$0"; exit 0;;
+    --require-signature) REQSIG=1; shift;;   # also check the Sigstore bundle (corruption check: the checker comes from this tarball)
+    -h|--help) sed -n 2,23p "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
@@ -90,7 +92,7 @@ MEM_GIB=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1048576 ))
 TARBALL="$(dirname "$REL")/$(basename "$REL").tar.gz"
 if [ -f "$TARBALL" ]; then
   VR=(bash "$REL/install/verify-release.sh"); [ "$REQSIG" = 0 ] || VR+=(--require-signature)
-  "${VR[@]}" "$TARBALL" || die "release tarball $(basename "$TARBALL") did not verify (install/verify-release.sh)"
+  "${VR[@]}" "$TARBALL" || die "release tarball $(basename "$TARBALL") did not verify (install/verify-release.sh): do not install it"
 elif [ "$REQSIG" = 1 ]; then
   die "--require-signature: put $(basename "$TARBALL") with its .sha256 and .sigstore.json next to $(basename "$REL")/"
 fi

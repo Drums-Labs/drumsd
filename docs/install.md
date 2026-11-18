@@ -56,8 +56,10 @@ sudo ./install.sh
 ```
 
 `install.sh` checks every file of the release against its `SHA256SUMS`, and runs `install/verify-release.sh` again
-on the tarball when it is still next to the unpacked directory. `sudo ./install.sh --require-signature` refuses to
-install unless that tarball's signature verifies. Releases before the signed release workflow (v0.2.1 and earlier) have
+on the tarball when it is still next to the unpacked directory; `sudo ./install.sh --require-signature` also refuses
+unless the signature bundle verifies. Those checks run code that came in the same tarball, so they catch a corrupted
+or incomplete download, not a tampered one: a tampered tarball can carry a tampered checker. Proof of origin is the
+`verify-release.sh` you downloaded separately, run as above before you unpack. Releases before the signed release workflow (v0.2.1 and earlier) have
 a `.sha256` but no `.sigstore.json`.
 
 It takes 7 to 15 minutes and prints a progress line every 30 s.
@@ -85,7 +87,7 @@ network. Every option:
 | `--procview` | the opt-in per-env memory and CPU view ([procview.md](procview.md)) |
 | `--no-procview` | the default; turns the view off again on a host that had it |
 | `--trusted-unhardened` | hardened profile off: trusted code only ([security.md](security.md)) |
-| `--require-signature` | refuse unless the tarball next to the release directory has a verifying Sigstore signature |
+| `--require-signature` | also check the Sigstore bundle of the tarball next to the release directory (detects corruption; proof of origin is the separately downloaded `verify-release.sh`, run first) |
 
 Envs run in the **hardened profile** by default. Each desktop gets its own user namespace, so root in it is an
 unprivileged host uid. It also gets no_new_privs, a capability bounding set, seccomp and a metadata firewall. The desktop

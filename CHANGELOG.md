@@ -11,7 +11,9 @@ then performance, then pins.
   attaches tarball, `.sha256`, `.sigstore.json` and `install/verify-release.sh` to a draft release on a `v*` tag; a pull
   request that touches `install/` only builds it. `install/verify-release.sh [--require-signature]` checks the checksum
   and the signing identity (this repository's release.yml on a `v*` tag); `install.sh` runs it on the tarball next to the
-  unpacked directory and takes `--require-signature`. In the same pass it installs the hash-pinned lab verifier and the
+  unpacked directory and takes `--require-signature`; that in-tarball run detects corruption only (a tampered tarball
+  can carry a tampered checker), so proof of origin is the separately downloaded `verify-release.sh`, run before
+  unpacking (docs/install.md). In the same pass it installs the hash-pinned lab verifier and the
   `drums-verify` user (below); `install/tests/test_install_one_pass.sh` checks that order.
 - **Clients can upload their own checker, and it runs confined** (A-13; design: `docs/design/verifier-sandbox.md`).
   `POST /v1/verifiers` stores a lab verifier by the sha256 of its bytes (1 MiB cap, UTF-8; `GET`/`DELETE
