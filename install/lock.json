@@ -124,5 +124,14 @@
     "source": "AWS Price List API, us-east-1 Linux on-demand, effective 2026-10-01 (as in the app-compat and drumsd reports)",
     "r8i.16xlarge": 4.44544,
     "m8i.16xlarge": 3.38688
+  },
+  "verifiers": {
+    "note": "lab verifiers the release ships (docs/design/verifier-sandbox.md): the file in verifiers/ must hash to this; the installer checks it, installs it as /etc/drums/verifiers/NAME.py and seeds the verifier store",
+    "drums_t6": {
+      "path": "verifiers/drums_t6.py",
+      "sha256": "27adcd4c0a41283a03a5339016c5f3b39d25bd5c9a40de9587fdaf2080016af7",
+      "version": 1,
+      "source": "Drums-Labs/drums-verifiers@abd975512e7c8f38163b1c7ce4e858e947023836 src/drums_tasks/verifier/drums_t6.py"
+    }
   }
 }

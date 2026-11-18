@@ -218,6 +218,22 @@ install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
 # lab verifiers (docs/custom-tasks.md): root-owned, so a task can name one but never supply its code
 install -d -m 0755 -o root -g root "$E/verifiers"
+# the release's lab verifiers (docs/design/verifier-sandbox.md, A-13): checked against the lock's sha256, installed by
+# name (tasks that name "drums_t6" work as before) and seeded into the verifier store by hash (tasks that name its
+# verifier_sha256 run it in the sandbox), so a fresh host scores the factory's tasks out of the box
+install -d -m 0755 -o root -g root /var/lib/drums/verifiers
+VNAMES=$(python3 -c "import json; print(' '.join(k for k, v in json.load(open('$LOCK'))['verifiers'].items() if isinstance(v, dict)))")
+for V in $VNAMES; do
+  VSRC="$O/src/drumsd/$(lk "verifiers.$V.path")"; VSHA=$(lk "verifiers.$V.sha256")
+  echo "$VSHA  $VSRC" | sha256sum -c --quiet - || die "lab verifier $V: sha256 does not match install/lock.json"
+  install -m 0644 -o root -g root "$VSRC" "$E/verifiers/$V.py"
+  install -m 0644 -o root -g root "$VSRC" "/var/lib/drums/verifiers/$VSHA.py"
+  printf '{"sha256": "%s", "bytes": %s, "name": "%s", "source": "bundled", "owner": null, "created_epoch": %s}\n' \
+    "$VSHA" "$(stat -c %s "$VSRC")" "$V" "$(date +%s)" > "/var/lib/drums/verifiers/$VSHA.json"
+  chmod 0644 "/var/lib/drums/verifiers/$VSHA.json"
+done
+# the identity sandboxed checkers run as: no home, no shell, no group of anyone else's
+id drums-verify >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin drums-verify
 # task assets (docs/custom-tasks.md): the only host directory a task's upload_file step can read
 install -d -m 0755 -o root -g root /var/lib/drums/assets
 # the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
@@ -284,6 +300,7 @@ RESTORES=$(( $(nproc) * 3 / 8 )); [ "$RESTORES" -ge 4 ] || RESTORES=4
 LISTEN="127.0.0.1:$PORT"; ALLOW=false
 [ "$REMOTE" = 1 ] && { LISTEN="0.0.0.0:$PORT"; ALLOW=true; }
 OSW_UID=$(id -u drums-osw); OSW_GID=$(id -g drums-osw)
+VER_UID=$(id -u drums-verify); VER_GID=$(id -g drums-verify)
 cat > "$E/drumsd.json" <<EOF
 {"listen": "$LISTEN", "allow_remote": $ALLOW, "token_file": "$E/token",
  "state_dir": "$D/state", "journal_dir": "$D/journal", "lower": "/mnt/osworld", "image_sha256": "$IMGSHA",
@@ -293,7 +310,8 @@ cat > "$E/drumsd.json" <<EOF
  "natural_exits": $(lk runtime.natural_exits), "alive_after_s": 5.0, "max_attempts": 3, "warm_upper": true,
  "host_usd_per_hour": $PRICE,
  "osw": {"python": "$O/osw-venv/bin/python", "helper": "$O/osw/drums_osw.py", "osworld_dir": "$O/src/OSWorld",
-         "cache_dir": "$D/osw-cache", "uid": $OSW_UID, "gid": $OSW_GID}}
+         "cache_dir": "$D/osw-cache", "uid": $OSW_UID, "gid": $OSW_GID},
+ "verifiers": {"store_dir": "/var/lib/drums/verifiers", "uid": $VER_UID, "gid": $VER_GID}}
 EOF
 # Per-env memory/CPU view: apps in an env see the env's own memory, swap and CPU count (/proc/meminfo, cpuinfo, stat,
 # swaps, /sys/devices/system/cpu/{online,possible,present} and sysinfo(2)), not the host's. Its FUSE connection is kept

@@ -20,11 +20,22 @@ rm -rf "$R"; mkdir -p "$R/sources"
 # only the committed files of install/ (an untracked file such as a __pycache__ of a test run must not ship)
 git -C "$HERE" archive --format=tar HEAD install python | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
 # the user docs, from the same commit: a customer reads these, not the wheel's source
-git -C "$HERE" archive --format=tar HEAD CHANGELOG.md docs examples api/openapi.json | tar -x -C "$R"
+git -C "$HERE" archive --format=tar HEAD CHANGELOG.md docs examples api/openapi.json verifiers | tar -x -C "$R"
 mv "$R/docs/README.md" "$R/README.md"
-for f in README.md docs/install.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md docs/architecture.md docs/reward-audit.md docs/release-notes/rc1.md api/openapi.json; do
+for f in README.md docs/install.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md docs/architecture.md docs/reward-audit.md docs/release-notes/rc1.md docs/design/verifier-sandbox.md api/openapi.json verifiers/drums_t6.py; do
   [ -s "$R/$f" ] || { echo "release is missing $f" >&2; exit 1; }
 done
+# the shipped lab verifiers hash to what the lock approves (the installer checks the same from the drumsd bundle)
+python3 - "$R" <<'PY'
+import hashlib, json, sys
+r = sys.argv[1]
+for name, v in json.load(open(f"{r}/install/lock.json"))["verifiers"].items():
+    if not isinstance(v, dict):
+        continue
+    got = hashlib.sha256(open(f"{r}/{v['path']}", "rb").read()).hexdigest()
+    if got != v["sha256"]:
+        sys.exit(f"lab verifier {name}: {v['path']} is {got}, install/lock.json says {v['sha256']}")
+PY
 echo "$C" > "$R/RELEASE_COMMIT"
 bundle() { # bundle REPO NAME COMMIT
   git -C "$1" branch -f "release-$2" "$3" >/dev/null
