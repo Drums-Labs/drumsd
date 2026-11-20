@@ -102,7 +102,7 @@ jobs:
       contents: write   # gh release create
       id-token: write   # the OIDC token cosign exchanges for a short-lived Fulcio certificate
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release
           path: out
