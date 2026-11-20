@@ -106,7 +106,7 @@ jobs:
         with:
           name: release
           path: out
-      - uses: sigstore/cosign-installer@v3.7.0
+      - uses: sigstore/cosign-installer@v4.1.3
       - name: sign and verify with the same identity users pin
         working-directory: out
         env:
