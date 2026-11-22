@@ -1,4 +1,4 @@
-//! The lab verifiers the release ships (A-13) hash to what install/lock.json approves.
+//! The lab verifiers the release ships hash to what install/lock.json approves.
 
 use std::path::Path;
 

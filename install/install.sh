@@ -108,13 +108,17 @@ mapfile -t PKGS < <(python3 -c "import json; d=json.load(open('$LOCK'))['apt']['
 # the snapshot service and the mirrors fail transiently (503, "mirror sync in progress"): bounded retry with backoff,
 # every failed attempt logged and its output kept; the snapshot pin and the version check below are unchanged
 . "$REL/install/retry.sh"
+. "$REL/install/libc-follow.sh"
 RETRY_LOG_DIR="$D"; mkdir -p "$D"
 say "apt: ${#PKGS[@]} pinned packages from snapshot.ubuntu.com ($SNAP); 1-10 min depending on the snapshot service"
 with_progress "apt update" retry "apt update (snapshot $SNAP)" apt-get update -qq --snapshot "$SNAP" || die "apt update (snapshot $SNAP), ${DRUMS_RETRY_ATTEMPTS:-5} attempts"
+# a host image newer than the snapshot (its libc6 ahead of the snapshot's libc6-dev) would stop the install with "held
+# broken packages": libc6-dev follows the host's libc6 instead (install/libc-follow.sh says why and how)
+libc_dev_follow "$SNAP" || die "apt: libc6-dev for the host's libc6 $(dpkg-query -W -f='${Version}' libc6) (log: $D/libc-follow.log)"
 # --allow-downgrades: an install over a host where unattended-upgrades moved a pinned package (sota-t2b-a: ca-certificates,
 # python3-pil) is put back to the pinned version; the lock, not the host, decides. The timer is stopped below so it
 # does not happen again on a Drums host (a reinstall on a stale host is the owner's call, with the pins).
-with_progress "apt install" retry "apt install" apt-get install -y -qq --no-install-recommends --allow-downgrades --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
+with_progress "apt install" retry "apt install" apt-get install -y -q --no-install-recommends --allow-downgrades --snapshot "$SNAP" "${PKGS[@]}" > "$D/apt-install.log" 2>&1 || { tail -30 "$D/apt-install.log"; die "apt install"; }
 systemctl disable --now unattended-upgrades.service apt-daily-upgrade.timer apt-daily.timer > /dev/null 2>&1 || true
 for pv in "${PKGS[@]}"; do
   p=${pv%%=*}; want=${pv#*=}; got=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || true)
@@ -128,16 +132,16 @@ t=$(date +%s)
 cat > /etc/sysctl.d/60-drums-slots.conf <<'EOF'
 # CRIU creates every restored inotify instance as uid 0, so every slot on the host shares one per-user count.
 # 8192 stopped a host at about 300 GNOME slots. An instance costs ~1 KiB, a watch ~0.1 KiB, both charged to the
-# creating task's memory cgroup (the slot's), so memory.max still bounds them (drums-info oom-inotify 20261030T0344Z).
+# creating task's memory cgroup (the slot's), so memory.max still bounds them (measured on one host, 2026-10-30).
 fs.inotify.max_user_instances = 131072
 fs.inotify.max_user_watches = 4194304
 # Pipe buffers are charged per host uid. Past the soft limit (16384 pages = 64 MiB for the whole host) the kernel gives
 # new pipes one page and refuses F_SETPIPE_SZ to an unprivileged user, so CRIU's pipe restore fails ("Can't restore pipe
 # size: Operation not permitted"). Every env restored from one image used to run as the same host uids (hardened: 100000+),
 # and even with one uid range per env (idrange.rs) the origin's range is shared by its live children at fork time:
-# fork children of LibreOffice desktops failed at 12 concurrent forks (drums-info sota/t6 20261108T0659Z); 79 of 1,972
-# resets and 74 of 176 creates failed at 128 desktops (drums-info sota/t2); every restore failed past ~250 desktops on
-# one r8i.16xlarge (sota/t3 smoke1). Pipe buffers are charged to the writer's memory cgroup (the env's), so memory.max
+# fork children of LibreOffice desktops failed at 12 concurrent forks (one host, 2026-11-08); 79 of 1,972
+# resets and 74 of 176 creates failed at 128 desktops (one host); every restore failed past ~250 desktops on
+# one r8i.16xlarge (one smoke run). Pipe buffers are charged to the writer's memory cgroup (the env's), so memory.max
 # still bounds them; 0 = no soft limit.
 fs.pipe-user-pages-soft = 0
 EOF
@@ -231,7 +235,7 @@ install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
 # lab verifiers (docs/custom-tasks.md): root-owned, so a task can name one but never supply its code
 install -d -m 0755 -o root -g root "$E/verifiers"
-# the release's lab verifiers (docs/design/verifier-sandbox.md, A-13): checked against the lock's sha256, installed by
+# the release's lab verifiers (docs/design/verifier-sandbox.md): checked against the lock's sha256, installed by
 # name (tasks that name "drums_t6" work as before) and seeded into the verifier store by hash (tasks that name its
 # verifier_sha256 run it in the sandbox), so a fresh host scores the factory's tasks out of the box
 install -d -m 0755 -o root -g root /var/lib/drums/verifiers
@@ -249,10 +253,10 @@ done
 id drums-verify >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin drums-verify
 # task assets (docs/custom-tasks.md): the only host directory a task's upload_file step can read
 install -d -m 0755 -o root -g root /var/lib/drums/assets
-# the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
+# the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums*.whl): the release's own, checked above
 rm -rf "$O/sdk"; install -d -m 0755 "$O/sdk"
-for w in "$REL"/sdk/drums-*-py3-none-any.whl; do [ -f "$w" ] && install -m 0644 "$w" "$O/sdk/"; done
-ls "$O"/sdk/drums-*.whl > /dev/null 2>&1 || die "the release has no SDK wheel (sdk/drums-*.whl)"
+for w in "$REL"/sdk/drums*-py3-none-any.whl; do [ -f "$w" ] && install -m 0644 "$w" "$O/sdk/"; done
+ls "$O"/sdk/drums*.whl > /dev/null 2>&1 || die "the release has no SDK wheel (sdk/drums*.whl)"
 phase drumsd $t
 
 # ------------------------------------------------------------------------------------------------ 7. OSWorld checkers (hashed Python lock, unprivileged user)
@@ -468,7 +472,7 @@ cat <<EOF
    token:  in $E/token (root only, mode 0600; not printed). Read it with:  sudo cat $E/token
    image:  $(lk runtime.image_id)
  From another machine:  ssh -L $PORT:127.0.0.1:$PORT <this host>   then use http://127.0.0.1:$PORT
-   SDK (any user):  python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install $(ls "$O"/sdk/drums-*.whl)
+   SDK (any user):  python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install $(ls "$O"/sdk/drums*.whl)
    export DRUMS_URL=$URL DRUMS_TOKEN=\$(sudo cat $E/token)
    import drums; c = drums.connect(); env = c.create(image="$(lk runtime.image_id)")
  Leases: an env or saved state unused for 30 min is reaped (create/fork/save take idle_timeout=, ttl=).

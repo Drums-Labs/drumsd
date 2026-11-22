@@ -2,7 +2,7 @@
 Each trial: create a Chrome env with the OSWorld task, wait for its gates, do the trigger action, then fork(N)
 IMMEDIATELY (no sleep), and record every child's verdict and the alive-gate detail.
 
-    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/readiness_host.py --mode MODE --trials 20 --children 2 --out out.json
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/readiness_host.py --mode MODE --trials 20 --children 2 --out out.json
 
 Modes: slow_exit (a helper ends one thread every 250 ms after SIGTERM, then exits: the exiting-process case),
 close_window / pkill_chrome / tabclose / kill_renderer (Chrome shutting down, or a tab closed, just before the fork),

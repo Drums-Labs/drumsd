@@ -2,7 +2,8 @@
 # make-release.sh OUT_DIR  -- on a machine with the four repos: a self-contained release for install.sh.
 #   DRUMS_CRIU=path/to/drums-criu  DRUMS_SDK=path/to/drums-python-sdk (Drums-Labs/drums-python-sdk)
 # The release holds install.sh, install/ (lock, hashed Python lock, bring-up), python/ (the runtime's Python side),
-# git bundles of drumsd (this commit) and drums-criu (the commit pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl, built from the
+# LICENSE, NOTICE and THIRD_PARTY_LICENSES, git bundles of drumsd (this commit) and drums-criu (the commit pinned in
+# install/lock.json) and nothing else under sources/, the SDK wheel (sdk/drums*.whl, built from the
 # Drums-Labs/drums-python-sdk commit pinned in install/lock.json), the user docs
 # (README.md, CHANGELOG.md, docs/ incl. docs/install.md and docs/release-notes/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
@@ -19,10 +20,10 @@ R="$OUT/drums-release-${C:0:12}"
 rm -rf "$R"; mkdir -p "$R/sources"
 # only the committed files of install/ (an untracked file such as a __pycache__ of a test run must not ship)
 git -C "$HERE" archive --format=tar HEAD install python | tar -x -C "$R"; cp "$R/install/install.sh" "$R/install.sh"
-# the user docs, from the same commit: a customer reads these, not the wheel's source
-git -C "$HERE" archive --format=tar HEAD CHANGELOG.md docs examples api/openapi.json verifiers | tar -x -C "$R"
+# the user docs and the licence files, from the same commit: a customer reads these, not the wheel's source
+git -C "$HERE" archive --format=tar HEAD CHANGELOG.md docs examples api/openapi.json verifiers LICENSE NOTICE THIRD_PARTY_LICENSES | tar -x -C "$R"
 mv "$R/docs/README.md" "$R/README.md"
-for f in README.md docs/install.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md docs/architecture.md docs/reward-audit.md docs/release-notes/rc1.md docs/design/verifier-sandbox.md api/openapi.json verifiers/drums_t6.py; do
+for f in LICENSE NOTICE THIRD_PARTY_LICENSES README.md docs/install.md CHANGELOG.md python/sharedos_rootfs/__init__.py python/README.md docs/host-requirements.md docs/actions-and-observations.md docs/validity.md docs/lifecycle.md docs/custom-tasks.md docs/security.md docs/procview.md docs/architecture.md docs/reward-audit.md docs/release-notes/rc1.md docs/design/verifier-sandbox.md api/openapi.json verifiers/drums_t6.py; do
   [ -s "$R/$f" ] || { echo "release is missing $f" >&2; exit 1; }
 done
 # the shipped lab verifiers hash to what the lock approves (the installer checks the same from the drumsd bundle)
@@ -53,4 +54,7 @@ python3 "$HERE/install/build_wheel.py" "$S" "$R/sdk" > /dev/null
 # (Linux) does not know; GNU tar stores no xattrs unless asked and takes --no-xattrs.
 if tar --version 2>/dev/null | grep -q 'GNU tar'; then TARX=(--no-xattrs); else TARX=(--no-mac-metadata --no-xattrs); fi
 COPYFILE_DISABLE=1 tar "${TARX[@]}" -C "$OUT" -czf "$R.tar.gz" "$(basename "$R")"
-sha256sum "$R.tar.gz"
+# refuse a tarball that carries anything it must not (another repository's bundle, internal paths, keys, account ids;
+# install/check-release.py says what); a refused tarball is deleted so it cannot be uploaded by mistake
+python3 "$HERE/install/check-release.py" "$R.tar.gz" || { rm -f "$R.tar.gz"; echo "release refused by install/check-release.py" >&2; exit 1; }
+if command -v sha256sum > /dev/null; then sha256sum "$R.tar.gz"; else shasum -a 256 "$R.tar.gz"; fi

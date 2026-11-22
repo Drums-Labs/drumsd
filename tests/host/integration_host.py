@@ -1,6 +1,6 @@
 """Integration test against a real drumsd on a Linux host (root daemon, adopted checkpoint `clean`).
 
-    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/integration_host.py OUT_DIR
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/integration_host.py OUT_DIR
 
 Each check prints one JSON line and is appended to OUT_DIR/integration.jsonl; the exit code is the number of failed
 checks. Needs: drumsd running (restart script /opt/drumsd/restart.sh CONFIG), checkpoint `clean` adopted."""

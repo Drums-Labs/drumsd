@@ -94,9 +94,15 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
    ```
 
    It writes `OUT_DIR/drums-release-<commit12>/` and `drums-release-<commit12>.tar.gz`: `install.sh`, `install/`,
-   git bundles of drumsd and drums-criu at the pinned commits, `python/`, the SDK wheel built from the pinned SDK commit
-   (`install/build_wheel.py`, standard library only), the user docs (`README.md`, `docs/install.md`, `CHANGELOG.md`,
-   `docs/`, `examples/`, `api/openapi.json`), `RELEASE_COMMIT` and `SHA256SUMS`. It prints the tarball's sha256.
+   `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES`, git bundles of drumsd and drums-criu at the pinned commits (and no
+   other bundle), `python/`, the SDK wheel built from the pinned SDK commit (`install/build_wheel.py`, standard
+   library only), the user docs (`README.md`, `docs/install.md`, `CHANGELOG.md`, `docs/`, `examples/`,
+   `api/openapi.json`), `RELEASE_COMMIT` and `SHA256SUMS`. Then `install/check-release.py` checks the tarball: an
+   allow list of entries, exactly those two bundles (drumsd's must be this repository's history, drums-criu's must
+   contain upstream v4.3), the licence files, `SHA256SUMS`, and no keys, internal paths, internal host names or
+   account ids in any file, in the wheel, or in the bundles' history. A refused tarball is deleted. Put private
+   patterns of your own in a file outside the repository and point `DRUMS_RELEASE_DENYLIST` at it. On success it
+   prints the tarball's sha256.
 5. Install it on a fresh host of the type `docs/host-requirements.md` names (`sudo ./install.sh`), then run the host
    tests above against it. The release is good when `integration_host.py` and `recovery_host.py` exit 0.
 6. Tag the drumsd commit (`vX.Y.Z`) and tag the pinned drums-criu and SDK commits with the same version. Pushing the
@@ -106,6 +112,13 @@ A release is a self-contained tarball that `install.sh` installs on a fresh host
    with `install/verify-release.sh --require-signature`, and creates a **draft** release with the tarball, the
    `.sha256`, the `.sigstore.json` and `verify-release.sh`. The signature is a public Rekor entry naming the repository,
    the workflow and the tag.
+
+   The workflow checks out drums-criu and drums-python-sdk at the pinned commits. Public repositories need no
+   token. While either is private, the tag build needs a repository secret `RELEASE_SOURCES_TOKEN`: a fine-grained
+   personal access token, resource owner Drums-Labs, repository access limited to `drums-criu` and
+   `drums-python-sdk`, permission **Contents: Read-only** and nothing else, with a short expiry
+   (`gh secret set RELEASE_SOURCES_TOKEN -R Drums-Labs/drumsd`). Only the tag build reads it; pull requests use the
+   default token, so on a pull request the build part works only once both repositories are public.
 7. Download the draft's four files and check them the way a user does (`docs/install.md` section 2):
 
    ```

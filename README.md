@@ -437,5 +437,5 @@ destroy, the gate set, leases, retention, crash recovery, the installer on Ubunt
 procview, `drums-pool` (many hosts), `drumsd-os` (Android and Windows pools). Not supported yet: images other than the
 pinned OSWorld Ubuntu image, GPUs, network access from inside a desktop. Releases are tagged `vX.Y.Z` on this
 repository with the matching drums-criu and SDK tags; the changelog is [CHANGELOG.md](CHANGELOG.md). The Cargo
-crate version (`0.4.2`, what `/v1/health` reports as `version`) is the internal runtime line the daemon came
-from, not the release tag; aligning the two is proposed for v0.2.2.
+crate version (`0.4.3` in v0.2.2, what `/v1/health` reports as `version`) is the internal runtime line the daemon
+came from, not the release tag.

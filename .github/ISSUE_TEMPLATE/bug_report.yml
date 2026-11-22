@@ -11,7 +11,7 @@ body:
     attributes:
       label: Version
       description: The release tag, or `RELEASE_COMMIT` of the tarball, or the commit of your build.
-      placeholder: v0.2.1
+      placeholder: v0.2.2
     validations:
       required: true
   - type: input

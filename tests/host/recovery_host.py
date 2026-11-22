@@ -11,7 +11,7 @@
   D. template server SIGKILLed: the next reset finds it gone, starts a new one before restoring (or retries if it died
      mid-request), and the episode is valid.
 
-    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/recovery_host.py OUT.json
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/recovery_host.py OUT.json
 """
 import glob
 import json

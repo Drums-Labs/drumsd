@@ -1,4 +1,4 @@
-//! The step-argument limit, stated once (A-20, A-21). The same numbers hold for an action (`POST /v1/slots/{id}/step`)
+//! The step-argument limit, stated once. The same numbers hold for an action (`POST /v1/slots/{id}/step`)
 //! and for a task's setup and postconfig steps (`config`, `evaluator.postconfig`), and they are the Drums gateway's:
 //!
 //! * one command string (a `command` given as a string, or one element of a `command` list): at most

@@ -1,12 +1,40 @@
 # Changelog
 
-Releases are tagged `vX.Y.Z` on this repository (the Cargo crate version, 0.4.2, is the internal line the daemon
-came from; aligning it with the release tags is proposed for v0.2.2). Entries say what changed, correctness first, then security,
+Releases are tagged `vX.Y.Z` on this repository (the Cargo crate version, 0.4.3 in v0.2.2, is the internal line the daemon
+came from and is not aligned with the release tags). Entries say what changed, correctness first, then security,
 then performance, then pins.
 
-## v0.2.2 (unreleased)
+## v0.2.2, 2026-11-24
 
-- **Signed releases, verified before install** (A-01). `.github/workflows/release.yml` builds the tarball with
+**Release packaging**
+- **A release can no longer ship another repository's history.** v0.2.1's tarball carried
+  `sources/drums-lab.bundle`, the full history of a private repository, and no `LICENSE` or `NOTICE`. Do not use
+  v0.2.1; install v0.2.2 or later. `install/make-release.sh` now ships `LICENSE`, `NOTICE` and
+  `THIRD_PARTY_LICENSES` and runs `install/check-release.py` on the tarball it wrote, deleting it when the check
+  refuses. The check allows only the expected top-level entries, exactly the drumsd and drums-criu bundles (drumsd's
+  anchored to this repository's root commit, drums-criu's to upstream CRIU v4.3), one SDK wheel and a matching
+  `SHA256SUMS`, and refuses keys, internal paths, internal host names and account ids in any file, in the wheel and
+  in the bundles' history. `release.yml` runs it again before upload; CI runs `install/tests/test_check_release.py`.
+- **The release builds the current SDK.** `install/build_wheel.py` builds drums-sdk 0.3 and later (distribution
+  `drums-sdk`, package `drums`, `mcp_tools.json` package data, the `drums` console script, PEP 639 licence and
+  `License-File`). The release's wheel is `sdk/drums_sdk-0.4.0-py3-none-any.whl`; its `drums/` files are identical to
+  the PyPI 0.4.0 wheel. The installer and host-test commands take `sdk/drums*.whl`.
+- `release.yml` can build while drums-criu or drums-python-sdk is private: tag builds use an optional read-only
+  `RELEASE_SOURCES_TOKEN` (CONTRIBUTING.md#releases); pull requests use the default token.
+- Pins: drums-sdk `v0.4.0` (`cb45935`); drums-criu unchanged (`dd8c05657`). Crate version 0.4.3.
+
+**Installer**
+- **Installs on the current stock Ubuntu 24.04 AMI.** The 2026-11-20 AMI ships libc6 2.39-0ubuntu8.12, newer than the
+  release's apt snapshot (20261029T000000Z, libc6-dev 2.39-0ubuntu8.9). libc6-dev depends on libc6 of exactly its own
+  version, and apt does not downgrade an essential package it was not asked for, so v0.2.1's `install.sh` stopped
+  with "held broken packages". When the host's libc6 is newer than the snapshot's libc6-dev, `install.sh` now installs
+  libc6-dev and libc-dev-bin at exactly the host's libc6 version from the host's own Ubuntu archive
+  (`install/libc-follow.sh`); everything else still comes from the snapshot and is checked against the pins. On a
+  host whose libc6 matches the snapshot nothing changes. The apt install log now keeps apt's unmet-dependency lines
+  (`-q`, not `-qq`), so the reason for a failure shows up in it. Test: `install/tests/test_libc_follow.sh`.
+
+**Runtime**
+- **Signed releases, verified before install**. `.github/workflows/release.yml` builds the tarball with
   `install/make-release.sh`, writes its `.sha256`, signs it with Sigstore keyless (GitHub OIDC, no long-lived key) and
   attaches tarball, `.sha256`, `.sigstore.json` and `install/verify-release.sh` to a draft release on a `v*` tag; a pull
   request that touches `install/` only builds it. `install/verify-release.sh [--require-signature]` checks the checksum
@@ -15,7 +43,7 @@ then performance, then pins.
   can carry a tampered checker), so proof of origin is the separately downloaded `verify-release.sh`, run before
   unpacking (docs/install.md). In the same pass it installs the hash-pinned lab verifier and the
   `drums-verify` user (below); `install/tests/test_install_one_pass.sh` checks that order.
-- **Clients can upload their own checker, and it runs confined** (A-13; design: `docs/design/verifier-sandbox.md`).
+- **Clients can upload their own checker, and it runs confined** (design: `docs/design/verifier-sandbox.md`).
   `POST /v1/verifiers` stores a lab verifier by the sha256 of its bytes (1 MiB cap, UTF-8; `GET`/`DELETE
   /v1/verifiers/{sha256}`). A task names it with `evaluator.verifier_sha256`; create and task load answer 422
   `verifier_missing` when the host lacks it. Such a checker never runs as a host process: each call (first score,
@@ -30,7 +58,7 @@ then performance, then pins.
 - **The release ships the factory's lab verifier.** `verifiers/drums_t6.py` (drums-verifiers `abd9755`), pinned by
   sha256 in `install/lock.json`; the installer checks it, installs it as `/etc/drums/verifiers/drums_t6.py` and seeds
   the verifier store, so a fresh host scores the factory's tasks without an operator step.
-- **The step-argument limit, stated once** (A-20, A-21): 8,192 characters per command string, 256 argv items, 16,384
+- **The step-argument limit, stated once**: 8,192 characters per command string, 256 argv items, 16,384
   characters of pyautogui code, the same for actions and for task setup and postconfig steps
   (`drumsd_core::limits`, README "Step-argument limit"). `enforce_step_arg_limit` (default off, today's behaviour)
   refuses an over-limit action or task with 400 `step_arg_too_long` and `field`, `limit`, `length`, `unit` in the
@@ -43,8 +71,8 @@ invocation and `py_src` import keeps working. `install.sh` no longer fetches a d
 (default: its checkout's `python/`; `--lab` still accepted), `install/make-release.sh` ships `python/` instead of
 `sources/drums-lab.bundle` and no longer takes `DRUMS_LAB`, and `install/lock.json` has no `sources.drums-lab` entry.
 Not carried over: `sharedos_rootfs/criu_patch/` (already drums-criu `7b46284`), the lock-restore briefs, `host/install_criu.sh`
-(upstream CRIU; drumsd builds drums-criu) and `oci_reference` (the benchmark's control arm). The drums-lab history is kept
-on `archive/drums-lab-f17644b` of Drums-Labs/drums-research-history. Tests: `python/tests` (285 passed, 2 skipped on
+(upstream CRIU; drumsd builds drums-criu) and `oci_reference` (the benchmark's control arm). The earlier drums-lab history is kept
+in a private archive. Tests: `python/tests` (285 passed, 2 skipped on
 Ubuntu 24.04; see `python/README.md`).
 - Repository: README, `docs/install.md` (was `QUICKSTART.md`), `docs/architecture.md`, `docs/release-notes/` (the
   RC1 and v0.2.0 notes, from the root), `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and PR templates, Dependabot,
@@ -117,8 +145,7 @@ no new features beyond the profile switch below.
   and a metadata firewall. drumsd restores such checkpoints on the idmapped image view with `userxattr` and the host
   device binds. A branch gets its origin's directory access. The installer pins `uidmap` and `python3-seccomp` and
   delegates `root:100000:6553600` in `/etc/subuid` and `/etc/subgid`. `--trusted-unhardened` (`"harden": false`) is
-  the opt-out, for hosts that run only trusted code. Hardened-by-default and the opt-out are the coordinator's
-  recommendation; the owner has not yet approved them.
+  the opt-out, for hosts that run only trusted code. Hardened is the default.
 - **The per-env memory/CPU view (from 0.5) is opt-in:** `--procview` ([docs/procview.md](docs/procview.md)).
 - **From 0.5:** one template-server start at a time (concurrent creates after a reinstall failed); per-gate
   state-hash timing; `--swap-mib`.

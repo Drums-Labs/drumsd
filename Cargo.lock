@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "drums-pool"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "axum",
  "reqwest",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "drumsd"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "axum",
  "drumsd-core",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "drumsd-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "hex",
  "regex",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "drumsd-linux"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aya",
  "drumsd-core",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "drumsd-os"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "hex",
  "regex",

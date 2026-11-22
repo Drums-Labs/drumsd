@@ -2,7 +2,7 @@
 //!
 //! Without it every app in an env reads the host's /proc/meminfo (185-496 GiB) and CPU count, and sizes caches and
 //! thread pools for the host. GIMP sizes its tile cache to half of "physical memory" and is then OOM-killed inside
-//! its 4 GiB env, which a 4 GiB VM never does (drums-info rl-ab 20261030T0545Z round 2).
+//! its 4 GiB env, which a 4 GiB VM never does (measured on one host, 2026-10-30).
 //!
 //! Two parts, both keyed on the cgroup of the task that asks (so a fork child, a restored tree and a task inside a
 //! nested namespace each see their own slot, with nothing per process to checkpoint or copy):

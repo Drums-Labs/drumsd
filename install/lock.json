@@ -86,15 +86,16 @@
       "branch": "release/v0.2",
       "commit": "dd8c056578f9b5d402873b5932ae5d6dce245a06",
       "tag": null,
-      "note": "release/v0.2 dd8c05657 = drums-main b4fbfddf1 (rc1) + sota/t4 bfdd3e062 (--userns-remap, for drumsd idrange) + sota/t2 d4a05d1e1 + sota/t2b 6600614ba; one conflict in criu/config.c (both took getopt code 1107: userns-remap keeps 1107, prev-images-uptime moves to 1108). sota/t2b = sota/t2 d4a05d1e1 + template fill from an incremental image's parent chain (344fd0a2a), --prev-images-uptime, --parent-template-only and template restores of incremental images (6600614ba). Gates: runbooks/sota/t2b. sota/t2 = rc1 b4fbfddf1 + parallel template fill (9bc7812a9), per-VMA log lines at debug level (faac1aad7), template mark tracking and forked-subtree unmap (d4a05d1e1). Gates: runbooks/sota/t2. rc1 note: rc1 = fix/pkeys-userns b4fbfddf1: drums-main 358380f66 + fix/ip6tables fbbd7c20a (a dump unlocks only the network lock it took) + fix/userns-slot (dump/restore of a slot in its own user namespace: 549eedbc4, 7cb53173f, tests 9ab683f62, a17b78241) + memory protection keys across C/R (dfb7ae3fa, ad88c44d2, f100f93c0, 52ac59456; tests b8859f65e, b4fbfddf1; the restored-Chrome crash in fork children). Gates: runbooks/userns-appcompat, fork-chrome-crash, rc1",
+      "note": "release/v0.2 dd8c05657: drums-main b4fbfddf1 plus --userns-remap (for drumsd idrange), parallel template fill, template mark tracking and forked-subtree unmap, template fill from an incremental image's parent chain, --prev-images-uptime and --parent-template-only. The release ships this commit as sources/drums-criu.bundle (GPL-2.0 source next to the binary).",
       "reference_binary_sha256": "informational only",
       "reference_binary_note": "CRIU builds are not byte-reproducible; the installer prints its own build's sha256"
     },
     "drums-sdk": {
       "repo": "Drums-Labs/drums-python-sdk",
-      "branch": "release/v0.2",
-      "commit": "f8124aca104a97656dce3d88463c1276cbe52e7b",
-      "note": "the Python SDK (0.2.5) release/v0.2 = main e57df43 + sota/t6 6c49b27 (Reward.audit/audit_flags/trusted, drums.hybrid, drums.mcp) + c243c53 (no committed __pycache__) + f8124ac (Env.prefork, carried over from drumsd sota/t2b python/); make-release.sh builds sdk/drums-*.whl from this commit"
+      "branch": "main",
+      "commit": "cb45935cc54f457f5742c6c1681dc459bb5a735c",
+      "note": "the Python SDK 0.4.0 (tag v0.4.0, the release on PyPI); make-release.sh builds sdk/drums_sdk-0.4.0-py3-none-any.whl from this commit with install/build_wheel.py, and its drums/ files are identical to the PyPI wheel",
+      "tag": "v0.4.0"
     },
     "osworld": {
       "repo": "https://github.com/xlang-ai/OSWorld.git",
