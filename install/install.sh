@@ -231,7 +231,7 @@ install -D -m 0755 "$O/src/drumsd/target/release/drumsd" "$O/bin/drumsd"
 install -D -m 0644 "$O/src/drumsd/osw/drums_osw.py" "$O/osw/drums_osw.py"
 # lab verifiers (docs/custom-tasks.md): root-owned, so a task can name one but never supply its code
 install -d -m 0755 -o root -g root "$E/verifiers"
-# the release's lab verifiers (docs/design/verifier-sandbox.md, A-13): checked against the lock's sha256, installed by
+# the release's lab verifiers (docs/design/verifier-sandbox.md): checked against the lock's sha256, installed by
 # name (tasks that name "drums_t6" work as before) and seeded into the verifier store by hash (tasks that name its
 # verifier_sha256 run it in the sandbox), so a fresh host scores the factory's tasks out of the box
 install -d -m 0755 -o root -g root /var/lib/drums/verifiers

@@ -1,8 +1,8 @@
 # Design: the sandboxed verifier runtime
 
 Status: implemented in drumsd 0.5 (store, upload API, confined execution, verdict hash, budgets, bundled `drums_t6`).
-Audit: A-13 (no way for a client to add a checker; the release ships none), A-15 (check kinds), A-26 (crash detail).
-Security posture: design note 2026-11-16 sections 5.2 and 5.3.
+Why: before this, a client had no way to add a checker and the release shipped none; it also covers new check kinds
+and crash detail.
 
 ## The problem
 
@@ -137,11 +137,11 @@ verdict. So:
 
 Nothing in their code: same `ctx`, same return value. What they can no longer do, and never should have: import a
 package outside the checker venv, open a network connection, read host files, or write anywhere but `ctx.workdir`.
-`drums_t6.py` does none of these (it was checked against the sandbox in the integration test). New check kinds (A-15:
-italic, highlight) change its bytes and so its hash; that is the point: a new version is a new hash, and a task set
+`drums_t6.py` does none of these (it was checked against the sandbox in the integration test). New check kinds (for
+example italic, highlight) change its bytes and so its hash; that is the point: a new version is a new hash, and a task set
 names the version it was validated with.
 
-### 9. Shipping `drums_t6` (A-13)
+### 9. Shipping `drums_t6`
 
 The release carries `verifiers/drums_t6.py` from the drumsd commit, with its sha256 pinned in `install/lock.json`
 (approved like CRIU's source pin). The installer checks the hash, installs it as `/etc/drums/verifiers/drums_t6.py`
