@@ -41,6 +41,45 @@ def fixture_sdk(d, version="9.8.7", init_version=None):
     return d
 
 
+PYPROJECT_04 = """[build-system]
+requires = ["setuptools>=77"]
+
+[project]
+name = "drums-sdk"
+version = "0.4.0"
+description = "fixture SDK, 0.4 layout"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.urls]
+Repository = "https://example.invalid/sdk"
+
+[project.scripts]
+drums = "drums.cli:main"
+
+[tool.setuptools]
+packages = ["drums"]
+
+[tool.setuptools.package-data]
+drums = ["mcp_tools.json"]
+"""
+
+
+def fixture_sdk_04(d):
+    os.makedirs(os.path.join(d, "drums"))
+    files = {"pyproject.toml": PYPROJECT_04, "LICENSE": "licence text\n", "drums/__init__.py": '__version__ = "0.4.0"\n',
+             "drums/cli.py": "def main():\n    return 0\n", "drums/mcp_tools.json": "{}\n", "drums/notes.txt": "x\n"}
+    for rel, text in files.items():
+        with open(os.path.join(d, rel), "w") as f:
+            f.write(text)
+    return d
+
+
+NEEDS_TOMLLIB = unittest.skipIf(build_wheel.tomllib is None, "the 0.4 layout needs tomllib (Python 3.11+, as on the hosts)")
+
+
 class WheelTests(unittest.TestCase):
     def test_wheel_is_reproducible_complete_and_importable(self):
         with tempfile.TemporaryDirectory() as s, tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
@@ -90,6 +129,37 @@ class WheelTests(unittest.TestCase):
                 build_wheel.build(src, o)
             self.assertIn("version mismatch", str(e.exception))
             self.assertEqual(os.listdir(o), [])
+
+    @NEEDS_TOMLLIB
+    def test_sdk_04_layout_dist_name_package_data_scripts_and_licence(self):
+        """The SDK from 0.3.0 on: distribution drums-sdk, package drums, an SPDX licence string with license-files,
+        a non-Python data file and a console script. The 0.2.x builder could not build it (the v0.2.2 gap)."""
+        with tempfile.TemporaryDirectory() as s, tempfile.TemporaryDirectory() as o:
+            src = fixture_sdk_04(s)
+            whl = build_wheel.build(src, o)
+            self.assertEqual(os.path.basename(whl), "drums_sdk-0.4.0-py3-none-any.whl")
+            di = "drums_sdk-0.4.0.dist-info"
+            with zipfile.ZipFile(whl) as z:
+                names = set(z.namelist())
+                meta = z.read(f"{di}/METADATA").decode()
+                self.assertEqual(z.read(f"{di}/entry_points.txt").decode(), "[console_scripts]\ndrums = drums.cli:main\n")
+                self.assertEqual(z.read(f"{di}/licenses/LICENSE"), b"licence text\n")
+                self.assertEqual(z.read("drums/mcp_tools.json"), b"{}\n")
+            self.assertTrue({"drums/__init__.py", "drums/cli.py", "drums/mcp_tools.json", f"{di}/RECORD",
+                             f"{di}/WHEEL", f"{di}/top_level.txt"} <= names, names)
+            self.assertNotIn("drums/notes.txt", names)   # not named in package-data
+            for line in ("Metadata-Version: 2.4", "Name: drums-sdk", "License-Expression: Apache-2.0",
+                         "License-File: LICENSE", "Project-URL: Repository, https://example.invalid/sdk"):
+                self.assertIn(line + "\n", meta)
+
+    @NEEDS_TOMLLIB
+    def test_missing_package_data_fails(self):
+        with tempfile.TemporaryDirectory() as s, tempfile.TemporaryDirectory() as o:
+            src = fixture_sdk_04(s)
+            os.remove(os.path.join(src, "drums", "mcp_tools.json"))
+            with self.assertRaises(SystemExit) as e:
+                build_wheel.build(src, o)
+            self.assertIn("mcp_tools.json matches no file", str(e.exception))
 
     @unittest.skipUnless(os.environ.get("DRUMS_TEST_PIP") == "1", "set DRUMS_TEST_PIP=1 to pip install the wheel into a venv")
     def test_pip_installs_the_wheel_into_a_venv(self):
