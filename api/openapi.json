@@ -2,7 +2,7 @@
  "openapi": "3.1.0",
  "info": {
   "title": "drumsd",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Control plane for Drums desktop slots. A slot is one isolated desktop (own overlay root, namespaces, cgroup) restored from a CRIU checkpoint. Every create/reset starts an episode with a gate report; a rollout is usable only when the episode's validity is `valid`. Auth: every route except GET /healthz needs `Authorization: Bearer <token>` (generated at install, /etc/drums/token). The API listens on 127.0.0.1 unless the operator sets allow_remote. Names: the SDK's env, saved state, fork and save are this API's slot, checkpoint, branch and capture. Leases: an env or saved state nobody uses is reaped (defaults in drumsd.json `lease`, 1800 s idle; per request `idle_timeout_s`, `ttl_s`, 0 = never). Every request whose path names a slot (`/v1/slots/{id}...`) counts as a use of it. A destroyed slot answers 410 with code `env_gone` to every operation except GET and DELETE (DELETE is idempotent: 200 with the record)."
  },
  "paths": {
