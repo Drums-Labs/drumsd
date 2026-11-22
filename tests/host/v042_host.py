@@ -1,6 +1,6 @@
 """0.4.2 acceptance on an installed host (run as root, against the real drumsd): every fix the outside user needed.
 
-    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/v042_host.py OUT.json [--only validity,gone,lease,fork_state,state_lease,kill9,template_logs]
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/v042_host.py OUT.json [--only validity,gone,lease,fork_state,state_lease,kill9,template_logs]
 
   validity       a quarantined env is invalid everywhere: verify(strict=False) valid=False with verdict "invalid" and the
                  failed gate not_quarantined; strict verify raises InvalidEpisode naming the quarantine; the checker

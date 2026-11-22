@@ -249,10 +249,10 @@ done
 id drums-verify >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin drums-verify
 # task assets (docs/custom-tasks.md): the only host directory a task's upload_file step can read
 install -d -m 0755 -o root -g root /var/lib/drums/assets
-# the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums-*.whl): the release's own, checked above
+# the SDK as a wheel any user can install (pip install /opt/drums/sdk/drums*.whl): the release's own, checked above
 rm -rf "$O/sdk"; install -d -m 0755 "$O/sdk"
-for w in "$REL"/sdk/drums-*-py3-none-any.whl; do [ -f "$w" ] && install -m 0644 "$w" "$O/sdk/"; done
-ls "$O"/sdk/drums-*.whl > /dev/null 2>&1 || die "the release has no SDK wheel (sdk/drums-*.whl)"
+for w in "$REL"/sdk/drums*-py3-none-any.whl; do [ -f "$w" ] && install -m 0644 "$w" "$O/sdk/"; done
+ls "$O"/sdk/drums*.whl > /dev/null 2>&1 || die "the release has no SDK wheel (sdk/drums*.whl)"
 phase drumsd $t
 
 # ------------------------------------------------------------------------------------------------ 7. OSWorld checkers (hashed Python lock, unprivileged user)
@@ -468,7 +468,7 @@ cat <<EOF
    token:  in $E/token (root only, mode 0600; not printed). Read it with:  sudo cat $E/token
    image:  $(lk runtime.image_id)
  From another machine:  ssh -L $PORT:127.0.0.1:$PORT <this host>   then use http://127.0.0.1:$PORT
-   SDK (any user):  python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install $(ls "$O"/sdk/drums-*.whl)
+   SDK (any user):  python3 -m venv ~/drums-venv && ~/drums-venv/bin/pip install $(ls "$O"/sdk/drums*.whl)
    export DRUMS_URL=$URL DRUMS_TOKEN=\$(sudo cat $E/token)
    import drums; c = drums.connect(); env = c.create(image="$(lk runtime.image_id)")
  Leases: an env or saved state unused for 30 min is reaped (create/fork/save take idle_timeout=, ttl=).

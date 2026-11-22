@@ -6,7 +6,7 @@ host as root against a real installed drumsd:
      (this is how GIMP a746add2 died in runtime-v05: valid=True with score 0.0 before the fix)
   C. control: the same env with no allocation is valid.
 
-    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums-*.whl) python3 tests/host/oom_host.py OUT.json
+    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/oom_host.py OUT.json
 """
 import json
 import sys

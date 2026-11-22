@@ -2,7 +2,7 @@
 # make-release.sh OUT_DIR  -- on a machine with the four repos: a self-contained release for install.sh.
 #   DRUMS_CRIU=path/to/drums-criu  DRUMS_SDK=path/to/drums-python-sdk (Drums-Labs/drums-python-sdk)
 # The release holds install.sh, install/ (lock, hashed Python lock, bring-up), python/ (the runtime's Python side),
-# git bundles of drumsd (this commit) and drums-criu (the commit pinned in install/lock.json), the SDK wheel (sdk/drums-*.whl, built from the
+# git bundles of drumsd (this commit) and drums-criu (the commit pinned in install/lock.json), the SDK wheel (sdk/drums*.whl, built from the
 # Drums-Labs/drums-python-sdk commit pinned in install/lock.json), the user docs
 # (README.md, CHANGELOG.md, docs/ incl. docs/install.md and docs/release-notes/, examples/, api/openapi.json), RELEASE_COMMIT and SHA256SUMS.
 set -euo pipefail
