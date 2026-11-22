@@ -23,6 +23,16 @@ then performance, then pins.
   `RELEASE_SOURCES_TOKEN` (CONTRIBUTING.md#releases); pull requests use the default token.
 - Pins: drums-sdk `v0.4.0` (`cb45935`); drums-criu unchanged (`dd8c05657`). Crate version 0.4.3.
 
+**Installer**
+- **Installs on the current stock Ubuntu 24.04 AMI.** The 2026-11-20 AMI ships libc6 2.39-0ubuntu8.12, newer than the
+  release's apt snapshot (20261029T000000Z, libc6-dev 2.39-0ubuntu8.9). libc6-dev depends on libc6 of exactly its own
+  version, and apt does not downgrade an essential package it was not asked for, so v0.2.1's `install.sh` stopped
+  with "held broken packages". When the host's libc6 is newer than the snapshot's libc6-dev, `install.sh` now installs
+  libc6-dev and libc-dev-bin at exactly the host's libc6 version from the host's own Ubuntu archive
+  (`install/libc-follow.sh`); everything else still comes from the snapshot and is checked against the pins. On a
+  host whose libc6 matches the snapshot nothing changes. The apt install log now keeps apt's unmet-dependency lines
+  (`-q`, not `-qq`), so the reason for a failure shows up in it. Test: `install/tests/test_libc_follow.sh`.
+
 **Runtime**
 - **Signed releases, verified before install**. `.github/workflows/release.yml` builds the tarball with
   `install/make-release.sh`, writes its `.sha256`, signs it with Sigstore keyless (GitHub OIDC, no long-lived key) and
