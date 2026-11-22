@@ -83,7 +83,7 @@ jobs:
         run: shellcheck -S warning install/*.sh
       - name: install tests
         run: |
-          python3 -m unittest install/tests/test_build_wheel.py
+          python3 -m unittest install/tests/test_build_wheel.py install/tests/test_check_release.py
           for t in install/tests/test_*.sh; do bash "$t"; done
       - name: osw tests
         run: python3 -m unittest discover -s osw/tests

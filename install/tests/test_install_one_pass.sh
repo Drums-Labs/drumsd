@@ -25,6 +25,8 @@ r = sys.argv[1]
 v = json.load(open(f"{r}/install/lock.json"))["verifiers"]["drums_t6"]
 assert hashlib.sha256(open(f"{r}/{v['path']}", "rb").read()).hexdigest() == v["sha256"]
 PY
-grep -q 'api/openapi.json verifiers |' "$HERE/make-release.sh" && grep -q 'lab verifier {name}' "$HERE/make-release.sh" \
-  && ok "make-release.sh ships verifiers/ and checks it against the lock" || bad "make-release.sh"
+grep -q 'api/openapi.json verifiers LICENSE NOTICE THIRD_PARTY_LICENSES |' "$HERE/make-release.sh" && grep -q 'lab verifier {name}' "$HERE/make-release.sh" \
+  && ok "make-release.sh ships verifiers/ and the licence files and checks verifiers/ against the lock" || bad "make-release.sh"
+grep -q 'install/check-release.py" "$R.tar.gz" || { rm -f "$R.tar.gz"' "$HERE/make-release.sh" \
+  && ok "make-release.sh runs check-release.py on the tarball and deletes a refused one" || bad "make-release.sh check-release"
 exit $fail

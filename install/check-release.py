@@ -56,11 +56,12 @@ SECRET_PATTERNS = [
     ("GitHub token", re.compile(rb"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{40,}")),
     ("Drums API key", re.compile(rb"\bdrums_sk_[A-Za-z0-9]{24,}")),
 ]
+# the character classes ([U], [i], [a]) keep this file from matching its own patterns
 FILE_PATTERNS = SECRET_PATTERNS + [
-    ("macOS home path", re.compile(rb"/Users/[A-Za-z][A-Za-z0-9._-]*/")),
-    ("internal doc store citation", re.compile(rb"\bdrums-info\b")),
-    ("internal ssh host alias", re.compile(rb"\b(?:drums-linux(?:-big)?|drums-mac|studio-[ab])\b")),
-    ("private archive repository", re.compile(rb"\bdrums-research-history\b")),
+    ("macOS home path", re.compile(rb"/[U]sers/[A-Za-z][A-Za-z0-9._-]*/")),
+    ("internal doc store citation", re.compile(rb"\bdrums-[i]nfo\b")),
+    ("internal ssh host alias", re.compile(rb"\b(?:drums-l[i]nux(?:-big)?|drums-m[a]c|stud[i]o-[ab])\b")),
+    ("private archive repository", re.compile(rb"\bdrums-research-h[i]story\b")),
 ]
 TWELVE = re.compile(rb"(?<![0-9])[0-9]{12}(?![0-9])")
 FORBIDDEN_NAMES = re.compile(r"(^|/)(\.env[^/]*|id_(rsa|ed25519|ecdsa)[^/]*|[^/]*\.pem|[^/]*\.key|CHANGES-RC1\.md)$")
@@ -71,7 +72,9 @@ def extra_patterns() -> list:
     if not path:
         return []
     out = []
-    for line in open(path, encoding="utf-8"):
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for line in lines:
         line = line.strip()
         if line and not line.startswith("#"):
             out.append(("denylist pattern", re.compile(line.encode())))
@@ -92,7 +95,7 @@ def git(*args: str, cwd: str | None = None) -> str:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
 
 
-def check_bundle(path: str, name: str, release_commit: str, problems: list, drumsd_root: str) -> None:
+def check_bundle(path: str, name: str, release_commit: str, problems: list, drumsd_root: str, criu_base: str) -> None:
     heads = [ln.split() for ln in git("bundle", "list-heads", path).splitlines() if ln.strip()]
     refs = sorted(r for _, r in heads)
     want = f"refs/heads/release-{name}"
@@ -110,16 +113,16 @@ def check_bundle(path: str, name: str, release_commit: str, problems: list, drum
                 problems.append(f"sources/drumsd.bundle: root commit {roots} is not drumsd's ({drumsd_root})")
             rng = [head]
         else:
-            if subprocess.run(["git", "merge-base", "--is-ancestor", CRIU_BASE, head], cwd=d).returncode != 0:
-                problems.append(f"sources/drums-criu.bundle: does not contain CRIU v4.3 ({CRIU_BASE[:12]})")
+            if subprocess.run(["git", "merge-base", "--is-ancestor", criu_base, head], cwd=d).returncode != 0:
+                problems.append(f"sources/drums-criu.bundle: does not contain CRIU v4.3 ({criu_base[:12]})")
                 return
-            rng = [f"{CRIU_BASE}..{head}"]
+            rng = [f"{criu_base}..{head}"]
         hist = subprocess.run(["git", "log", "-p", "--no-color", "--format=%H %an%n%B", *rng], cwd=d,
                               capture_output=True, check=True).stdout
         scan(f"sources/{name}.bundle history", hist, SECRET_PATTERNS, problems)
 
 
-def check(tb: str, drumsd_root: str = DRUMSD_ROOT) -> list:
+def check(tb: str, drumsd_root: str = DRUMSD_ROOT, criu_base: str = CRIU_BASE) -> list:
     problems: list = []
     patterns = FILE_PATTERNS + extra_patterns()
     with tarfile.open(tb, "r:gz") as t:
@@ -181,7 +184,7 @@ def check(tb: str, drumsd_root: str = DRUMSD_ROOT) -> list:
                 p = os.path.join(d, b)
                 with open(p, "wb") as f:
                     f.write(files[f"sources/{b}"])
-                check_bundle(p, b[:-len(".bundle")], release_commit, problems, drumsd_root)
+                check_bundle(p, b[:-len(".bundle")], release_commit, problems, drumsd_root, criu_base)
     return problems
 
 
