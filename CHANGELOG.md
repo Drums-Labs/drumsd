@@ -43,8 +43,8 @@ invocation and `py_src` import keeps working. `install.sh` no longer fetches a d
 (default: its checkout's `python/`; `--lab` still accepted), `install/make-release.sh` ships `python/` instead of
 `sources/drums-lab.bundle` and no longer takes `DRUMS_LAB`, and `install/lock.json` has no `sources.drums-lab` entry.
 Not carried over: `sharedos_rootfs/criu_patch/` (already drums-criu `7b46284`), the lock-restore briefs, `host/install_criu.sh`
-(upstream CRIU; drumsd builds drums-criu) and `oci_reference` (the benchmark's control arm). The drums-lab history is kept
-on `archive/drums-lab-f17644b` of Drums-Labs/drums-research-history. Tests: `python/tests` (285 passed, 2 skipped on
+(upstream CRIU; drumsd builds drums-criu) and `oci_reference` (the benchmark's control arm). The earlier drums-lab history is kept
+in a private archive. Tests: `python/tests` (285 passed, 2 skipped on
 Ubuntu 24.04; see `python/README.md`).
 - Repository: README, `docs/install.md` (was `QUICKSTART.md`), `docs/architecture.md`, `docs/release-notes/` (the
   RC1 and v0.2.0 notes, from the root), `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and PR templates, Dependabot,
@@ -117,8 +117,7 @@ no new features beyond the profile switch below.
   and a metadata firewall. drumsd restores such checkpoints on the idmapped image view with `userxattr` and the host
   device binds. A branch gets its origin's directory access. The installer pins `uidmap` and `python3-seccomp` and
   delegates `root:100000:6553600` in `/etc/subuid` and `/etc/subgid`. `--trusted-unhardened` (`"harden": false`) is
-  the opt-out, for hosts that run only trusted code. Hardened-by-default and the opt-out are the coordinator's
-  recommendation; the owner has not yet approved them.
+  the opt-out, for hosts that run only trusted code. Hardened is the default.
 - **The per-env memory/CPU view (from 0.5) is opt-in:** `--procview` ([docs/procview.md](docs/procview.md)).
 - **From 0.5:** one template-server start at a time (concurrent creates after a reinstall failed); per-gate
   state-hash timing; `--swap-mib`.

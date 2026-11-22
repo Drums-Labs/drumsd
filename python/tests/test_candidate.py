@@ -288,7 +288,7 @@ class NetHelpersTests(unittest.TestCase):
         import importlib.util
         if importlib.util.find_spec("oci_reference") is None:
             import pytest
-            pytest.skip("oci_reference is the benchmark control arm, not shipped with drumsd; see drums-research-history archive/drums-lab-f17644b")
+            pytest.skip("oci_reference is the benchmark control arm, not shipped with drumsd")
         from oci_reference import driver as ref
         links = [{"ifindex": 1, "ifname": "lo", "mtu": 65536, "flags": ["LOOPBACK", "UP", "LOWER_UP"], "operstate": "UNKNOWN"}]
         addrs = [{"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host"}]}]

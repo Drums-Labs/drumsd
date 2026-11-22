@@ -128,16 +128,16 @@ t=$(date +%s)
 cat > /etc/sysctl.d/60-drums-slots.conf <<'EOF'
 # CRIU creates every restored inotify instance as uid 0, so every slot on the host shares one per-user count.
 # 8192 stopped a host at about 300 GNOME slots. An instance costs ~1 KiB, a watch ~0.1 KiB, both charged to the
-# creating task's memory cgroup (the slot's), so memory.max still bounds them (drums-info oom-inotify 20261030T0344Z).
+# creating task's memory cgroup (the slot's), so memory.max still bounds them (measured on one host, 2026-10-30).
 fs.inotify.max_user_instances = 131072
 fs.inotify.max_user_watches = 4194304
 # Pipe buffers are charged per host uid. Past the soft limit (16384 pages = 64 MiB for the whole host) the kernel gives
 # new pipes one page and refuses F_SETPIPE_SZ to an unprivileged user, so CRIU's pipe restore fails ("Can't restore pipe
 # size: Operation not permitted"). Every env restored from one image used to run as the same host uids (hardened: 100000+),
 # and even with one uid range per env (idrange.rs) the origin's range is shared by its live children at fork time:
-# fork children of LibreOffice desktops failed at 12 concurrent forks (drums-info sota/t6 20261108T0659Z); 79 of 1,972
-# resets and 74 of 176 creates failed at 128 desktops (drums-info sota/t2); every restore failed past ~250 desktops on
-# one r8i.16xlarge (sota/t3 smoke1). Pipe buffers are charged to the writer's memory cgroup (the env's), so memory.max
+# fork children of LibreOffice desktops failed at 12 concurrent forks (one host, 2026-11-08); 79 of 1,972
+# resets and 74 of 176 creates failed at 128 desktops (one host); every restore failed past ~250 desktops on
+# one r8i.16xlarge (one smoke run). Pipe buffers are charged to the writer's memory cgroup (the env's), so memory.max
 # still bounds them; 0 = no soft limit.
 fs.pipe-user-pages-soft = 0
 EOF
