@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust toolchain (the version install/lock.json pins)
         run: |
           TOOLCHAIN=$(python3 -c "import json; print(json.load(open('install/lock.json'))['rust_toolchain'])")
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust toolchain (the version install/lock.json pins)
         run: |
           TOOLCHAIN=$(python3 -c "import json; print(json.load(open('install/lock.json'))['rust_toolchain'])")
@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck install/*.sh
         run: shellcheck -S warning install/*.sh
       - name: install tests

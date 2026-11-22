@@ -43,7 +43,7 @@ jobs:
     outputs:
       name: ${{ steps.make.outputs.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           path: drumsd
@@ -57,7 +57,7 @@ jobs:
           print(f"sdk={s['drums-sdk']['commit']}")
           PY
       # full history: make-release.sh bundles the pinned drums-criu commit and checks both pins exist
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Drums-Labs/drums-criu
           ref: ${{ steps.pins.outputs.criu }}
@@ -65,7 +65,7 @@ jobs:
           path: drums-criu
           persist-credentials: false
           token: ${{ github.event_name == 'push' && secrets.RELEASE_SOURCES_TOKEN || github.token }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Drums-Labs/drums-python-sdk
           ref: ${{ steps.pins.outputs.sdk }}
