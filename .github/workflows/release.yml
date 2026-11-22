@@ -9,6 +9,15 @@
 #
 # The signature is a public Rekor transparency-log entry naming this repository, the workflow file and the tag.
 # Users verify with install/verify-release.sh (docs/install.md), which pins that identity.
+#
+# Sources: the build checks out Drums-Labs/drums-criu and Drums-Labs/drums-python-sdk at the commits install/lock.json
+# pins. With both repositories public the default token reads them and nothing else is needed. While either is
+# private, add a repository secret RELEASE_SOURCES_TOKEN: a fine-grained token with read-only "Contents" on those two
+# repositories and nothing else (CONTRIBUTING.md#releases). It is used only for those two read-only checkouts and only
+# on a tag push; pull requests (and forks) never see it and fall back to the default token.
+#
+# Before anything is uploaded, install/check-release.py refuses a tarball that holds another repository's bundle, no
+# LICENSE/NOTICE, keys, internal paths or account ids (v0.2.1 shipped a private repository's bundle).
 name: release
 
 on:
@@ -55,6 +64,7 @@ jobs:
           fetch-depth: 0
           path: drums-criu
           persist-credentials: false
+          token: ${{ github.event_name == 'push' && secrets.RELEASE_SOURCES_TOKEN || github.token }}
       - uses: actions/checkout@v4
         with:
           repository: Drums-Labs/drums-python-sdk
@@ -62,6 +72,7 @@ jobs:
           fetch-depth: 0
           path: drums-python-sdk
           persist-credentials: false
+          token: ${{ github.event_name == 'push' && secrets.RELEASE_SOURCES_TOKEN || github.token }}
       - name: the tag names this commit
         if: github.event_name == 'push'
         run: |
@@ -80,6 +91,8 @@ jobs:
           cat "$tb.sha256"
           cp "$GITHUB_WORKSPACE/drumsd/install/verify-release.sh" .
           bash verify-release.sh "$tb"
+          # make-release.sh already ran it; again here so the gate is visible in the log right before upload
+          python3 "$GITHUB_WORKSPACE/drumsd/install/check-release.py" "$tb"
           echo "name=$tb" >> "$GITHUB_OUTPUT"
           ls -l
       - uses: actions/upload-artifact@v4
