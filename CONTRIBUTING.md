@@ -43,7 +43,8 @@ for t in install/tests/test_*.sh; do bash "$t"; done       # install.sh output, 
 These run on an installed Linux host, as root, against the real daemon, with the SDK from the release's wheel:
 
 ```bash
-sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/integration_host.py OUT
+sudo DRUMS_URL=http://127.0.0.1:7070 DRUMS_TOKEN=$(sudo cat /etc/drums/token) \
+    PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/integration_host.py OUT
 sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/recovery_host.py OUT
 ```
 

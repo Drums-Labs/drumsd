@@ -1,9 +1,12 @@
-"""Integration test against a real drumsd on a Linux host (root daemon, adopted checkpoint `clean`).
+"""Integration test against a real drumsd on a Linux host (root daemon, an adopted clean checkpoint).
 
-    sudo PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/integration_host.py OUT_DIR
+    sudo DRUMS_URL=http://127.0.0.1:7070 DRUMS_TOKEN=$(sudo cat /etc/drums/token) \
+        PYTHONPATH=$(ls /opt/drums/sdk/drums*.whl) python3 tests/host/integration_host.py OUT_DIR
 
 Each check prints one JSON line and is appended to OUT_DIR/integration.jsonl; the exit code is the number of failed
-checks. Needs: drumsd running (restart script /opt/drumsd/restart.sh CONFIG), checkpoint `clean` adopted."""
+checks. Needs: drumsd running. On a host installed by install.sh the clean checkpoint is `osworld-ubuntu` and systemd
+restarts drumsd after a kill. A development host can set DRUMS_CLEAN_CHECKPOINT (for example `clean`) and keep the
+restart script /opt/drumsd/restart.sh CONFIG, which is used when it exists."""
 import json
 import os
 import subprocess
@@ -16,6 +19,8 @@ import drums
 OUT = sys.argv[1]
 os.makedirs(OUT, exist_ok=True)
 CONFIG = os.environ.get("DRUMSD_CONFIG", "/opt/drumsd/drumsd.json")
+CLEAN = os.environ.get("DRUMS_CLEAN_CHECKPOINT", "osworld-ubuntu")
+RESTART = "/opt/drumsd/restart.sh"
 failed = 0
 
 
@@ -112,11 +117,11 @@ try:
     check("release_kills_tree", rel["state"] == "down" and cg_procs == "0", state=rel["state"], cgroup_procs=cg_procs)
 
     # 7. the template server dies: the next reset restarts it and succeeds
-    ck = c.call("GET", "/v1/checkpoints/clean")
+    ck = c.call("GET", f"/v1/checkpoints/{CLEAN}")
     subprocess.run(["kill", "-9", str(ck["server_pid"])], check=False)
     time.sleep(0.3)
     e.reset()
-    ck2 = c.call("GET", "/v1/checkpoints/clean")
+    ck2 = c.call("GET", f"/v1/checkpoints/{CLEAN}")
     check("template_server_restarted", e.state == "ready" and ck2["server_pid"] != ck["server_pid"] and e.valid(), old=ck["server_pid"], new=ck2["server_pid"],
           attempts=e.record["cost"]["attempts"])
 
@@ -126,7 +131,18 @@ try:
     subprocess.run(["pkill", "-9", "-x", "drumsd"])
     p.wait()
     time.sleep(0.5)
-    subprocess.run(["/opt/drumsd/restart.sh", CONFIG], check=True)
+    if os.path.exists(RESTART):
+        subprocess.run([RESTART, CONFIG], check=True)
+    else:                                           # installed host: systemd restarts drumsd; wait for its health
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                c.call("GET", "/v1/health")
+                break
+            except drums.DrumsError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(1)
     r = c.call("GET", f"/v1/slots/{e2.id}")
     check("crash_mid_reset_reconciled", r["state"] in ("down", "ready"), state=r["state"], reason=r.get("reason"))
     e2.record = r
