@@ -24,10 +24,14 @@ built by this repository's `.github/workflows/release.yml` on a `v*` tag, with n
 [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 2.x.
 
 ```bash
-V=vX.Y.Z   # the release you want (signed releases start after v0.2.1)
+V=vX.Y.Z   # the release you want
 gh release download "$V" -R Drums-Labs/drumsd   # or download the four files from the releases page
 bash verify-release.sh --require-signature drums-release-*.tar.gz
 ```
+
+> **v0.2.2 is not signed.** It was built outside the release workflow, so it has no `.sigstore.json`. For v0.2.2, run
+> `bash verify-release.sh drums-release-*.tar.gz` without `--require-signature`: it checks the sha256 and warns that no
+> signature was checked. The sha256 is in the release notes. Signed releases resume with the next tag.
 
 Expected output (the hash is the release's own):
 
